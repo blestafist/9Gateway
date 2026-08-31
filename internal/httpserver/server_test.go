@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -98,6 +99,42 @@ func TestProxyForwardsMethodPathAndQuery(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("upstream did not receive request")
+	}
+}
+
+func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
+	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
+	body := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		gotBody, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read upstream request body: %v", err)
+			return
+		}
+		body <- gotBody
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/unknown", bytes.NewReader(wantBody))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /v1/unknown: %v", err)
+	}
+	response.Body.Close()
+
+	select {
+	case gotBody := <-body:
+		if !bytes.Equal(gotBody, wantBody) {
+			t.Fatalf("upstream body = %q, want %q", gotBody, wantBody)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive request body")
 	}
 }
 

@@ -45,7 +45,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	targetURL.RawQuery = request.URL.RawQuery
 	targetURL.Fragment = ""
 
-	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), nil)
+	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), request.Body)
 	if err != nil {
 		http.Error(response, "failed to create upstream request", http.StatusBadGateway)
 		return

@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T011`.
+Done: `T001`-`T012`.
 
-Current: `T012` - proxy request body.
+Current: `T013` - rewrite Authorization.
 
-Next: `T013`-`T018`.
+Next: `T014`-`T018`.
 
 Known issues: none.
 
