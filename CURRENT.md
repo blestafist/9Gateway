@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T014`.
+Done: `T001`-`T015`.
 
-Current: `T015` - preserve response status.
+Current: `T016` - copy end-to-end response headers.
 
-Next: `T016`-`T018`.
+Next: `T017`-`T018`.
 
 Known issues: none.
 

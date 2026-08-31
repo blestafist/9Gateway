@@ -173,6 +173,26 @@ func TestProxyCopiesEndToEndHeadersAndRemovesHopByHopHeaders(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesUpstreamResponseStatus(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/status")
+	if err != nil {
+		t.Fatalf("GET /v1/status: %v", err)
+	}
+	response.Body.Close()
+
+	if response.StatusCode != http.StatusTeapot {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusTeapot)
+	}
+}
+
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
 	body := make(chan []byte, 1)

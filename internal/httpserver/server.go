@@ -60,6 +60,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		http.Error(response, "upstream request failed", http.StatusBadGateway)
 		return
 	}
+	response.WriteHeader(upstreamResponse.StatusCode)
 	upstreamResponse.Body.Close()
 }
 
