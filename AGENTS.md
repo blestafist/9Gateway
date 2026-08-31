@@ -87,8 +87,10 @@ If a command is not applicable yet, state that explicitly in the task result.
 
 
 
+### Commit
+
+Do commit in style as commit history (git log) presents. Do it after completing a task Txxx.
+
 ---
-
-
 
 Update planning files / docs by yourself if you want sth to remember. Do not turn it into a huge docs. Current focus only
