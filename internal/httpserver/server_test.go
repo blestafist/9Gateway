@@ -330,6 +330,53 @@ func (roundTripper roundTripperFunc) RoundTrip(request *http.Request) (*http.Res
 	return roundTripper(request)
 }
 
+func TestProxyPropagatesHTTPClientCancellationToUpstream(t *testing.T) {
+	upstreamReceived := make(chan struct{})
+	upstreamCancelled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		close(upstreamReceived)
+		<-request.Context().Done()
+		close(upstreamCancelled)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	requestContext, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, gateway.URL+"/v1/slow", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	clientDone := make(chan struct{})
+	go func() {
+		response, _ := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		close(clientDone)
+	}()
+
+	select {
+	case <-upstreamReceived:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("upstream did not receive request")
+	}
+
+	cancel()
+	select {
+	case <-upstreamCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not observe client cancellation")
+	}
+	select {
+	case <-clientDone:
+	case <-time.After(time.Second):
+		t.Fatal("client request did not finish after cancellation")
+	}
+}
+
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
 	body := make(chan []byte, 1)

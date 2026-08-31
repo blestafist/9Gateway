@@ -4,7 +4,7 @@ Current milestone: minimal HTTP server and basic endpoints complete.
 
 Done: `T001`-`T019`.
 
-Current: `T020` - test client cancellation.
+Current: milestone complete; no active task.
 
 Next: none.
 
