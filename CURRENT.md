@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T008`.
+Done: `T001`-`T009`.
 
-Current: `T009` - add structured completion logs.
+Current: `T010` - create a reusable upstream client.
 
-Next: the raw reverse proxy in `T010`-`T018`.
+Next: `T011`-`T018`.
 
 Known issues: none.
 
