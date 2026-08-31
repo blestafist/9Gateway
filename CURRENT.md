@@ -1,14 +1,14 @@
 # Current Work
 
-Current milestone: repository skeleton and raw transport foundation.
+Current milestone: repository skeleton and configuration foundation.
 
-Done: `T001`.
+Done: `T001`-`T003`.
 
-Current: `T002` - add initial directories as they become useful.
+Current: `T004` - load YAML config from `--config`.
 
-Next: `T003`-`T005`, then the minimal HTTP server in `T006`-`T009`.
+Next: `T005`, then the minimal HTTP server in `T006`-`T009`.
 
-Known issues: Go is not installed in the current environment, so verification is pending.
+Known issues: none.
 
 Important: keep this milestone free of SQLite, authentication, limits, budgets
 and streaming protocol logic. Those capabilities begin only after the raw proxy
