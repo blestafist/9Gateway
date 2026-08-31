@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -63,6 +64,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	defer upstreamResponse.Body.Close()
 	copyEndToEndHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
+	_, _ = io.Copy(response, upstreamResponse.Body)
 }
 
 var hopByHopHeaders = map[string]struct{}{

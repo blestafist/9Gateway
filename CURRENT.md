@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T016`.
+Done: `T001`-`T017`.
 
-Current: `T017` - proxy ordinary response body.
+Current: `T018` - support unknown `/v1/*`.
 
-Next: `T018`-`T019`.
+Next: `T019`-`T020`.
 
 Known issues: none.
 

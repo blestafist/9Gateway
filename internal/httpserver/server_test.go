@@ -219,6 +219,36 @@ func TestProxyCopiesEndToEndResponseHeadersAndRemovesHopByHopHeaders(t *testing.
 	}
 }
 
+func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
+	wantBody := []byte("{\"id\":\"response-1\",\"choices\":[{\"text\":\"keep spacing\"}]}\n")
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write(wantBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/responses")
+	if err != nil {
+		t.Fatalf("GET /v1/responses: %v", err)
+	}
+	gotBody, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response body: %v", readErr)
+	}
+
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusCreated)
+	}
+	if !bytes.Equal(gotBody, wantBody) {
+		t.Fatalf("response body = %q, want %q", gotBody, wantBody)
+	}
+}
+
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
 	body := make(chan []byte, 1)
