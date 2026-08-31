@@ -4,7 +4,11 @@ import "net/http"
 
 // NewHandler returns the gateway's HTTP handler.
 func NewHandler() http.Handler {
-	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		http.NotFound(response, request)
-	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", health)
+	return mux
+}
+
+func health(response http.ResponseWriter, request *http.Request) {
+	response.WriteHeader(http.StatusOK)
 }

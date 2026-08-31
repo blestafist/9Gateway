@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T006`.
+Done: `T001`-`T007`.
 
-Current: `T007` - add the health endpoint.
+Current: `T008` - add request IDs.
 
-Next: `T008`-`T009`, then the raw reverse proxy in `T010`-`T018`.
+Next: `T009`, then the raw reverse proxy in `T010`-`T018`.
 
 Known issues: none.
 

@@ -20,3 +20,18 @@ func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNotFound)
 	}
 }
+
+func TestHealth(t *testing.T) {
+	server := httptest.NewServer(NewHandler())
+	t.Cleanup(server.Close)
+
+	response, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	t.Cleanup(func() { response.Body.Close() })
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
