@@ -1,0 +1,39 @@
+# Go build artifacts
+/gateway
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage and profiling output
+coverage.out
+coverage.html
+*.prof
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+/config.yaml
+/config.yml
+/config.local.yaml
+/config.local.yml
+
+# Local runtime data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+/tmp/
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
