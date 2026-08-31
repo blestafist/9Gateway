@@ -249,6 +249,40 @@ func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 	}
 }
 
+func TestProxySupportsUnknownV1Endpoint(t *testing.T) {
+	requestDetails := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requestDetails <- request.Method + " " + request.URL.RequestURI()
+		response.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/something-unknown?mode=raw", strings.NewReader("unknown-payload"))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /v1/something-unknown: %v", err)
+	}
+	response.Body.Close()
+
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusAccepted)
+	}
+	select {
+	case details := <-requestDetails:
+		if details != "POST /v1/something-unknown?mode=raw" {
+			t.Fatalf("upstream request = %q, want %q", details, "POST /v1/something-unknown?mode=raw")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unknown endpoint did not reach upstream")
+	}
+}
+
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
 	body := make(chan []byte, 1)

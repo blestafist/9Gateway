@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T017`.
+Done: `T001`-`T018`.
 
-Current: `T018` - support unknown `/v1/*`.
+Current: `T019` - bind upstream to client context.
 
-Next: `T019`-`T020`.
+Next: `T020`.
 
 Known issues: none.
 
