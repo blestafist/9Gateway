@@ -52,6 +52,30 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadResolvesUpstreamAPIKeyFromEnvironment(t *testing.T) {
+	t.Setenv("TEST_UPSTREAM_API_KEY", "secret-from-environment")
+	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: ${TEST_UPSTREAM_API_KEY}\n")
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if got.UpstreamAPIKey != "secret-from-environment" {
+		t.Fatalf("Load() upstream API key = %q, want resolved secret", got.UpstreamAPIKey)
+	}
+}
+
+func TestLoadFailsWhenUpstreamAPIKeyEnvironmentVariableIsMissing(t *testing.T) {
+	t.Setenv("TEST_MISSING_UPSTREAM_API_KEY", "")
+	os.Unsetenv("TEST_MISSING_UPSTREAM_API_KEY")
+	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: ${TEST_MISSING_UPSTREAM_API_KEY}\n")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "environment variable \"TEST_MISSING_UPSTREAM_API_KEY\" is not set") {
+		t.Fatalf("Load() error = %v, want missing environment variable error", err)
+	}
+}
+
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
 
