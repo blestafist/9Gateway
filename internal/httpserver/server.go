@@ -60,8 +60,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		http.Error(response, "upstream request failed", http.StatusBadGateway)
 		return
 	}
+	defer upstreamResponse.Body.Close()
+	copyEndToEndHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
-	upstreamResponse.Body.Close()
 }
 
 var hopByHopHeaders = map[string]struct{}{

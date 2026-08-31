@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T015`.
+Done: `T001`-`T016`.
 
-Current: `T016` - copy end-to-end response headers.
+Current: `T017` - proxy ordinary response body.
 
-Next: `T017`-`T018`.
+Next: `T018`-`T019`.
 
 Known issues: none.
 

@@ -193,6 +193,32 @@ func TestProxyPreservesUpstreamResponseStatus(t *testing.T) {
 	}
 }
 
+func TestProxyCopiesEndToEndResponseHeadersAndRemovesHopByHopHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("X-Upstream-Trace", "trace-value")
+		response.Header().Set("Connection", "X-Remove-Me")
+		response.Header().Set("X-Remove-Me", "hop-by-hop-value")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/status")
+	if err != nil {
+		t.Fatalf("GET /v1/status: %v", err)
+	}
+	response.Body.Close()
+
+	if response.Header.Get("X-Upstream-Trace") != "trace-value" {
+		t.Fatalf("X-Upstream-Trace = %q, want %q", response.Header.Get("X-Upstream-Trace"), "trace-value")
+	}
+	if response.Header.Get("Connection") != "" || response.Header.Get("X-Remove-Me") != "" {
+		t.Fatal("downstream received hop-by-hop response headers")
+	}
+}
+
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
 	body := make(chan []byte, 1)
