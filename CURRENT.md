@@ -1,12 +1,12 @@
 # Current Work
 
-Current milestone: repository skeleton and configuration foundation complete.
+Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T005`.
+Done: `T001`-`T006`.
 
-Current: `T006` - start the minimal HTTP server.
+Current: `T007` - add the health endpoint.
 
-Next: `T007`-`T009`, then the raw reverse proxy in `T010`-`T018`.
+Next: `T008`-`T009`, then the raw reverse proxy in `T010`-`T018`.
 
 Known issues: none.
 
