@@ -2,7 +2,7 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T019`.
+Done: `T001`-`T020`.
 
 Current: milestone complete; no active task.
 
