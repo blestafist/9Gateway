@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T018`.
+Done: `T001`-`T019`.
 
-Current: `T019` - bind upstream to client context.
+Current: `T020` - test client cancellation.
 
-Next: `T020`.
+Next: none.
 
 Known issues: none.
 

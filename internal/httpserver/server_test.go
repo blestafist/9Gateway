@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -281,6 +282,52 @@ func TestProxySupportsUnknownV1Endpoint(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("unknown endpoint did not reach upstream")
 	}
+}
+
+func TestProxyBindsUpstreamRequestToClientContext(t *testing.T) {
+	type contextKey struct{}
+	const contextValue = "request-context"
+
+	requestContext, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, contextValue))
+	t.Cleanup(cancel)
+	receivedContext := make(chan context.Context, 1)
+	roundTripper := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		receivedContext <- request.Context()
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	handler := newProxyHandler(&http.Client{Transport: roundTripper}, "http://router.example.test", "upstream-secret")
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example.test/v1/models", nil).WithContext(requestContext)
+	response := httptest.NewRecorder()
+	finished := make(chan struct{})
+
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(finished)
+	}()
+
+	var upstreamContext context.Context
+	select {
+	case upstreamContext = <-receivedContext:
+	case <-time.After(time.Second):
+		t.Fatal("upstream transport did not receive request")
+	}
+	if upstreamContext.Value(contextKey{}) != contextValue {
+		t.Fatalf("upstream context value = %v, want %q", upstreamContext.Value(contextKey{}), contextValue)
+	}
+
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("upstream request did not observe context cancellation")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (roundTripper roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTripper(request)
 }
 
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
