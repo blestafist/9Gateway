@@ -1,12 +1,12 @@
 # Current Work
 
-Current milestone: repository skeleton and configuration foundation.
+Current milestone: repository skeleton and YAML configuration foundation.
 
-Done: `T001`-`T003`.
+Done: `T001`-`T004`.
 
-Current: `T004` - load YAML config from `--config`.
+Current: `T005` - resolve upstream API key from an environment variable.
 
-Next: `T005`, then the minimal HTTP server in `T006`-`T009`.
+Next: the minimal HTTP server in `T006`-`T009`.
 
 Known issues: none.
 
