@@ -1,4 +1,7 @@
-# ARCHITECTURE.md — Lightweight LLM Gateway / Limiter for 9router
+# Archived architecture — Lightweight LLM Gateway / Limiter for 9router
+
+> Historical full reference. Active architecture is split by subsystem under
+> `docs/architecture/`. Do not load this file for routine tasks.
 
 ## 1. Цель документа
 
