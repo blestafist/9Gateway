@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T010`.
+Done: `T001`-`T011`.
 
-Current: `T011` - proxy method, path, and query.
+Current: `T012` - proxy request body.
 
-Next: `T012`-`T018`.
+Next: `T013`-`T018`.
 
 Known issues: none.
 

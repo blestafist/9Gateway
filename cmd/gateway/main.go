@@ -20,7 +20,7 @@ func main() {
 	}
 
 	upstreamClient := transport.NewClient()
-	if err := http.ListenAndServe(cfg.ListenAddr, httpserver.NewHandler(upstreamClient)); err != nil {
+	if err := http.ListenAndServe(cfg.ListenAddr, httpserver.NewHandler(upstreamClient, cfg.UpstreamBaseURL)); err != nil {
 		log.Fatal(err)
 	}
 }

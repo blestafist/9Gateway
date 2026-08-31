@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -14,10 +15,48 @@ const requestIDHeader = "X-Gateway-Request-ID"
 type requestIDContextKey struct{}
 
 // NewHandler returns the gateway's HTTP handler using the provided upstream client.
-func NewHandler(upstreamClient *http.Client) http.Handler {
+func NewHandler(upstreamClient *http.Client, upstreamBaseURL string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
+	mux.Handle("/v1/", newProxyHandler(upstreamClient, upstreamBaseURL))
 	return newHandler(slog.Default(), mux)
+}
+
+type proxyHandler struct {
+	client  *http.Client
+	baseURL *url.URL
+}
+
+func newProxyHandler(client *http.Client, baseURL string) http.Handler {
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			http.Error(response, "invalid upstream URL", http.StatusInternalServerError)
+		})
+	}
+
+	return &proxyHandler{client: client, baseURL: parsedURL}
+}
+
+func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	targetURL := *handler.baseURL
+	targetURL.Path = request.URL.Path
+	targetURL.RawPath = request.URL.RawPath
+	targetURL.RawQuery = request.URL.RawQuery
+	targetURL.Fragment = ""
+
+	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), nil)
+	if err != nil {
+		http.Error(response, "failed to create upstream request", http.StatusBadGateway)
+		return
+	}
+
+	upstreamResponse, err := handler.client.Do(upstreamRequest)
+	if err != nil {
+		http.Error(response, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	upstreamResponse.Body.Close()
 }
 
 func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
