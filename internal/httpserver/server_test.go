@@ -133,6 +133,46 @@ func TestProxyRewritesAuthorization(t *testing.T) {
 	}
 }
 
+func TestProxyCopiesEndToEndHeadersAndRemovesHopByHopHeaders(t *testing.T) {
+	headers := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		headers <- request.Header.Clone()
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-Trace", "trace-value")
+	request.Header.Set("Connection", "X-Remove-Me")
+	request.Header.Set("X-Remove-Me", "hop-by-hop-value")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /v1/models: %v", err)
+	}
+	response.Body.Close()
+
+	select {
+	case upstreamHeaders := <-headers:
+		if upstreamHeaders.Get("Content-Type") != "application/json" {
+			t.Fatalf("upstream Content-Type = %q, want %q", upstreamHeaders.Get("Content-Type"), "application/json")
+		}
+		if upstreamHeaders.Get("X-Request-Trace") != "trace-value" {
+			t.Fatalf("upstream X-Request-Trace = %q, want %q", upstreamHeaders.Get("X-Request-Trace"), "trace-value")
+		}
+		if upstreamHeaders.Get("Connection") != "" || upstreamHeaders.Get("X-Remove-Me") != "" {
+			t.Fatal("upstream received hop-by-hop headers")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive request")
+	}
+}
+
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
 	body := make(chan []byte, 1)

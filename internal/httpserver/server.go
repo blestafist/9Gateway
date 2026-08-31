@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -51,6 +52,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		http.Error(response, "failed to create upstream request", http.StatusBadGateway)
 		return
 	}
+	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
 
 	upstreamResponse, err := handler.client.Do(upstreamRequest)
@@ -59,6 +61,40 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	upstreamResponse.Body.Close()
+}
+
+var hopByHopHeaders = map[string]struct{}{
+	"connection":          {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"proxy-connection":    {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+}
+
+func copyEndToEndHeaders(destination, source http.Header) {
+	connectionTokens := make(map[string]struct{})
+	for _, value := range source.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			connectionTokens[strings.ToLower(strings.TrimSpace(token))] = struct{}{}
+		}
+	}
+
+	for name, values := range source {
+		lowerName := strings.ToLower(name)
+		if _, ok := hopByHopHeaders[lowerName]; ok {
+			continue
+		}
+		if _, ok := connectionTokens[lowerName]; ok {
+			continue
+		}
+		for _, value := range values {
+			destination.Add(name, value)
+		}
+	}
 }
 
 func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
