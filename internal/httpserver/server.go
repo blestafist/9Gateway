@@ -15,19 +15,20 @@ const requestIDHeader = "X-Gateway-Request-ID"
 type requestIDContextKey struct{}
 
 // NewHandler returns the gateway's HTTP handler using the provided upstream client.
-func NewHandler(upstreamClient *http.Client, upstreamBaseURL string) http.Handler {
+func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	mux.Handle("/v1/", newProxyHandler(upstreamClient, upstreamBaseURL))
+	mux.Handle("/v1/", newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey))
 	return newHandler(slog.Default(), mux)
 }
 
 type proxyHandler struct {
 	client  *http.Client
 	baseURL *url.URL
+	apiKey  string
 }
 
-func newProxyHandler(client *http.Client, baseURL string) http.Handler {
+func newProxyHandler(client *http.Client, baseURL, apiKey string) http.Handler {
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
 		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -35,7 +36,7 @@ func newProxyHandler(client *http.Client, baseURL string) http.Handler {
 		})
 	}
 
-	return &proxyHandler{client: client, baseURL: parsedURL}
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -50,6 +51,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		http.Error(response, "failed to create upstream request", http.StatusBadGateway)
 		return
 	}
+	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
 
 	upstreamResponse, err := handler.client.Do(upstreamRequest)
 	if err != nil {

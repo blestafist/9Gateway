@@ -15,7 +15,7 @@ import (
 )
 
 func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
-	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test"))
+	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
 	t.Cleanup(server.Close)
 
 	response, err := http.Get(server.URL)
@@ -30,7 +30,7 @@ func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test"))
+	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
 	t.Cleanup(server.Close)
 
 	response, err := http.Get(server.URL + "/health")
@@ -48,7 +48,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestRequestIDsAreDistinct(t *testing.T) {
-	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test"))
+	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
 	t.Cleanup(server.Close)
 
 	requestIDs := make([]string, 2)
@@ -73,7 +73,7 @@ func TestProxyForwardsMethodPathAndQuery(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL))
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/models?alpha=one&beta=two", nil)
@@ -102,6 +102,37 @@ func TestProxyForwardsMethodPathAndQuery(t *testing.T) {
 	}
 }
 
+func TestProxyRewritesAuthorization(t *testing.T) {
+	authorizations := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		authorizations <- request.Header.Get("Authorization")
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodGet, gateway.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer client-secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET /v1/models: %v", err)
+	}
+	response.Body.Close()
+
+	select {
+	case authorization := <-authorizations:
+		if authorization != "Bearer upstream-secret" {
+			t.Fatalf("upstream Authorization = %q, want %q", authorization, "Bearer upstream-secret")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive request")
+	}
+}
+
 func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte(`{"model":"unknown","input":[1,2,3]}`)
 	body := make(chan []byte, 1)
@@ -115,7 +146,7 @@ func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL))
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/unknown", bytes.NewReader(wantBody))

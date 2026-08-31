@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T012`.
+Done: `T001`-`T013`.
 
-Current: `T013` - rewrite Authorization.
+Current: `T014` - copy end-to-end request headers.
 
-Next: `T014`-`T018`.
+Next: `T015`-`T018`.
 
 Known issues: none.
 
