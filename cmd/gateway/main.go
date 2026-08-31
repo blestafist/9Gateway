@@ -7,6 +7,7 @@ import (
 
 	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/httpserver"
+	"github.com/pestit/9gateway/internal/transport"
 )
 
 func main() {
@@ -18,7 +19,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := http.ListenAndServe(cfg.ListenAddr, httpserver.NewHandler()); err != nil {
+	upstreamClient := transport.NewClient()
+	if err := http.ListenAndServe(cfg.ListenAddr, httpserver.NewHandler(upstreamClient)); err != nil {
 		log.Fatal(err)
 	}
 }

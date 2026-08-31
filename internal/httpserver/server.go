@@ -13,8 +13,8 @@ const requestIDHeader = "X-Gateway-Request-ID"
 
 type requestIDContextKey struct{}
 
-// NewHandler returns the gateway's HTTP handler.
-func NewHandler() http.Handler {
+// NewHandler returns the gateway's HTTP handler using the provided upstream client.
+func NewHandler(upstreamClient *http.Client) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	return newHandler(slog.Default(), mux)

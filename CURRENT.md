@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T009`.
+Done: `T001`-`T010`.
 
-Current: `T010` - create a reusable upstream client.
+Current: `T011` - proxy method, path, and query.
 
-Next: `T011`-`T018`.
+Next: `T012`-`T018`.
 
 Known issues: none.
 

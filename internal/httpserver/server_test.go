@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/pestit/9gateway/internal/transport"
 )
 
 func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
-	server := httptest.NewServer(NewHandler())
+	server := httptest.NewServer(NewHandler(transport.NewClient()))
 	t.Cleanup(server.Close)
 
 	response, err := http.Get(server.URL)
@@ -26,7 +28,7 @@ func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	server := httptest.NewServer(NewHandler())
+	server := httptest.NewServer(NewHandler(transport.NewClient()))
 	t.Cleanup(server.Close)
 
 	response, err := http.Get(server.URL + "/health")
@@ -44,7 +46,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestRequestIDsAreDistinct(t *testing.T) {
-	server := httptest.NewServer(NewHandler())
+	server := httptest.NewServer(NewHandler(transport.NewClient()))
 	t.Cleanup(server.Close)
 
 	requestIDs := make([]string, 2)
