@@ -2,11 +2,11 @@
 
 Current milestone: minimal HTTP server and basic endpoints complete.
 
-Done: `T001`-`T007`.
+Done: `T001`-`T008`.
 
-Current: `T008` - add request IDs.
+Current: `T009` - add structured completion logs.
 
-Next: `T009`, then the raw reverse proxy in `T010`-`T018`.
+Next: the raw reverse proxy in `T010`-`T018`.
 
 Known issues: none.
 
