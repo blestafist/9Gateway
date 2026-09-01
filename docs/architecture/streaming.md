@@ -45,6 +45,11 @@ frame size; field-level semantics are implemented in T036-T040. The parser
 knows nothing about OpenAI, and read boundaries are never assumed to be line or
 event boundaries.
 
+This semantic comment handling does not change transparent transport: the
+transport forwards comment bytes unchanged, while the generic parser ignores
+comments when constructing events. `data: [DONE]` is returned as ordinary data;
+the parser does not assign it completion meaning.
+
 Future OpenAI observation extracts ID, model, choices, role, content, finish reason,
 tool calls, usage, and `[DONE]`. Parse failures in passive observation are
 telemetry errors and do not break otherwise healthy passthrough.

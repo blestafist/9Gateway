@@ -85,13 +85,17 @@ func (reader *Reader) Next() (SSEEvent, error) {
 			dataLines = dataLines[:0]
 			line = line[:0]
 		} else if readErr == nil {
-			hasContent = true
 			field, value := parseField(line)
+			if isCommentLine(line) {
+				line = line[:0]
+				continue
+			}
+			hasContent = true
 			switch field {
-			case "event":
-				eventName = value
 			case "data":
 				dataLines = append(dataLines, value)
+			case "event":
+				eventName = value
 			}
 		}
 
@@ -101,6 +105,11 @@ func (reader *Reader) Next() (SSEEvent, error) {
 
 		line = line[:0]
 	}
+}
+
+func isCommentLine(line []byte) bool {
+	line = trimLineEnding(line)
+	return len(line) > 0 && line[0] == ':'
 }
 
 func parseField(line []byte) (string, string) {

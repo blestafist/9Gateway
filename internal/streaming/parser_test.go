@@ -137,6 +137,43 @@ func TestReaderParsesMultipleEventsSequentially(t *testing.T) {
 	}
 }
 
+func TestReaderIgnoresCommentsAndAppliesFieldSyntax(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  SSEEvent
+	}{
+		{name: "empty comment", input: ":\n\ndata: value\n\n", want: SSEEvent{Data: "value"}},
+		{name: "heartbeat only", input: ": heartbeat\n:\n\n", want: SSEEvent{}},
+		{name: "comments between data lines", input: "data: first\n: heartbeat\ndata: second\n\n", want: SSEEvent{Data: "first\nsecond"}},
+		{name: "without space after colon", input: "data:value\n\n", want: SSEEvent{Data: "value"}},
+		{name: "with one space after colon", input: "data: value\n\n", want: SSEEvent{Data: "value"}},
+		{name: "unknown field", input: "id: ignored\nretry: 1000\ndata: value\n\n", want: SSEEvent{Data: "value"}},
+		{name: "done is ordinary data", input: "data: [DONE]\n\n", want: SSEEvent{Data: "[DONE]"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader, err := NewReader(strings.NewReader(test.input), 1024)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+
+			got, err := reader.Next()
+			if test.want == (SSEEvent{}) {
+				if err != io.EOF || got != (SSEEvent{}) {
+					t.Fatalf("comment-only result = %#v, %v, want empty event and io.EOF", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("first Next error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("event = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestReaderRejectsFramesOverConfiguredSize(t *testing.T) {
 	reader, err := NewReader(strings.NewReader("12345\n\n"), 5)
 	if err != nil {
