@@ -476,6 +476,85 @@ func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesRequestContentLengthSemantics(t *testing.T) {
+	type requestDetails struct {
+		body             []byte
+		contentLength    int64
+		transferEncoding []string
+	}
+
+	for _, test := range []struct {
+		name                 string
+		body                 io.Reader
+		wantBody             string
+		wantContentLength    int64
+		wantTransferEncoding string
+	}{
+		{
+			name:              "known length",
+			body:              strings.NewReader("known request body"),
+			wantBody:          "known request body",
+			wantContentLength: int64(len("known request body")),
+		},
+		{
+			name:              "empty body",
+			wantContentLength: 0,
+		},
+		{
+			name:                 "unknown length",
+			body:                 io.NopCloser(strings.NewReader("streamed request body")),
+			wantBody:             "streamed request body",
+			wantContentLength:    -1,
+			wantTransferEncoding: "chunked",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			details := make(chan requestDetails, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Errorf("read upstream body: %v", err)
+					return
+				}
+				details <- requestDetails{
+					body:             body,
+					contentLength:    request.ContentLength,
+					transferEncoding: request.TransferEncoding,
+				}
+			}))
+			t.Cleanup(upstream.Close)
+
+			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			t.Cleanup(gateway.Close)
+
+			request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/responses", test.body)
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatalf("POST /v1/responses: %v", err)
+			}
+			response.Body.Close()
+
+			select {
+			case got := <-details:
+				if string(got.body) != test.wantBody {
+					t.Fatalf("upstream body = %q, want %q", got.body, test.wantBody)
+				}
+				if got.contentLength != test.wantContentLength {
+					t.Fatalf("upstream ContentLength = %d, want %d", got.contentLength, test.wantContentLength)
+				}
+				if strings.Join(got.transferEncoding, ",") != test.wantTransferEncoding {
+					t.Fatalf("upstream TransferEncoding = %q, want %q", got.transferEncoding, test.wantTransferEncoding)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("upstream did not receive request")
+			}
+		})
+	}
+}
+
 func TestCompletionLogContainsRequestMetadataWithoutAuthorization(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))

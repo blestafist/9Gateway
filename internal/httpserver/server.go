@@ -53,6 +53,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		http.Error(response, "failed to create upstream request", http.StatusBadGateway)
 		return
 	}
+	upstreamRequest.ContentLength = request.ContentLength
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
 

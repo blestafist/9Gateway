@@ -18,11 +18,16 @@ bounded buffer when metadata inspection or preflight token estimation requires
 it, but the exact original bytes must still reach upstream. Separate absolute
 body-size and inspect/log-size limits.
 
+While the body bytes are forwarded unchanged, preserve the incoming distinction
+between a known `Content-Length`, a known empty body, and an unknown streaming
+length. Never buffer a generic body just to calculate its size.
+
 ## Headers
 
 Remove hop-by-hop headers in both directions. Replace client Authorization with
 the configured upstream credential, and never expose that credential in
 responses or logs. Do not preserve `Content-Length` after a body transformation.
+Any body transformation must instead recompute the length or remove it.
 
 ## Upstream Client
 
