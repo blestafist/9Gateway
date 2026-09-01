@@ -3,8 +3,10 @@ package streaming
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
+	"strings"
 )
 
 // SSEEvent is one complete server-sent event. Data and Event are owned by the
@@ -17,8 +19,10 @@ type SSEEvent struct {
 // ErrEventTooLarge indicates that a framed event exceeds the configured limit.
 var ErrEventTooLarge = errors.New("streaming: event exceeds maximum size")
 
-// Reader emits complete SSE events sequentially from a stream. maxEventSize is
-// measured in bytes of one framed event, including its input line endings.
+// Reader emits complete SSE events sequentially from a stream. It joins data
+// fields with newlines, uses a blank line to complete an event, and ignores
+// fields it does not understand. maxEventSize is measured in bytes of one
+// framed event, including its input line endings.
 type Reader struct {
 	input        *bufio.Reader
 	maxEventSize int
@@ -45,12 +49,15 @@ func NewReader(input io.Reader, maxEventSize int) (*Reader, error) {
 	}, nil
 }
 
-// Next returns the next complete event. An input stream with no event returns
-// io.EOF, and EOF after a completed event is returned on the following call.
-// Field interpretation is intentionally separate from this framing contract.
+// Next returns the next complete event. Data lines are joined with a newline,
+// and an optional event field supplies the event name. An input stream with no
+// event returns io.EOF, and EOF after a completed event is returned on the
+// following call. Returned strings are independent of the reader's buffers.
 func (reader *Reader) Next() (SSEEvent, error) {
 	eventSize := 0
 	hasContent := false
+	eventName := ""
+	dataLines := make([]string, 0, 1)
 	line := make([]byte, 0, 2)
 
 	for {
@@ -60,9 +67,6 @@ func (reader *Reader) Next() (SSEEvent, error) {
 			return SSEEvent{}, ErrEventTooLarge
 		}
 		line = append(line, part...)
-		if !isBlankLine(line) {
-			hasContent = true
-		}
 
 		if readErr == bufio.ErrBufferFull {
 			continue
@@ -73,10 +77,22 @@ func (reader *Reader) Next() (SSEEvent, error) {
 
 		if isBlankLine(line) {
 			if hasContent {
-				return SSEEvent{}, nil
+				return SSEEvent{Event: eventName, Data: strings.Join(dataLines, "\n")}, nil
 			}
 			eventSize = 0
+			hasContent = false
+			eventName = ""
+			dataLines = dataLines[:0]
 			line = line[:0]
+		} else if readErr == nil {
+			hasContent = true
+			field, value := parseField(line)
+			switch field {
+			case "event":
+				eventName = value
+			case "data":
+				dataLines = append(dataLines, value)
+			}
 		}
 
 		if readErr == io.EOF {
@@ -85,6 +101,29 @@ func (reader *Reader) Next() (SSEEvent, error) {
 
 		line = line[:0]
 	}
+}
+
+func parseField(line []byte) (string, string) {
+	line = trimLineEnding(line)
+	colon := bytes.IndexByte(line, ':')
+	if colon < 0 {
+		return string(line), ""
+	}
+	value := line[colon+1:]
+	if len(value) > 0 && value[0] == ' ' {
+		value = value[1:]
+	}
+	return string(line[:colon]), string(value)
+}
+
+func trimLineEnding(line []byte) []byte {
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+	}
+	return line
 }
 
 func isBlankLine(line []byte) bool {

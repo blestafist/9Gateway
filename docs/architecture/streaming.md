@@ -35,11 +35,15 @@ returns no fabricated event for empty input and returns `io.EOF` after the final
 complete event. Returned event strings are owned by the caller. The parser is
 separate from the transparent transport hot path.
 
-The planned generic parser supports `event:`, one or more `data:` lines,
-comments, blank line event termination, split reads, and multiple events per
-read. The T035 contract already enforces a bounded frame size; field-level
-semantics are implemented in T036-T040. The parser knows nothing about OpenAI,
-and read boundaries are never assumed to be line or event boundaries.
+The generic parser supports `event:`, one or more `data:` lines, comments, blank
+line event termination, split reads, and multiple events per read. Data lines
+within one event are joined with a newline; an optional single space after the
+field colon is removed, and unknown fields are ignored. An event is emitted
+only when at least one non-comment field was seen, so empty input or comments
+alone do not fabricate an event. The T035 contract already enforces a bounded
+frame size; field-level semantics are implemented in T036-T040. The parser
+knows nothing about OpenAI, and read boundaries are never assumed to be line or
+event boundaries.
 
 Future OpenAI observation extracts ID, model, choices, role, content, finish reason,
 tool calls, usage, and `[DONE]`. Parse failures in passive observation are

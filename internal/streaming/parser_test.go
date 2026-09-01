@@ -84,6 +84,59 @@ func TestReaderEmitsCompleteFramesSequentially(t *testing.T) {
 	}
 }
 
+func TestReaderParsesDataAndEventFields(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  SSEEvent
+	}{
+		{name: "one data line", input: "data: hello\n\n", want: SSEEvent{Data: "hello"}},
+		{name: "named event", input: "event: update\ndata: hello\n\n", want: SSEEvent{Event: "update", Data: "hello"}},
+		{name: "multiple data lines", input: "data: first\ndata: second\n\n", want: SSEEvent{Data: "first\nsecond"}},
+		{name: "empty data", input: "data:\n\n", want: SSEEvent{Data: ""}},
+		{name: "unknown field", input: "id: ignored\ndata: kept\nretry: 10\n\n", want: SSEEvent{Data: "kept"}},
+		{name: "CRLF", input: "event: update\r\ndata: hello\r\n\r\n", want: SSEEvent{Event: "update", Data: "hello"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader, err := NewReader(strings.NewReader(test.input), 1024)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+
+			got, err := reader.Next()
+			if err != nil {
+				t.Fatalf("first Next error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("first event = %#v, want %#v", got, test.want)
+			}
+			if _, err := reader.Next(); err != io.EOF {
+				t.Fatalf("second Next error = %v, want io.EOF", err)
+			}
+		})
+	}
+}
+
+func TestReaderParsesMultipleEventsSequentially(t *testing.T) {
+	reader, err := NewReader(strings.NewReader("event: first\ndata: one\n\ndata: two\n\n"), 1024)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	for _, want := range []SSEEvent{{Event: "first", Data: "one"}, {Data: "two"}} {
+		got, err := reader.Next()
+		if err != nil {
+			t.Fatalf("Next error = %v, want no error", err)
+		}
+		if got != want {
+			t.Fatalf("event = %#v, want %#v", got, want)
+		}
+	}
+	if _, err := reader.Next(); err != io.EOF {
+		t.Fatalf("final Next error = %v, want io.EOF", err)
+	}
+}
+
 func TestReaderRejectsFramesOverConfiguredSize(t *testing.T) {
 	reader, err := NewReader(strings.NewReader("12345\n\n"), 5)
 	if err != nil {
