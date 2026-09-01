@@ -54,7 +54,7 @@ func TestReaderReturnsUnnamedAndNamedEventsAsIndependentValues(t *testing.T) {
 }
 
 func TestReaderReturnsEOFAfterItsInputIsConsumed(t *testing.T) {
-	reader, err := NewReader(strings.NewReader("input\n\n"), 1024)
+	reader, err := NewReader(strings.NewReader("data: input\n\n"), 1024)
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestReaderReturnsEOFAfterItsInputIsConsumed(t *testing.T) {
 }
 
 func TestReaderEmitsCompleteFramesSequentially(t *testing.T) {
-	reader, err := NewReader(strings.NewReader("first\n\nsecond\n\n"), 1024)
+	reader, err := NewReader(strings.NewReader("data: first\n\ndata: second\n\n"), 1024)
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -149,6 +149,7 @@ func TestReaderIgnoresCommentsAndAppliesFieldSyntax(t *testing.T) {
 		{name: "without space after colon", input: "data:value\n\n", want: SSEEvent{Data: "value"}},
 		{name: "with one space after colon", input: "data: value\n\n", want: SSEEvent{Data: "value"}},
 		{name: "unknown field", input: "id: ignored\nretry: 1000\ndata: value\n\n", want: SSEEvent{Data: "value"}},
+		{name: "unknown fields only", input: "id: ignored\nretry: 1000\n\n", want: SSEEvent{}},
 		{name: "done is ordinary data", input: "data: [DONE]\n\n", want: SSEEvent{Data: "[DONE]"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -317,7 +318,8 @@ func TestReaderCountsCumulativeMultiLineEventBytes(t *testing.T) {
 }
 
 func TestReaderSizeErrorIsTerminal(t *testing.T) {
-	reader, err := NewReader(strings.NewReader("data: too large\n\ndata: later\n\n"), 5)
+	input := &countingReader{reader: strings.NewReader("data: too large\n\ndata: later\n\n")}
+	reader, err := NewReader(input, 5)
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -327,7 +329,21 @@ func TestReaderSizeErrorIsTerminal(t *testing.T) {
 	if first != (SSEEvent{}) || firstErr != ErrEventTooLarge {
 		t.Fatalf("first result = %#v, %v, want terminal size error", first, firstErr)
 	}
+	readsAfterFirstError := input.reads
 	if second != (SSEEvent{}) || secondErr != ErrEventTooLarge {
 		t.Fatalf("second result = %#v, %v, want same terminal size error", second, secondErr)
 	}
+	if input.reads != readsAfterFirstError {
+		t.Fatalf("underlying reads after terminal error = %d, want %d", input.reads, readsAfterFirstError)
+	}
+}
+
+type countingReader struct {
+	reader *strings.Reader
+	reads  int
+}
+
+func (reader *countingReader) Read(destination []byte) (int, error) {
+	reader.reads++
+	return reader.reader.Read(destination)
 }

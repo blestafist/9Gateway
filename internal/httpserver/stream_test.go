@@ -33,16 +33,22 @@ func newStreamingUpstream(t *testing.T, script streamingUpstreamScript) *streami
 	t.Helper()
 
 	upstream := &streamingUpstream{
-		arrivals:          make(chan struct{}, 8),
-		firstFlushed:      make(chan struct{}, 8),
+		arrivals:          make(chan struct{}, 32),
+		firstFlushed:      make(chan struct{}, 32),
 		releaseAfterFirst: make(chan struct{}),
-		cancelled:         make(chan struct{}, 8),
-		returned:          make(chan time.Time, 8),
+		cancelled:         make(chan struct{}, 32),
+		returned:          make(chan time.Time, 32),
 	}
 	upstream.server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		defer func() { upstream.returned <- time.Now() }()
+		defer func() { trySendTime(upstream.returned, time.Now()) }()
+		if script.waitForCancellation {
+			defer func() {
+				<-request.Context().Done()
+				trySend(upstream.cancelled)
+			}()
+		}
 
-		upstream.arrivals <- struct{}{}
+		trySend(upstream.arrivals)
 		if script.contentType != "" {
 			response.Header().Set("Content-Type", script.contentType)
 		}
@@ -60,9 +66,9 @@ func newStreamingUpstream(t *testing.T, script streamingUpstreamScript) *streami
 					return
 				}
 				flusher.Flush()
+				trySend(upstream.firstFlushed)
 			}
 			if index == 0 {
-				upstream.firstFlushed <- struct{}{}
 				if script.waitAfterFirst {
 					<-upstream.releaseAfterFirst
 				}
@@ -71,12 +77,12 @@ func newStreamingUpstream(t *testing.T, script streamingUpstreamScript) *streami
 
 		if script.waitForCancellation {
 			<-request.Context().Done()
-			upstream.cancelled <- struct{}{}
 		}
 	}))
 	upstream.URL = upstream.server.URL
 	t.Cleanup(func() {
 		upstream.release()
+		upstream.server.CloseClientConnections()
 		upstream.server.Close()
 	})
 	return upstream
@@ -84,4 +90,18 @@ func newStreamingUpstream(t *testing.T, script streamingUpstreamScript) *streami
 
 func (upstream *streamingUpstream) release() {
 	upstream.releaseOnce.Do(func() { close(upstream.releaseAfterFirst) })
+}
+
+func trySend(channel chan struct{}) {
+	select {
+	case channel <- struct{}{}:
+	default:
+	}
+}
+
+func trySendTime(channel chan time.Time, value time.Time) {
+	select {
+	case channel <- value:
+	default:
+	}
 }

@@ -1,6 +1,6 @@
 # Current Work
 
-Current milestone: transparent streaming transport.
+Current milestone: transparent streaming transport (complete).
 
 Done: `T001`-`T040`.
 

@@ -35,19 +35,19 @@ limit counts every input byte belonging to one framed event, including field
 and comment bytes, line endings, and the blank-line delimiter. Events at the
 limit succeed; crossing it returns `ErrEventTooLarge`, stops accumulation, and
 puts the parser in a terminal error state. Subsequent calls return the same
-error without reading more input. It
-returns no fabricated event for empty input and returns `io.EOF` after the final
-complete event. Returned event strings are owned by the caller. The parser is
+error without reading more input. It returns no fabricated event for empty
+input and returns `io.EOF` after the final complete event. Returned event
+strings are owned by the caller. The parser is
 separate from the transparent transport hot path.
 
 The generic parser supports `event:`, one or more `data:` lines, comments, blank
 line event termination, split reads, and multiple events per read. Data lines
 within one event are joined with a newline; an optional single space after the
-field colon is removed, and unknown colon fields are ignored. Empty input and
-comments alone do not fabricate an event. The T035 contract already enforces a
-bounded frame size; field-level semantics are implemented in T036-T040. The
-parser knows nothing about OpenAI, and read boundaries are never assumed to be
-line or event boundaries.
+field colon is removed, and unknown colon fields are ignored. Empty input,
+comments, and unknown fields alone do not fabricate an event. The T035 contract
+already enforces a bounded frame size; field-level semantics are implemented in
+T036-T040. The parser knows nothing about OpenAI, and read boundaries are never
+assumed to be line or event boundaries.
 
 This semantic comment handling does not change transparent transport: the
 transport forwards comment bytes unchanged, while the generic parser ignores

@@ -21,7 +21,8 @@ var ErrEventTooLarge = errors.New("streaming: event exceeds maximum size")
 
 // Reader emits complete SSE events sequentially from a stream. It joins data
 // fields with newlines, uses a blank line to complete an event, and ignores
-// fields it does not understand. maxEventSize is measured in bytes of one
+// fields it does not understand. A frame with only comments or unknown fields
+// does not produce an event. maxEventSize is measured in bytes of one
 // framed event, including all field, comment, and line-ending bytes through the
 // blank-line delimiter. A size error is terminal; subsequent calls return the
 // same ErrEventTooLarge without reading more input.
@@ -97,11 +98,12 @@ func (reader *Reader) Next() (SSEEvent, error) {
 				reader.line = reader.line[:0]
 				continue
 			}
-			reader.hasContent = true
 			switch field {
 			case "data":
+				reader.hasContent = true
 				reader.dataLines = append(reader.dataLines, value)
 			case "event":
+				reader.hasContent = true
 				reader.eventName = value
 			}
 		}
