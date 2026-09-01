@@ -26,6 +26,12 @@ var ErrEventTooLarge = errors.New("streaming: event exceeds maximum size")
 type Reader struct {
 	input        *bufio.Reader
 	maxEventSize int
+	eventSize    int
+	eventName    string
+	dataLines    []string
+	hasContent   bool
+	line         []byte
+	terminalErr  error
 }
 
 // NewReader creates an SSE reader with a positive maximum framed event size.
@@ -46,6 +52,7 @@ func NewReader(input io.Reader, maxEventSize int) (*Reader, error) {
 	return &Reader{
 		input:        bufio.NewReaderSize(input, bufferSize),
 		maxEventSize: maxEventSize,
+		dataLines:    make([]string, 0, 1),
 	}, nil
 }
 
@@ -54,19 +61,18 @@ func NewReader(input io.Reader, maxEventSize int) (*Reader, error) {
 // event returns io.EOF, and EOF after a completed event is returned on the
 // following call. Returned strings are independent of the reader's buffers.
 func (reader *Reader) Next() (SSEEvent, error) {
-	eventSize := 0
-	hasContent := false
-	eventName := ""
-	dataLines := make([]string, 0, 1)
-	line := make([]byte, 0, 2)
+	if reader.terminalErr != nil {
+		return SSEEvent{}, reader.terminalErr
+	}
 
 	for {
 		part, readErr := reader.input.ReadSlice('\n')
-		eventSize += len(part)
-		if eventSize > reader.maxEventSize {
+		reader.eventSize += len(part)
+		if reader.eventSize > reader.maxEventSize {
+			reader.terminalErr = ErrEventTooLarge
 			return SSEEvent{}, ErrEventTooLarge
 		}
-		line = append(line, part...)
+		reader.line = append(reader.line, part...)
 
 		if readErr == bufio.ErrBufferFull {
 			continue
@@ -75,36 +81,43 @@ func (reader *Reader) Next() (SSEEvent, error) {
 			return SSEEvent{}, readErr
 		}
 
-		if isBlankLine(line) {
-			if hasContent {
-				return SSEEvent{Event: eventName, Data: strings.Join(dataLines, "\n")}, nil
+		if isBlankLine(reader.line) {
+			if reader.hasContent {
+				event := SSEEvent{Event: reader.eventName, Data: strings.Join(reader.dataLines, "\n")}
+				reader.resetEvent()
+				return event, nil
 			}
-			eventSize = 0
-			hasContent = false
-			eventName = ""
-			dataLines = dataLines[:0]
-			line = line[:0]
+			reader.resetEvent()
 		} else if readErr == nil {
-			field, value := parseField(line)
-			if isCommentLine(line) {
-				line = line[:0]
+			field, value := parseField(reader.line)
+			if isCommentLine(reader.line) {
+				reader.line = reader.line[:0]
 				continue
 			}
-			hasContent = true
+			reader.hasContent = true
 			switch field {
 			case "data":
-				dataLines = append(dataLines, value)
+				reader.dataLines = append(reader.dataLines, value)
 			case "event":
-				eventName = value
+				reader.eventName = value
 			}
 		}
 
 		if readErr == io.EOF {
+			reader.terminalErr = io.EOF
 			return SSEEvent{}, io.EOF
 		}
 
-		line = line[:0]
+		reader.line = reader.line[:0]
 	}
+}
+
+func (reader *Reader) resetEvent() {
+	reader.eventSize = 0
+	reader.hasContent = false
+	reader.eventName = ""
+	reader.dataLines = reader.dataLines[:0]
+	reader.line = reader.line[:0]
 }
 
 func isCommentLine(line []byte) bool {

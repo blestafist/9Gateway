@@ -174,6 +174,81 @@ func TestReaderIgnoresCommentsAndAppliesFieldSyntax(t *testing.T) {
 	}
 }
 
+func TestReaderIgnoresInputReadBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		chunks []string
+		want   []SSEEvent
+	}{
+		{
+			name:   "split field name",
+			chunks: []string{"da", "ta: value\n\n"},
+			want:   []SSEEvent{{Data: "value"}},
+		},
+		{
+			name:   "split field value",
+			chunks: []string{"data: va", "lue\n\n"},
+			want:   []SSEEvent{{Data: "value"}},
+		},
+		{
+			name:   "split LF terminator",
+			chunks: []string{"data: value", "\n", "\n"},
+			want:   []SSEEvent{{Data: "value"}},
+		},
+		{
+			name:   "split CRLF pair",
+			chunks: []string{"data: value\r", "\n", "\r", "\n"},
+			want:   []SSEEvent{{Data: "value"}},
+		},
+		{
+			name:   "split event separator",
+			chunks: []string{"data: one\n", "\n", "data: two\n\n"},
+			want:   []SSEEvent{{Data: "one"}, {Data: "two"}},
+		},
+		{
+			name:   "coalesced events",
+			chunks: []string{"data: one\n\ndata: two\n\ndata: three\n\n"},
+			want:   []SSEEvent{{Data: "one"}, {Data: "two"}, {Data: "three"}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader, err := NewReader(&chunkReader{chunks: test.chunks}, 1024)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+
+			for index, want := range test.want {
+				got, err := reader.Next()
+				if err != nil {
+					t.Fatalf("Next %d error = %v, want no error", index, err)
+				}
+				if got != want {
+					t.Fatalf("event %d = %#v, want %#v", index, got, want)
+				}
+			}
+			if _, err := reader.Next(); err != io.EOF {
+				t.Fatalf("final Next error = %v, want io.EOF", err)
+			}
+		})
+	}
+}
+
+type chunkReader struct {
+	chunks []string
+	index  int
+}
+
+func (reader *chunkReader) Read(destination []byte) (int, error) {
+	if reader.index == len(reader.chunks) {
+		return 0, io.EOF
+	}
+	n := copy(destination, reader.chunks[reader.index])
+	if n == len(reader.chunks[reader.index]) {
+		reader.index++
+	}
+	return n, nil
+}
+
 func TestReaderRejectsFramesOverConfiguredSize(t *testing.T) {
 	reader, err := NewReader(strings.NewReader("12345\n\n"), 5)
 	if err != nil {

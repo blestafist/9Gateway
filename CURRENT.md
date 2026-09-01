@@ -2,13 +2,13 @@
 
 Current milestone: transparent streaming transport.
 
-Done: `T001`-`T037`.
+Done: `T001`-`T038`.
 
-Current: `T038` - parse split and coalesced input reads.
+Current: `T039` - bound SSE event memory.
 
-Next: `T039` - bound SSE event memory.
+Next: `T040` - add a reusable streaming test upstream.
 
-Queued: `T038`-`T040`.
+Queued: `T039`-`T040`.
 
 Known issues: parser event-size enforcement and reusable streaming test harness are not yet implemented.
 
