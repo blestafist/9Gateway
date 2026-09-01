@@ -140,6 +140,13 @@ func TestJoinURLPath(t *testing.T) {
 			wantRawPath: "/gateway%2Ftenant/v1/models%2Fspecial",
 		},
 		{
+			name:        "escaped trailing slash",
+			baseURL:     "https://router.example/gateway%2F",
+			requestURL:  "/v1/models",
+			wantPath:    "/gateway//v1/models",
+			wantRawPath: "/gateway%2F/v1/models",
+		},
+		{
 			name:       "duplicate request slash",
 			baseURL:    "https://router.example/gateway",
 			requestURL: "//v1//models",
@@ -765,6 +772,31 @@ func TestCompletionResponseWriterPreservesFlush(t *testing.T) {
 	}
 	if !underlying.flushed {
 		t.Fatal("flush did not reach underlying writer")
+	}
+}
+
+func TestCompletionResponseWriterRecordsImplicitStatusFromFlush(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example.test/stream", nil)
+	withCompletionLog(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := http.NewResponseController(response).Flush(); err != nil {
+			t.Errorf("flush response: %v", err)
+			return
+		}
+		response.WriteHeader(http.StatusInternalServerError)
+	})).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+		t.Fatalf("decode completion log: %v", err)
+	}
+	if record["status"] != float64(http.StatusOK) {
+		t.Fatalf("logged status = %v, want %d", record["status"], http.StatusOK)
 	}
 }
 

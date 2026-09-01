@@ -76,24 +76,35 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 }
 
 func joinURLPath(baseURL, requestURL *url.URL) (string, string) {
-	join := func(basePath, requestPath string) string {
-		baseSlash := strings.HasSuffix(basePath, "/")
-		requestSlash := strings.HasPrefix(requestPath, "/")
-		switch {
-		case baseSlash && requestSlash:
-			return basePath + requestPath[1:]
-		case !baseSlash && !requestSlash:
-			return basePath + "/" + requestPath
-		default:
-			return basePath + requestPath
-		}
+	if baseURL.RawPath == "" && requestURL.RawPath == "" {
+		return joinPath(baseURL.Path, requestURL.Path)
 	}
 
-	path := join(baseURL.Path, requestURL.Path)
-	if baseURL.RawPath == "" && requestURL.RawPath == "" {
-		return path, ""
+	baseEscapedPath := baseURL.EscapedPath()
+	requestEscapedPath := requestURL.EscapedPath()
+	baseSlash := strings.HasSuffix(baseEscapedPath, "/")
+	requestSlash := strings.HasPrefix(requestEscapedPath, "/")
+	switch {
+	case baseSlash && requestSlash:
+		return baseURL.Path + requestURL.Path[1:], baseEscapedPath + requestEscapedPath[1:]
+	case !baseSlash && !requestSlash:
+		return baseURL.Path + "/" + requestURL.Path, baseEscapedPath + "/" + requestEscapedPath
+	default:
+		return baseURL.Path + requestURL.Path, baseEscapedPath + requestEscapedPath
 	}
-	return path, join(baseURL.EscapedPath(), requestURL.EscapedPath())
+}
+
+func joinPath(basePath, requestPath string) (string, string) {
+	baseSlash := strings.HasSuffix(basePath, "/")
+	requestSlash := strings.HasPrefix(requestPath, "/")
+	switch {
+	case baseSlash && requestSlash:
+		return basePath + requestPath[1:], ""
+	case !baseSlash && !requestSlash:
+		return basePath + "/" + requestPath, ""
+	default:
+		return basePath + requestPath, ""
+	}
 }
 
 var hopByHopHeaders = map[string]struct{}{
@@ -194,6 +205,14 @@ type completionResponseWriter struct {
 
 func (writer *completionResponseWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
+}
+
+func (writer *completionResponseWriter) FlushError() error {
+	err := http.NewResponseController(writer.ResponseWriter).Flush()
+	if err == nil && writer.status == 0 {
+		writer.status = http.StatusOK
+	}
+	return err
 }
 
 func (writer *completionResponseWriter) WriteHeader(status int) {
