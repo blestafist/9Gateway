@@ -26,6 +26,10 @@ statuses, unknown endpoints, binary bodies, and bounded large requests.
 Timing assertions use generous CI thresholds, such as EOF-to-close below 250 ms,
 not flaky one-millisecond targets.
 
+Split and coalesced SSE tests compare the complete raw body. They must not assume
+that an upstream write, HTTP read, or TCP read corresponds to one downstream
+event or read.
+
 ## Limit Tests
 
 Rate, token, and budget windows use an injectable clock; tests never sleep for a

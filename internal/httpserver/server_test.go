@@ -650,6 +650,66 @@ func TestProxyPreservesSSECommentsDoneAndBytesAfterDone(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesSplitSSEWrites(t *testing.T) {
+	const wantBody = "da" + "ta: split across writes\r\n" + "\r\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		for _, fragment := range []string{"da", "ta: split ", "across writes", "\r\n", "\r\n"} {
+			if _, err := io.WriteString(response, fragment); err != nil {
+				return
+			}
+			if flusher, ok := response.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/stream")
+	if err != nil {
+		t.Fatalf("GET /v1/stream: %v", err)
+	}
+	gotBody, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read SSE body: %v", readErr)
+	}
+	if string(gotBody) != wantBody {
+		t.Fatalf("response body = %q, want %q", gotBody, wantBody)
+	}
+}
+
+func TestProxyPreservesCoalescedSSEEvents(t *testing.T) {
+	const wantBody = ": first\n\ndata: one\n\nevent: named\ndata: two\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, wantBody)
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/stream")
+	if err != nil {
+		t.Fatalf("GET /v1/stream: %v", err)
+	}
+	gotBody, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read SSE body: %v", readErr)
+	}
+	if string(gotBody) != wantBody {
+		t.Fatalf("response body = %q, want %q", gotBody, wantBody)
+	}
+}
+
 func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 	const body = "data: terminal\n\n"
 	upstreamClosed := make(chan time.Time, 1)
