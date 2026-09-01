@@ -19,8 +19,9 @@ reusing the read buffer.
 
 Upstream EOF immediately ends downstream, including streams without `[DONE]`.
 `finish_reason` is metadata, not a close signal. `[DONE]` passes through unchanged
-but is not required when upstream ends normally. Do not add heartbeat or use an
-idle/grace timeout to delay an EOF that already occurred.
+but is only payload for transparent transport and is not required when upstream
+ends normally. Comments pass through unchanged; the gateway does not generate
+heartbeats. Do not add an idle/grace timeout to delay an EOF that already occurred.
 
 A compatibility grace timeout for a genuinely hanging upstream is a separate,
 explicit, disabled-by-default policy. Never reproduce a multi-second delay after

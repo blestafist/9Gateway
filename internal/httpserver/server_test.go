@@ -578,6 +578,78 @@ func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesSSECommentsDoneAndBytesAfterDone(t *testing.T) {
+	const firstFragment = ": heartbeat\r\n\r\ndata: before-done\n\n"
+	const secondFragment = "data: [DONE]\n\n: after-done\r\n\r\ndata: still-open\n\n"
+	firstWritten := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(response, firstFragment); err != nil {
+			return
+		}
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(firstWritten)
+		<-releaseSecond
+		_, _ = io.WriteString(response, secondFragment)
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(func() {
+		select {
+		case <-releaseSecond:
+		default:
+			close(releaseSecond)
+		}
+		upstream.Close()
+	})
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/stream")
+	if err != nil {
+		t.Fatalf("GET /v1/stream: %v", err)
+	}
+	t.Cleanup(func() { response.Body.Close() })
+
+	select {
+	case <-firstWritten:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not flush first SSE fragment")
+	}
+
+	first := make([]byte, len(firstFragment))
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.ReadFull(response.Body, first)
+		readDone <- readErr
+	}()
+	select {
+	case readErr := <-readDone:
+		if readErr != nil {
+			t.Fatalf("read first SSE fragment: %v", readErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first comment/event fragment was buffered before flush")
+	}
+	if string(first) != firstFragment {
+		t.Fatalf("first fragment = %q, want %q", first, firstFragment)
+	}
+
+	close(releaseSecond)
+	rest, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read remaining SSE body: %v", err)
+	}
+	if got := string(first) + string(rest); got != firstFragment+secondFragment {
+		t.Fatalf("response body = %q, want %q", got, firstFragment+secondFragment)
+	}
+}
+
 func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 	const body = "data: terminal\n\n"
 	upstreamClosed := make(chan time.Time, 1)
