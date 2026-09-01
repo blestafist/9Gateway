@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -753,6 +754,76 @@ func TestCompletionLogContainsRequestMetadataWithoutAuthorization(t *testing.T) 
 	if strings.Contains(logs.String(), "Authorization") || strings.Contains(logs.String(), "client-secret") {
 		t.Fatal("completion log contains Authorization data")
 	}
+}
+
+func TestCompletionResponseWriterPreservesFlush(t *testing.T) {
+	underlying := &flushRecordingWriter{basicResponseWriter: &basicResponseWriter{header: make(http.Header)}}
+	writer := &completionResponseWriter{ResponseWriter: underlying}
+
+	if err := http.NewResponseController(writer).Flush(); err != nil {
+		t.Fatalf("flush wrapped writer: %v", err)
+	}
+	if !underlying.flushed {
+		t.Fatal("flush did not reach underlying writer")
+	}
+}
+
+func TestCompletionResponseWriterReportsUnsupportedFlush(t *testing.T) {
+	underlying := &basicResponseWriter{header: make(http.Header)}
+	writer := &completionResponseWriter{ResponseWriter: underlying}
+
+	err := http.NewResponseController(writer).Flush()
+	if !errors.Is(err, http.ErrNotSupported) {
+		t.Fatalf("flush error = %v, want %v", err, http.ErrNotSupported)
+	}
+}
+
+func TestCompletionResponseWriterCapturesStatusThroughLogging(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example.test/status", nil)
+	withCompletionLog(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusAccepted)
+	})).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusAccepted)
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("completion log lines = %d, want 1", len(lines))
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("decode completion log: %v", err)
+	}
+	if record["status"] != float64(http.StatusAccepted) {
+		t.Fatalf("logged status = %v, want %d", record["status"], http.StatusAccepted)
+	}
+}
+
+type basicResponseWriter struct {
+	header http.Header
+}
+
+func (writer *basicResponseWriter) Header() http.Header {
+	return writer.header
+}
+
+func (writer *basicResponseWriter) Write(body []byte) (int, error) {
+	return len(body), nil
+}
+
+func (writer *basicResponseWriter) WriteHeader(status int) {}
+
+type flushRecordingWriter struct {
+	*basicResponseWriter
+	flushed bool
+}
+
+func (writer *flushRecordingWriter) Flush() {
+	writer.flushed = true
 }
 
 func healthHandler() http.Handler {

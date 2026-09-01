@@ -15,6 +15,10 @@ error events include request ID but never Authorization, gateway keys, upstream
 keys, or per-token/chunk data by default. Upstream credentials must be redacted
 in tests as well as implementation.
 
+Observability wrappers around `http.ResponseWriter` must remain transparent to
+supported controller operations such as flush and must not alter cancellation or
+connection behavior. Unsupported operations retain their normal Go errors.
+
 ## Body Capture
 
 Body logging is opt-in because prompts can contain sensitive data. A bounded

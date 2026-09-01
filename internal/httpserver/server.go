@@ -192,6 +192,10 @@ type completionResponseWriter struct {
 	status int
 }
 
+func (writer *completionResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
 func (writer *completionResponseWriter) WriteHeader(status int) {
 	if writer.status != 0 {
 		return

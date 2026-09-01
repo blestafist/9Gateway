@@ -1,19 +1,18 @@
 # Current Work
 
-Current milestone: transport remediation before transparent SSE.
+Current milestone: transparent streaming transport.
 
-Done: `T001`-`T024`.
+Done: `T001`-`T025`.
 
-Current: `T025` - preserve optional ResponseWriter capabilities.
+Current: `T026` - classify the actual upstream response.
 
-Next: `T026` - classify the actual upstream response.
+Next: `T027` - dispatch SSE to a dedicated passthrough path.
 
 Queued: `T021`-`T040`.
 
-Known issues: completion logging currently hides optional `ResponseWriter`
-capabilities. Transparent SSE flush, EOF-close latency, active-stream
-cancellation, and unrestricted parallel stream behavior are not yet covered by
-the required regressions.
+Known issues: transparent SSE flush, EOF-close latency, active-stream
+cancellation, and unrestricted parallel stream behavior are not yet implemented
+or covered by the required regressions.
 
 Important: complete `T021`-`T025` before adding SSE behavior. Keep `T026`-`T034`
 focused on raw transparent streaming and `T035`-`T040` on a bounded generic SSE
