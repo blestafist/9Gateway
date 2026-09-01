@@ -2,17 +2,18 @@
 
 Current milestone: transparent streaming transport.
 
-Done: `T001`-`T034`.
+Done: `T001`-`T035`.
 
-Current: `T035` - define a protocol-neutral SSE parser contract.
+Current: `T036` - parse SSE data lines and event names.
 
-Next: `T036` - parse SSE data lines and event names.
+Next: `T037` - handle SSE comments and field syntax safely.
 
-Queued: `T035`-`T040`.
+Queued: `T036`-`T040`.
 
-Known issues: bounded generic SSE parser behavior is not yet implemented.
+Known issues: generic SSE field parsing, comments, and size enforcement are not
+yet implemented.
 
-Important: `T021`-`T034` are complete. Keep `T035`-`T040` focused on the bounded
+Important: `T021`-`T035` are complete. Keep `T036`-`T040` focused on the bounded
 generic SSE parser and test infrastructure. Do not add OpenAI stream observation,
 SSE-to-JSON aggregation, authentication, SQLite, limits, budgets, accounting, or
 telemetry persistence. Upstream EOF, not `[DONE]` or `finish_reason`, controls

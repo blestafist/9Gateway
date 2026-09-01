@@ -29,6 +29,12 @@ the upstream body has physically ended.
 
 ## SSE Framing
 
+The protocol-neutral parser exposes `SSEEvent{Event, Data}` through a sequential
+reader constructed with an explicit positive maximum event size in bytes. It
+returns no fabricated event for empty input and returns `io.EOF` after the final
+complete event. Returned event strings are owned by the caller. The parser is
+separate from the transparent transport hot path.
+
 The generic parser supports `event:`, one or more `data:` lines, comments, blank
 line event termination, split reads, and multiple events per read. It enforces a
 bounded event size and knows nothing about OpenAI. Read boundaries are never
