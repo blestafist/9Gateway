@@ -30,7 +30,12 @@ the upstream body has physically ended.
 ## SSE Framing
 
 The protocol-neutral parser exposes `SSEEvent{Event, Data}` through a sequential
-reader constructed with an explicit positive maximum event size in bytes. It
+reader constructed with an explicit positive maximum event size in bytes. The
+limit counts every input byte belonging to one framed event, including field
+and comment bytes, line endings, and the blank-line delimiter. Events at the
+limit succeed; crossing it returns `ErrEventTooLarge`, stops accumulation, and
+puts the parser in a terminal error state. Subsequent calls return the same
+error without reading more input. It
 returns no fabricated event for empty input and returns `io.EOF` after the final
 complete event. Returned event strings are owned by the caller. The parser is
 separate from the transparent transport hot path.

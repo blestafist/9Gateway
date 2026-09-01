@@ -2,15 +2,15 @@
 
 Current milestone: transparent streaming transport.
 
-Done: `T001`-`T038`.
+Done: `T001`-`T039`.
 
-Current: `T039` - bound SSE event memory.
+Current: `T040` - add a reusable streaming test upstream.
 
-Next: `T040` - add a reusable streaming test upstream.
+Next: none in the active queue.
 
-Queued: `T039`-`T040`.
+Queued: `T040`.
 
-Known issues: parser event-size enforcement and reusable streaming test harness are not yet implemented.
+Known issues: the reusable streaming test harness is not yet implemented.
 
 Important: `T021`-`T035` are complete. Keep `T036`-`T040` focused on the bounded
 generic SSE parser and test infrastructure. Do not add OpenAI stream observation,

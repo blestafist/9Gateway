@@ -259,3 +259,75 @@ func TestReaderRejectsFramesOverConfiguredSize(t *testing.T) {
 		t.Fatalf("Next error = %v, want %v", err, ErrEventTooLarge)
 	}
 }
+
+func TestReaderEnforcesFramedEventSizeBoundaries(t *testing.T) {
+	input := "data: x\n\n"
+	for _, test := range []struct {
+		name      string
+		maxSize   int
+		wantEvent SSEEvent
+		wantError error
+	}{
+		{name: "below limit", maxSize: len(input) - 1, wantError: ErrEventTooLarge},
+		{name: "exactly at limit", maxSize: len(input), wantEvent: SSEEvent{Data: "x"}},
+		{name: "above limit", maxSize: len(input) + 1, wantEvent: SSEEvent{Data: "x"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader, err := NewReader(strings.NewReader(input), test.maxSize)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+
+			got, err := reader.Next()
+			if err != test.wantError {
+				if test.wantError == nil {
+					t.Fatalf("Next error = %v, want no error", err)
+				}
+				t.Fatalf("Next error = %v, want %v", err, test.wantError)
+			}
+			if test.wantError == nil && got != test.wantEvent {
+				t.Fatalf("event = %#v, want %#v", got, test.wantEvent)
+			}
+		})
+	}
+}
+
+func TestReaderRejectsOversizedUnterminatedInput(t *testing.T) {
+	input := "data: unterminated"
+	reader, err := NewReader(strings.NewReader(input), len(input)-1)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	if _, err := reader.Next(); err != ErrEventTooLarge {
+		t.Fatalf("Next error = %v, want %v", err, ErrEventTooLarge)
+	}
+}
+
+func TestReaderCountsCumulativeMultiLineEventBytes(t *testing.T) {
+	input := "data: one\ndata: two\n\n"
+	reader, err := NewReader(strings.NewReader(input), len(input)-1)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	if _, err := reader.Next(); err != ErrEventTooLarge {
+		t.Fatalf("Next error = %v, want %v", err, ErrEventTooLarge)
+	}
+}
+
+func TestReaderSizeErrorIsTerminal(t *testing.T) {
+	reader, err := NewReader(strings.NewReader("data: too large\n\ndata: later\n\n"), 5)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	first, firstErr := reader.Next()
+	second, secondErr := reader.Next()
+	if first != (SSEEvent{}) || firstErr != ErrEventTooLarge {
+		t.Fatalf("first result = %#v, %v, want terminal size error", first, firstErr)
+	}
+	if second != (SSEEvent{}) || secondErr != ErrEventTooLarge {
+		t.Fatalf("second result = %#v, %v, want same terminal size error", second, secondErr)
+	}
+}

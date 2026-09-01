@@ -22,7 +22,9 @@ var ErrEventTooLarge = errors.New("streaming: event exceeds maximum size")
 // Reader emits complete SSE events sequentially from a stream. It joins data
 // fields with newlines, uses a blank line to complete an event, and ignores
 // fields it does not understand. maxEventSize is measured in bytes of one
-// framed event, including its input line endings.
+// framed event, including all field, comment, and line-ending bytes through the
+// blank-line delimiter. A size error is terminal; subsequent calls return the
+// same ErrEventTooLarge without reading more input.
 type Reader struct {
 	input        *bufio.Reader
 	maxEventSize int
