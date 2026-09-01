@@ -35,6 +35,10 @@ and cancellation after a response has begun streaming. The active-stream case
 must read a flushed fragment first, then verify that the upstream request context
 is canceled.
 
+The unrestricted parallel-stream regression uses two clients and shared barriers:
+both upstream handlers must arrive and both clients must receive their first
+fragment before either completion barrier is released.
+
 ## Limit Tests
 
 Rate, token, and budget windows use an injectable clock; tests never sleep for a

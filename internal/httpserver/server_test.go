@@ -775,6 +775,78 @@ func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
 	}
 }
 
+func TestProxyStreamsRunInParallel(t *testing.T) {
+	const firstFragment = "data: first\n\n"
+	arrivals := make(chan struct{}, 2)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, firstFragment)
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		arrivals <- struct{}{}
+		<-release
+		_, _ = io.WriteString(response, "data: done\n\n")
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		upstream.Close()
+	})
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	type streamResult struct {
+		body []byte
+		err  error
+	}
+	results := make(chan streamResult, 2)
+	for range 2 {
+		go func() {
+			response, err := http.Get(gateway.URL + "/v1/stream")
+			if err != nil {
+				results <- streamResult{err: err}
+				return
+			}
+			body, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			results <- streamResult{body: body, err: readErr}
+		}()
+	}
+
+	for range 2 {
+		select {
+		case <-arrivals:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("not both streams reached upstream before completion")
+		}
+	}
+	close(release)
+
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatalf("parallel stream request: %v", result.err)
+			}
+			if got := string(result.body); got != firstFragment+"data: done\n\n" {
+				t.Fatalf("parallel stream body = %q, want %q", got, firstFragment+"data: done\n\n")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("parallel stream did not complete after release")
+		}
+	}
+}
+
 func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 	const body = "data: terminal\n\n"
 	upstreamClosed := make(chan time.Time, 1)
