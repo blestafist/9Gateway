@@ -2,19 +2,18 @@
 
 Current milestone: transport remediation before transparent SSE.
 
-Done: `T001`-`T023`.
+Done: `T001`-`T024`.
 
-Current: `T024` - prevent upstream credential disclosure.
+Current: `T025` - preserve optional ResponseWriter capabilities.
 
-Next: `T025` - preserve optional ResponseWriter capabilities.
+Next: `T026` - classify the actual upstream response.
 
 Queued: `T021`-`T040`.
 
-Known issues: the completed raw proxy can currently reflect an upstream
-Authorization response header and hide optional `ResponseWriter` capabilities
-behind completion logging. Transparent SSE flush, EOF-close latency,
-active-stream cancellation, and unrestricted parallel stream behavior are not
-yet covered by the required regressions.
+Known issues: completion logging currently hides optional `ResponseWriter`
+capabilities. Transparent SSE flush, EOF-close latency, active-stream
+cancellation, and unrestricted parallel stream behavior are not yet covered by
+the required regressions.
 
 Important: complete `T021`-`T025` before adding SSE behavior. Keep `T026`-`T034`
 focused on raw transparent streaming and `T035`-`T040` on a bounded generic SSE

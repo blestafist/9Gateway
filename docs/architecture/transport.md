@@ -34,6 +34,11 @@ the configured upstream credential, and never expose that credential in
 responses or logs. Do not preserve `Content-Length` after a body transformation.
 Any body transformation must instead recompute the length or remove it.
 
+Response filtering is direction-specific: never copy `Authorization` or
+gateway-owned credential headers from upstream to downstream, even if upstream
+reflects them. Preserve safe end-to-end headers and opaque response bodies; the
+gateway does not claim arbitrary secret scanning or body redaction here.
+
 ## Upstream Client
 
 Use one long-lived `http.Client` and `http.Transport` with connection pooling and

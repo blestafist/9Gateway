@@ -338,6 +338,43 @@ func TestProxyCopiesEndToEndResponseHeadersAndRemovesHopByHopHeaders(t *testing.
 	}
 }
 
+func TestProxyDoesNotExposeUpstreamAuthorization(t *testing.T) {
+	const upstreamSecret = "upstream-secret"
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Authorization", "Bearer "+upstreamSecret)
+		response.Header().Set("Proxy-Authorization", "Bearer proxy-secret")
+		response.Header().Set("X-Upstream-Trace", "trace-value")
+		response.Header().Set("Connection", "X-Remove-Me")
+		response.Header().Set("X-Remove-Me", "hop-by-hop-value")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	gateway := httptest.NewServer(newHandler(logger, newProxyHandler(transport.NewClient(), upstream.URL, upstreamSecret)))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/status")
+	if err != nil {
+		t.Fatalf("GET /v1/status: %v", err)
+	}
+	response.Body.Close()
+
+	if response.Header.Get("Authorization") != "" || response.Header.Get("Proxy-Authorization") != "" {
+		t.Fatal("downstream received upstream credential headers")
+	}
+	if response.Header.Get("X-Upstream-Trace") != "trace-value" {
+		t.Fatalf("X-Upstream-Trace = %q, want %q", response.Header.Get("X-Upstream-Trace"), "trace-value")
+	}
+	if response.Header.Get("Connection") != "" || response.Header.Get("X-Remove-Me") != "" {
+		t.Fatal("downstream received hop-by-hop response headers")
+	}
+	if strings.Contains(logs.String(), upstreamSecret) || strings.Contains(logs.String(), "Authorization") {
+		t.Fatal("completion log contains upstream credential data")
+	}
+}
+
 func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte("{\"id\":\"response-1\",\"choices\":[{\"text\":\"keep spacing\"}]}\n")
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

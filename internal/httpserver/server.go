@@ -70,7 +70,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	defer upstreamResponse.Body.Close()
-	copyEndToEndHeaders(response.Header(), upstreamResponse.Header)
+	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
 	_, _ = io.Copy(response, upstreamResponse.Body)
 }
@@ -109,6 +109,17 @@ var hopByHopHeaders = map[string]struct{}{
 }
 
 func copyEndToEndHeaders(destination, source http.Header) {
+	copyHeaders(destination, source, nil)
+}
+
+func copyResponseHeaders(destination, source http.Header) {
+	copyHeaders(destination, source, map[string]struct{}{
+		"authorization":       {},
+		"proxy-authorization": {},
+	})
+}
+
+func copyHeaders(destination, source http.Header, deniedHeaders map[string]struct{}) {
 	connectionTokens := make(map[string]struct{})
 	for _, value := range source.Values("Connection") {
 		for _, token := range strings.Split(value, ",") {
@@ -122,6 +133,9 @@ func copyEndToEndHeaders(destination, source http.Header) {
 			continue
 		}
 		if _, ok := connectionTokens[lowerName]; ok {
+			continue
+		}
+		if _, ok := deniedHeaders[lowerName]; ok {
 			continue
 		}
 		for _, value := range values {
