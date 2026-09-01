@@ -16,6 +16,8 @@ statuses, unknown endpoints, binary bodies, and bounded large requests.
 - Upstream SSE for a non-stream client aggregates to valid JSON instead of a JSON
   unmarshal failure.
 - Terminal content followed by EOF closes downstream without seconds of delay.
+- `TestProxySSECloseDelayRegression` guards EOF-to-close below 250 ms in CI; this
+  is a regression guardrail, not a production latency SLA.
 - EOF does not depend on `[DONE]`.
 - Requests run concurrently unless a configured limit forbids it.
 - Client cancellation promptly reaches upstream.

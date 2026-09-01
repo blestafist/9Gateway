@@ -413,6 +413,224 @@ func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 	}
 }
 
+func TestProxyDispatchesResponseBodyByUpstreamContentType(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		contentType string
+		status      int
+		body        string
+	}{
+		{
+			name:        "json",
+			contentType: "application/json; charset=utf-8",
+			status:      http.StatusCreated,
+			body:        `{"id":"json-response"}`,
+		},
+		{
+			name:        "opaque",
+			contentType: "application/octet-stream",
+			status:      http.StatusPartialContent,
+			body:        "\x00opaque\xff",
+		},
+		{
+			name:        "SSE",
+			contentType: "text/event-stream; charset=utf-8",
+			status:      http.StatusTooManyRequests,
+			body:        "event: message\ndata: raw bytes\n\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", test.contentType)
+				response.Header().Set("X-Upstream-Mode", test.name)
+				response.WriteHeader(test.status)
+				_, _ = response.Write([]byte(test.body))
+			}))
+			t.Cleanup(upstream.Close)
+
+			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			t.Cleanup(gateway.Close)
+
+			response, err := http.Get(gateway.URL + "/v1/dispatch")
+			if err != nil {
+				t.Fatalf("GET /v1/dispatch: %v", err)
+			}
+			gotBody, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read response body: %v", readErr)
+			}
+
+			if response.StatusCode != test.status {
+				t.Fatalf("status = %d, want %d", response.StatusCode, test.status)
+			}
+			if response.Header.Get("Content-Type") != test.contentType {
+				t.Fatalf("Content-Type = %q, want %q", response.Header.Get("Content-Type"), test.contentType)
+			}
+			if response.Header.Get("X-Upstream-Mode") != test.name {
+				t.Fatalf("X-Upstream-Mode = %q, want %q", response.Header.Get("X-Upstream-Mode"), test.name)
+			}
+			if string(gotBody) != test.body {
+				t.Fatalf("response body = %q, want %q", gotBody, test.body)
+			}
+		})
+	}
+}
+
+func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
+	const firstFragment = "data: first\n\n"
+	const secondFragment = "data: second\n\n"
+	firstWritten := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(response, firstFragment); err != nil {
+			return
+		}
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(firstWritten)
+		<-releaseSecond
+		_, _ = io.WriteString(response, secondFragment)
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(func() {
+		select {
+		case <-releaseSecond:
+		default:
+			close(releaseSecond)
+		}
+		upstream.Close()
+	})
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/stream")
+	if err != nil {
+		t.Fatalf("GET /v1/stream: %v", err)
+	}
+	t.Cleanup(func() { response.Body.Close() })
+
+	select {
+	case <-firstWritten:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not write first fragment")
+	}
+
+	first := make([]byte, len(firstFragment))
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.ReadFull(response.Body, first)
+		readDone <- readErr
+	}()
+	select {
+	case readErr := <-readDone:
+		if readErr != nil {
+			t.Fatalf("read first fragment: %v", readErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SSE fragment was buffered before flush")
+	}
+	if string(first) != firstFragment {
+		t.Fatalf("first fragment = %q, want %q", first, firstFragment)
+	}
+
+	close(releaseSecond)
+	rest, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read remaining SSE body: %v", err)
+	}
+	if string(rest) != secondFragment {
+		t.Fatalf("remaining body = %q, want %q", rest, secondFragment)
+	}
+}
+
+func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
+	const body = "data: terminal\n\n"
+	upstreamClosed := make(chan time.Time, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		defer func() { upstreamClosed <- time.Now() }()
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, body)
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	startedAt := time.Now()
+	response, err := http.Get(gateway.URL + "/v1/stream")
+	if err != nil {
+		t.Fatalf("GET /v1/stream: %v", err)
+	}
+	gotBody, readErr := io.ReadAll(response.Body)
+	finishedAt := time.Now()
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read SSE body: %v", readErr)
+	}
+	if string(gotBody) != body {
+		t.Fatalf("response body = %q, want %q", gotBody, body)
+	}
+
+	select {
+	case closedAt := <-upstreamClosed:
+		if closedAt.Before(startedAt) || finishedAt.Sub(closedAt) > 250*time.Millisecond {
+			t.Fatalf("downstream completion was %v after upstream handler close", finishedAt.Sub(closedAt))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream close was not observed")
+	}
+}
+
+func TestProxySSECloseDelayRegression(t *testing.T) {
+	const body = "data: {\"finish_reason\":\"stop\"}\n\n"
+	upstreamReturned := make(chan time.Time, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		defer func() { upstreamReturned <- time.Now() }()
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, body)
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	response, err := http.Get(gateway.URL + "/v1/stream")
+	if err != nil {
+		t.Fatalf("GET /v1/stream: %v", err)
+	}
+	startedReading := time.Now()
+	gotBody, readErr := io.ReadAll(response.Body)
+	finishedReading := time.Now()
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read SSE body: %v", readErr)
+	}
+	if string(gotBody) != body {
+		t.Fatalf("response body = %q, want %q", gotBody, body)
+	}
+
+	select {
+	case upstreamEOF := <-upstreamReturned:
+		if delay := finishedReading.Sub(upstreamEOF); delay > 250*time.Millisecond {
+			t.Fatalf("downstream completed %v after upstream EOF", delay)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("upstream did not return within %v", time.Since(startedReading))
+	}
+}
+
 func TestProxyPreservesCompressedResponseRepresentation(t *testing.T) {
 	var compressed bytes.Buffer
 	compressor := gzip.NewWriter(&compressed)

@@ -60,7 +60,9 @@ Choose behavior after receiving actual upstream headers:
 
 The incoming `stream` value does not determine upstream response format.
 Missing or malformed `Content-Type` uses the opaque fallback. This stage does
-not sniff response body bytes.
+not sniff response body bytes. After safe headers and status are copied, SSE
+uses the dedicated transparent streaming loop; JSON and opaque responses use
+ordinary byte copying. The streaming loop is protocol-neutral.
 
 ## Cancellation
 

@@ -8,9 +8,12 @@ The hot path is:
 
 Flush every successful streaming write. No SQLite write, tokenizer, pricing
 lookup, blocking telemetry operation, or full event reconstruction may precede
-the flush. A lightweight observer may inspect chunks but cannot govern normal
-transport lifetime. If observation becomes asynchronous, copy or transfer
-buffer ownership before reusing the read buffer.
+the flush. The transparent implementation reads into a bounded buffer, writes
+the bytes as received, flushes through `http.ResponseController`, and repeats
+without interpreting read boundaries as event boundaries. A lightweight
+observer may inspect chunks but cannot govern normal transport lifetime. If
+observation becomes asynchronous, copy or transfer buffer ownership before
+reusing the read buffer.
 
 ## Termination
 

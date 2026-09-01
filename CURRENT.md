@@ -2,21 +2,20 @@
 
 Current milestone: transparent streaming transport.
 
-Done: `T001`-`T026`.
+Done: `T001`-`T030`.
 
-Current: `T027` - dispatch SSE to a dedicated passthrough path.
+Current: `T031` - preserve DONE, comments, and raw SSE framing.
 
-Next: `T028` - flush each successful SSE write.
+Next: `T032` - preserve split and coalesced SSE bytes.
 
-Queued: `T021`-`T040`.
+Queued: `T031`-`T040`.
 
-Known issues: transparent SSE flush, EOF-close latency, active-stream
-cancellation, and unrestricted parallel stream behavior are not yet implemented
-or covered by the required regressions.
+Known issues: active-stream cancellation and unrestricted parallel stream behavior
+are not yet implemented or covered by the required regressions.
 
-Important: complete `T021`-`T025` before adding SSE behavior. Keep `T026`-`T034`
-focused on raw transparent streaming and `T035`-`T040` on a bounded generic SSE
-parser and test infrastructure. Do not add OpenAI stream observation,
+Important: `T021`-`T030` are complete. Keep `T031`-`T034` focused on raw
+transparent streaming and `T035`-`T040` on a bounded generic SSE parser and test
+infrastructure. Do not add OpenAI stream observation,
 SSE-to-JSON aggregation, authentication, SQLite, limits, budgets, accounting, or
 telemetry persistence. Upstream EOF, not `[DONE]` or `finish_reason`, controls
 normal transparent stream completion.

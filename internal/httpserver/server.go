@@ -72,7 +72,38 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	defer upstreamResponse.Body.Close()
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
+	if classifyResponse(upstreamResponse.Header.Get("Content-Type")) == ResponseModeSSE {
+		_ = streamResponseBody(response, upstreamResponse.Body)
+		return
+	}
 	_, _ = io.Copy(response, upstreamResponse.Body)
+}
+
+func streamResponseBody(response http.ResponseWriter, body io.Reader) error {
+	controller := http.NewResponseController(response)
+	buffer := make([]byte, 32*1024)
+	for {
+		read, readErr := body.Read(buffer)
+		if read > 0 {
+			written, writeErr := response.Write(buffer[:read])
+			if writeErr != nil {
+				return writeErr
+			}
+			if written != read {
+				return io.ErrShortWrite
+			}
+			if flushErr := controller.Flush(); flushErr != nil {
+				return flushErr
+			}
+		}
+
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 func joinURLPath(baseURL, requestURL *url.URL) (string, string) {
