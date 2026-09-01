@@ -477,6 +477,35 @@ func TestProxyDispatchesResponseBodyByUpstreamContentType(t *testing.T) {
 	}
 }
 
+func TestProxyDispatchesOnlySSEThroughStreamingCopyPath(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		contentType string
+		wantFlushes int
+	}{
+		{name: "json", contentType: "application/json", wantFlushes: 0},
+		{name: "opaque", contentType: "application/octet-stream", wantFlushes: 0},
+		{name: "SSE", contentType: "text/event-stream", wantFlushes: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", test.contentType)
+				_, _ = io.WriteString(response, "body")
+			}))
+			t.Cleanup(upstream.Close)
+
+			handler := newProxyHandler(transport.NewClient(), upstream.URL, "upstream-secret")
+			request := httptest.NewRequest(http.MethodGet, "http://gateway.example.test/v1/dispatch", nil)
+			response := &flushCountingResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+			handler.ServeHTTP(response, request)
+
+			if response.flushes != test.wantFlushes {
+				t.Fatalf("flushes = %d, want %d for %s copy path", response.flushes, test.wantFlushes, test.name)
+			}
+		})
+	}
+}
+
 func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
 	const firstFragment = "data: first\n\n"
 	const secondFragment = "data: second\n\n"
@@ -1055,6 +1084,16 @@ func TestCompletionResponseWriterCapturesStatusThroughLogging(t *testing.T) {
 
 type basicResponseWriter struct {
 	header http.Header
+}
+
+type flushCountingResponseWriter struct {
+	*httptest.ResponseRecorder
+	flushes int
+}
+
+func (writer *flushCountingResponseWriter) Flush() {
+	writer.flushes++
+	writer.ResponseRecorder.Flush()
 }
 
 func (writer *basicResponseWriter) Header() http.Header {
