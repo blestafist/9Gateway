@@ -60,7 +60,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 			return SSEEvent{}, ErrEventTooLarge
 		}
 		line = append(line, part...)
-		if len(line) > 0 && !(len(line) == 1 && line[0] == '\n') && !(len(line) == 2 && line[0] == '\r' && line[1] == '\n') {
+		if !isBlankLine(line) {
 			hasContent = true
 		}
 
@@ -71,7 +71,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 			return SSEEvent{}, readErr
 		}
 
-		if len(line) == 1 && line[0] == '\n' || len(line) == 2 && line[0] == '\r' && line[1] == '\n' {
+		if isBlankLine(line) {
 			if hasContent {
 				return SSEEvent{}, nil
 			}
@@ -80,12 +80,13 @@ func (reader *Reader) Next() (SSEEvent, error) {
 		}
 
 		if readErr == io.EOF {
-			if !hasContent {
-				return SSEEvent{}, io.EOF
-			}
-			return SSEEvent{}, nil
+			return SSEEvent{}, io.EOF
 		}
 
 		line = line[:0]
 	}
+}
+
+func isBlankLine(line []byte) bool {
+	return len(line) == 1 && line[0] == '\n' || len(line) == 2 && line[0] == '\r' && line[1] == '\n'
 }

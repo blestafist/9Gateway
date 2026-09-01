@@ -728,7 +728,13 @@ func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gatewayCompleted := make(chan struct{})
+	proxy := newProxyHandler(transport.NewClient(), upstream.URL, "upstream-secret")
+	gatewayHandler := newHandler(slog.Default(), http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		proxy.ServeHTTP(response, request)
+		close(gatewayCompleted)
+	}))
+	gateway := httptest.NewServer(gatewayHandler)
 	t.Cleanup(gateway.Close)
 
 	requestContext, cancel := context.WithCancel(context.Background())
@@ -773,6 +779,11 @@ func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("upstream did not observe active stream cancellation")
 	}
+	select {
+	case <-gatewayCompleted:
+	case <-time.After(time.Second):
+		t.Fatal("gateway handler did not finish after active stream cancellation")
+	}
 }
 
 func TestProxyStreamsRunInParallel(t *testing.T) {
@@ -809,6 +820,7 @@ func TestProxyStreamsRunInParallel(t *testing.T) {
 		err  error
 	}
 	results := make(chan streamResult, 2)
+	firstReceived := make(chan struct{}, 2)
 	for range 2 {
 		go func() {
 			response, err := http.Get(gateway.URL + "/v1/stream")
@@ -816,9 +828,21 @@ func TestProxyStreamsRunInParallel(t *testing.T) {
 				results <- streamResult{err: err}
 				return
 			}
+			first := make([]byte, len(firstFragment))
+			if _, err := io.ReadFull(response.Body, first); err != nil {
+				response.Body.Close()
+				results <- streamResult{err: err}
+				return
+			}
+			if string(first) != firstFragment {
+				response.Body.Close()
+				results <- streamResult{err: errors.New("first SSE fragment changed")}
+				return
+			}
+			firstReceived <- struct{}{}
 			body, readErr := io.ReadAll(response.Body)
 			response.Body.Close()
-			results <- streamResult{body: body, err: readErr}
+			results <- streamResult{body: append(first, body...), err: readErr}
 		}()
 	}
 
@@ -828,6 +852,14 @@ func TestProxyStreamsRunInParallel(t *testing.T) {
 		case <-time.After(time.Second):
 			close(release)
 			t.Fatal("not both streams reached upstream before completion")
+		}
+	}
+	for range 2 {
+		select {
+		case <-firstReceived:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("not both clients received their first fragment before release")
 		}
 	}
 	close(release)

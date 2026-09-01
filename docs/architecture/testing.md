@@ -6,15 +6,14 @@ Use a real HTTP mock upstream and a real gateway HTTP server. Interface-only
 mocks cannot verify chunk boundaries, flushing, EOF, cancellation, content type,
 slow bodies, hanging connections, or parallel requests.
 
-Required transport scenarios include ordinary JSON, SSE with and without
-`[DONE]`, client `stream:false` with upstream SSE, split and coalesced SSE reads,
-fragmented tool calls, client cancellation, concurrent requests, upstream error
-statuses, unknown endpoints, binary bodies, and bounded large requests.
+Current transport scenarios include ordinary JSON, SSE with and without
+`[DONE]`, split and coalesced SSE reads, client cancellation, concurrent
+requests, upstream error statuses, unknown endpoints, binary bodies, and bounded
+large requests. Future compatibility coverage will include client `stream:false`
+with upstream SSE and fragmented tool calls.
 
 ## Regressions
 
-- Upstream SSE for a non-stream client aggregates to valid JSON instead of a JSON
-  unmarshal failure.
 - Terminal content followed by EOF closes downstream without seconds of delay.
 - `TestProxySSECloseDelayRegression` guards EOF-to-close below 250 ms in CI; this
   is a regression guardrail, not a production latency SLA.
@@ -23,8 +22,10 @@ statuses, unknown endpoints, binary bodies, and bounded large requests.
 - Client cancellation promptly reaches upstream.
 - Slow parsing/telemetry does not block streaming.
 
-Timing assertions use generous CI thresholds, such as EOF-to-close below 250 ms,
-not flaky one-millisecond targets.
+Future compatibility regressions will cover SSE aggregation for a non-stream
+client and fragmented tool calls.
+
+Timing assertions use generous CI thresholds, not flaky one-millisecond targets.
 
 Split and coalesced SSE tests compare the complete raw body. They must not assume
 that an upstream write, HTTP read, or TCP read corresponds to one downstream

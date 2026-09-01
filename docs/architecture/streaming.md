@@ -35,19 +35,21 @@ returns no fabricated event for empty input and returns `io.EOF` after the final
 complete event. Returned event strings are owned by the caller. The parser is
 separate from the transparent transport hot path.
 
-The generic parser supports `event:`, one or more `data:` lines, comments, blank
-line event termination, split reads, and multiple events per read. It enforces a
-bounded event size and knows nothing about OpenAI. Read boundaries are never
-assumed to be line or event boundaries.
+The planned generic parser supports `event:`, one or more `data:` lines,
+comments, blank line event termination, split reads, and multiple events per
+read. The T035 contract already enforces a bounded frame size; field-level
+semantics are implemented in T036-T040. The parser knows nothing about OpenAI,
+and read boundaries are never assumed to be line or event boundaries.
 
-OpenAI observation extracts ID, model, choices, role, content, finish reason,
+Future OpenAI observation extracts ID, model, choices, role, content, finish reason,
 tool calls, usage, and `[DONE]`. Parse failures in passive observation are
 telemetry errors and do not break otherwise healthy passthrough.
 
 ## SSE To JSON
 
 When a client explicitly requests `stream:false` and upstream actually returns
-SSE, buffer and aggregate the stream into one OpenAI-compatible JSON response.
+SSE, a future compatibility layer may buffer and aggregate the stream into one
+OpenAI-compatible JSON response.
 Support multiple choices, role/content deltas, finish reason, usage, and indexed
 tool calls. Concatenate fragmented function arguments before any JSON decoding.
 
