@@ -31,6 +31,10 @@ keep-alive. Do not set a small `MaxConnsPerHost` that serializes requests. Avoid
 a short total client timeout for streaming; use dial, TLS handshake, response
 header, idle connection, and request-context deadlines independently.
 
+Disable Go's automatic compression negotiation and decompression on the upstream
+transport. Forward a client's `Accept-Encoding` normally and preserve the exact
+upstream representation together with its `Content-Encoding` header.
+
 ## Response Classification
 
 Choose behavior after receiving actual upstream headers:

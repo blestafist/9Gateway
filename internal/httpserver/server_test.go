@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -247,6 +248,68 @@ func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 	}
 	if !bytes.Equal(gotBody, wantBody) {
 		t.Fatalf("response body = %q, want %q", gotBody, wantBody)
+	}
+}
+
+func TestProxyPreservesCompressedResponseRepresentation(t *testing.T) {
+	var compressed bytes.Buffer
+	compressor := gzip.NewWriter(&compressed)
+	if _, err := compressor.Write([]byte("compressed upstream response")); err != nil {
+		t.Fatalf("compress response: %v", err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatalf("close compressor: %v", err)
+	}
+	wantBody := compressed.Bytes()
+
+	for _, test := range []struct {
+		name           string
+		acceptEncoding string
+	}{
+		{name: "absent"},
+		{name: "client provided", acceptEncoding: "gzip"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstreamEncoding := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				upstreamEncoding <- request.Header.Get("Accept-Encoding")
+				response.Header().Set("Content-Encoding", "gzip")
+				response.WriteHeader(http.StatusOK)
+				_, _ = response.Write(wantBody)
+			}))
+			t.Cleanup(upstream.Close)
+
+			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			t.Cleanup(gateway.Close)
+
+			request, err := http.NewRequest(http.MethodGet, gateway.URL+"/v1/responses", nil)
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+			if test.acceptEncoding != "" {
+				request.Header.Set("Accept-Encoding", test.acceptEncoding)
+			}
+			client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatalf("GET /v1/responses: %v", err)
+			}
+			gotBody, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read response body: %v", readErr)
+			}
+
+			if got := <-upstreamEncoding; got != test.acceptEncoding {
+				t.Fatalf("upstream Accept-Encoding = %q, want %q", got, test.acceptEncoding)
+			}
+			if got := response.Header.Get("Content-Encoding"); got != "gzip" {
+				t.Fatalf("Content-Encoding = %q, want gzip", got)
+			}
+			if !bytes.Equal(gotBody, wantBody) {
+				t.Fatalf("response body changed: got %x, want %x", gotBody, wantBody)
+			}
+		})
 	}
 }
 

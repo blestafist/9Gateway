@@ -15,6 +15,9 @@ func TestNewClientUsesPooledTransportWithoutTotalTimeout(t *testing.T) {
 	if client.Timeout != 0 {
 		t.Fatalf("client timeout = %s, want no total timeout", client.Timeout)
 	}
+	if !transport.DisableCompression {
+		t.Fatal("transport automatic compression must be disabled")
+	}
 	if transport.MaxIdleConnsPerHost < 2 {
 		t.Fatalf("max idle connections per host = %d, want concurrent reuse", transport.MaxIdleConnsPerHost)
 	}
