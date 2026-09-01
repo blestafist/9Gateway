@@ -2,18 +2,18 @@
 
 Current milestone: transparent streaming transport.
 
-Done: `T001`-`T039`.
+Done: `T001`-`T040`.
 
-Current: `T040` - add a reusable streaming test upstream.
+Current: none.
 
-Next: none in the active queue.
+Next: select the next milestone.
 
-Queued: `T040`.
+Queued: none.
 
-Known issues: the reusable streaming test harness is not yet implemented.
+Known issues: none recorded for the completed transparent streaming milestone.
 
-Important: `T021`-`T035` are complete. Keep `T036`-`T040` focused on the bounded
-generic SSE parser and test infrastructure. Do not add OpenAI stream observation,
-SSE-to-JSON aggregation, authentication, SQLite, limits, budgets, accounting, or
-telemetry persistence. Upstream EOF, not `[DONE]` or `finish_reason`, controls
+Important: `T021`-`T040` are complete. The transparent streaming milestone and
+bounded generic SSE parser remain separate from OpenAI stream observation,
+SSE-to-JSON aggregation, authentication, SQLite, limits, budgets, accounting,
+and telemetry persistence. Upstream EOF, not `[DONE]` or `finish_reason`, controls
 normal transparent stream completion.

@@ -40,6 +40,14 @@ The unrestricted parallel-stream regression uses two clients and shared barriers
 both upstream handlers must arrive and both clients must receive their first
 fragment before either completion barrier is released.
 
+Shared streaming setup lives in `internal/httpserver/stream_test.go`. Its
+test-only script controls real upstream fragments, flushes, first-fragment and
+release barriers, EOF timestamps, arrivals, and cancellation observation. Cleanup
+always releases a blocked stream before closing the server. The harness reduces
+setup duplication only; all transport assertions continue to use real HTTP
+servers, including JSON, `[DONE]` and no-`[DONE]` SSE, split/coalesced writes,
+hanging requests, active cancellation, and parallel streams.
+
 ## Limit Tests
 
 Rate, token, and budget windows use an injectable clock; tests never sleep for a

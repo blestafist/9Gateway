@@ -58,10 +58,11 @@ func NewReader(input io.Reader, maxEventSize int) (*Reader, error) {
 	}, nil
 }
 
-// Next returns the next complete event. Data lines are joined with a newline,
-// and an optional event field supplies the event name. An input stream with no
-// event returns io.EOF, and EOF after a completed event is returned on the
-// following call. Returned strings are independent of the reader's buffers.
+// Next returns the next complete event independently of input read boundaries.
+// Data lines are joined with a newline, and an optional event field supplies the
+// event name. Comments and unknown colon fields are ignored. An input stream
+// with no event returns io.EOF, and EOF after a completed event is returned on
+// the following call. Returned strings are independent of the reader's buffers.
 func (reader *Reader) Next() (SSEEvent, error) {
 	if reader.terminalErr != nil {
 		return SSEEvent{}, reader.terminalErr

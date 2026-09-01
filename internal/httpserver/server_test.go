@@ -385,12 +385,11 @@ func TestProxyDoesNotExposeUpstreamAuthorization(t *testing.T) {
 
 func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 	wantBody := []byte("{\"id\":\"response-1\",\"choices\":[{\"text\":\"keep spacing\"}]}\n")
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "application/json")
-		response.WriteHeader(http.StatusCreated)
-		_, _ = response.Write(wantBody)
-	}))
-	t.Cleanup(upstream.Close)
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType: "application/json",
+		status:      http.StatusCreated,
+		fragments:   []string{string(wantBody)},
+	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
@@ -509,30 +508,11 @@ func TestProxyDispatchesOnlySSEThroughStreamingCopyPath(t *testing.T) {
 func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
 	const firstFragment = "data: first\n\n"
 	const secondFragment = "data: second\n\n"
-	firstWritten := make(chan struct{})
-	releaseSecond := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "text/event-stream")
-		if _, err := io.WriteString(response, firstFragment); err != nil {
-			return
-		}
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		close(firstWritten)
-		<-releaseSecond
-		_, _ = io.WriteString(response, secondFragment)
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}))
-	t.Cleanup(func() {
-		select {
-		case <-releaseSecond:
-		default:
-			close(releaseSecond)
-		}
-		upstream.Close()
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType:    "text/event-stream",
+		fragments:      []string{firstFragment, secondFragment},
+		flushEach:      true,
+		waitAfterFirst: true,
 	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
@@ -545,9 +525,9 @@ func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
 	t.Cleanup(func() { response.Body.Close() })
 
 	select {
-	case <-firstWritten:
+	case <-upstream.firstFlushed:
 	case <-time.After(time.Second):
-		t.Fatal("upstream did not write first fragment")
+		t.Fatal("upstream did not flush first fragment")
 	}
 
 	first := make([]byte, len(firstFragment))
@@ -568,7 +548,7 @@ func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
 		t.Fatalf("first fragment = %q, want %q", first, firstFragment)
 	}
 
-	close(releaseSecond)
+	upstream.release()
 	rest, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatalf("read remaining SSE body: %v", err)
@@ -581,30 +561,11 @@ func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
 func TestProxyPreservesSSECommentsDoneAndBytesAfterDone(t *testing.T) {
 	const firstFragment = ": heartbeat\r\n\r\ndata: before-done\n\n"
 	const secondFragment = "data: [DONE]\n\n: after-done\r\n\r\ndata: still-open\n\n"
-	firstWritten := make(chan struct{})
-	releaseSecond := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "text/event-stream")
-		if _, err := io.WriteString(response, firstFragment); err != nil {
-			return
-		}
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		close(firstWritten)
-		<-releaseSecond
-		_, _ = io.WriteString(response, secondFragment)
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}))
-	t.Cleanup(func() {
-		select {
-		case <-releaseSecond:
-		default:
-			close(releaseSecond)
-		}
-		upstream.Close()
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType:    "text/event-stream",
+		fragments:      []string{firstFragment, secondFragment},
+		flushEach:      true,
+		waitAfterFirst: true,
 	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
@@ -617,7 +578,7 @@ func TestProxyPreservesSSECommentsDoneAndBytesAfterDone(t *testing.T) {
 	t.Cleanup(func() { response.Body.Close() })
 
 	select {
-	case <-firstWritten:
+	case <-upstream.firstFlushed:
 	case <-time.After(time.Second):
 		t.Fatal("upstream did not flush first SSE fragment")
 	}
@@ -640,7 +601,7 @@ func TestProxyPreservesSSECommentsDoneAndBytesAfterDone(t *testing.T) {
 		t.Fatalf("first fragment = %q, want %q", first, firstFragment)
 	}
 
-	close(releaseSecond)
+	upstream.release()
 	rest, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatalf("read remaining SSE body: %v", err)
@@ -652,18 +613,11 @@ func TestProxyPreservesSSECommentsDoneAndBytesAfterDone(t *testing.T) {
 
 func TestProxyPreservesSplitSSEWrites(t *testing.T) {
 	const wantBody = "da" + "ta: split across writes\r\n" + "\r\n"
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "text/event-stream")
-		for _, fragment := range []string{"da", "ta: split ", "across writes", "\r\n", "\r\n"} {
-			if _, err := io.WriteString(response, fragment); err != nil {
-				return
-			}
-			if flusher, ok := response.(http.Flusher); ok {
-				flusher.Flush()
-			}
-		}
-	}))
-	t.Cleanup(upstream.Close)
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType: "text/event-stream",
+		fragments:   []string{"da", "ta: split ", "across writes", "\r\n", "\r\n"},
+		flushEach:   true,
+	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
@@ -684,14 +638,11 @@ func TestProxyPreservesSplitSSEWrites(t *testing.T) {
 
 func TestProxyPreservesCoalescedSSEEvents(t *testing.T) {
 	const wantBody = ": first\n\ndata: one\n\nevent: named\ndata: two\n\n"
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(response, wantBody)
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}))
-	t.Cleanup(upstream.Close)
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType: "text/event-stream",
+		fragments:   []string{wantBody},
+		flushEach:   true,
+	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
@@ -712,21 +663,12 @@ func TestProxyPreservesCoalescedSSEEvents(t *testing.T) {
 
 func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
 	const firstFragment = "data: first\n\n"
-	upstreamReceived := make(chan struct{})
-	upstreamCancelled := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "text/event-stream")
-		if _, err := io.WriteString(response, firstFragment); err != nil {
-			return
-		}
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		close(upstreamReceived)
-		<-request.Context().Done()
-		close(upstreamCancelled)
-	}))
-	t.Cleanup(upstream.Close)
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType:         "text/event-stream",
+		fragments:           []string{firstFragment},
+		flushEach:           true,
+		waitForCancellation: true,
+	})
 
 	gatewayCompleted := make(chan struct{})
 	proxy := newProxyHandler(transport.NewClient(), upstream.URL, "upstream-secret")
@@ -750,7 +692,7 @@ func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
 	t.Cleanup(func() { response.Body.Close() })
 
 	select {
-	case <-upstreamReceived:
+	case <-upstream.firstFlushed:
 	case <-time.After(time.Second):
 		t.Fatal("upstream did not receive active stream")
 	}
@@ -775,7 +717,7 @@ func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
 	response.Body.Close()
 
 	select {
-	case <-upstreamCancelled:
+	case <-upstream.cancelled:
 	case <-time.After(time.Second):
 		t.Fatal("upstream did not observe active stream cancellation")
 	}
@@ -788,28 +730,11 @@ func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
 
 func TestProxyStreamsRunInParallel(t *testing.T) {
 	const firstFragment = "data: first\n\n"
-	arrivals := make(chan struct{}, 2)
-	release := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(response, firstFragment)
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		arrivals <- struct{}{}
-		<-release
-		_, _ = io.WriteString(response, "data: done\n\n")
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}))
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-		upstream.Close()
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType:    "text/event-stream",
+		fragments:      []string{firstFragment, "data: done\n\n"},
+		flushEach:      true,
+		waitAfterFirst: true,
 	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
@@ -848,9 +773,9 @@ func TestProxyStreamsRunInParallel(t *testing.T) {
 
 	for range 2 {
 		select {
-		case <-arrivals:
+		case <-upstream.arrivals:
 		case <-time.After(time.Second):
-			close(release)
+			upstream.release()
 			t.Fatal("not both streams reached upstream before completion")
 		}
 	}
@@ -858,11 +783,11 @@ func TestProxyStreamsRunInParallel(t *testing.T) {
 		select {
 		case <-firstReceived:
 		case <-time.After(time.Second):
-			close(release)
+			upstream.release()
 			t.Fatal("not both clients received their first fragment before release")
 		}
 	}
-	close(release)
+	upstream.release()
 
 	for range 2 {
 		select {
@@ -881,16 +806,11 @@ func TestProxyStreamsRunInParallel(t *testing.T) {
 
 func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 	const body = "data: terminal\n\n"
-	upstreamClosed := make(chan time.Time, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		defer func() { upstreamClosed <- time.Now() }()
-		response.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(response, body)
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}))
-	t.Cleanup(upstream.Close)
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType: "text/event-stream",
+		fragments:   []string{body},
+		flushEach:   true,
+	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
@@ -911,7 +831,7 @@ func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 	}
 
 	select {
-	case closedAt := <-upstreamClosed:
+	case closedAt := <-upstream.returned:
 		if closedAt.Before(startedAt) || finishedAt.Sub(closedAt) > 250*time.Millisecond {
 			t.Fatalf("downstream completion was %v after upstream handler close", finishedAt.Sub(closedAt))
 		}
@@ -922,16 +842,11 @@ func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 
 func TestProxySSECloseDelayRegression(t *testing.T) {
 	const body = "data: {\"finish_reason\":\"stop\"}\n\n"
-	upstreamReturned := make(chan time.Time, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		defer func() { upstreamReturned <- time.Now() }()
-		response.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(response, body)
-		if flusher, ok := response.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}))
-	t.Cleanup(upstream.Close)
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType: "text/event-stream",
+		fragments:   []string{body},
+		flushEach:   true,
+	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
@@ -952,7 +867,7 @@ func TestProxySSECloseDelayRegression(t *testing.T) {
 	}
 
 	select {
-	case upstreamEOF := <-upstreamReturned:
+	case upstreamEOF := <-upstream.returned:
 		if delay := finishedReading.Sub(upstreamEOF); delay > 250*time.Millisecond {
 			t.Fatalf("downstream completed %v after upstream EOF", delay)
 		}
@@ -1104,14 +1019,9 @@ func (roundTripper roundTripperFunc) RoundTrip(request *http.Request) (*http.Res
 }
 
 func TestProxyPropagatesHTTPClientCancellationToUpstream(t *testing.T) {
-	upstreamReceived := make(chan struct{})
-	upstreamCancelled := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		close(upstreamReceived)
-		<-request.Context().Done()
-		close(upstreamCancelled)
-	}))
-	t.Cleanup(upstream.Close)
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		waitForCancellation: true,
+	})
 
 	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
@@ -1131,7 +1041,7 @@ func TestProxyPropagatesHTTPClientCancellationToUpstream(t *testing.T) {
 	}()
 
 	select {
-	case <-upstreamReceived:
+	case <-upstream.arrivals:
 	case <-time.After(time.Second):
 		cancel()
 		t.Fatal("upstream did not receive request")
@@ -1139,7 +1049,7 @@ func TestProxyPropagatesHTTPClientCancellationToUpstream(t *testing.T) {
 
 	cancel()
 	select {
-	case <-upstreamCancelled:
+	case <-upstream.cancelled:
 	case <-time.After(time.Second):
 		t.Fatal("upstream did not observe client cancellation")
 	}
