@@ -2,11 +2,11 @@
 
 Current milestone: transparent streaming transport.
 
-Done: `T001`-`T025`.
+Done: `T001`-`T026`.
 
-Current: `T026` - classify the actual upstream response.
+Current: `T027` - dispatch SSE to a dedicated passthrough path.
 
-Next: `T027` - dispatch SSE to a dedicated passthrough path.
+Next: `T028` - flush each successful SSE write.
 
 Queued: `T021`-`T040`.
 

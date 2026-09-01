@@ -59,8 +59,8 @@ Choose behavior after receiving actual upstream headers:
 - anything else: opaque passthrough.
 
 The incoming `stream` value does not determine upstream response format.
-Limited byte sniffing may be a fallback for missing/broken Content-Type, not the
-primary classifier.
+Missing or malformed `Content-Type` uses the opaque fallback. This stage does
+not sniff response body bytes.
 
 ## Cancellation
 
