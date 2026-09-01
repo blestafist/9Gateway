@@ -710,6 +710,71 @@ func TestProxyPreservesCoalescedSSEEvents(t *testing.T) {
 	}
 }
 
+func TestProxyPropagatesCancellationDuringActiveSSE(t *testing.T) {
+	const firstFragment = "data: first\n\n"
+	upstreamReceived := make(chan struct{})
+	upstreamCancelled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(response, firstFragment); err != nil {
+			return
+		}
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(upstreamReceived)
+		<-request.Context().Done()
+		close(upstreamCancelled)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, gateway.URL+"/v1/stream", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("start active stream: %v", err)
+	}
+	t.Cleanup(func() { response.Body.Close() })
+
+	select {
+	case <-upstreamReceived:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive active stream")
+	}
+	first := make([]byte, len(firstFragment))
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.ReadFull(response.Body, first)
+		readDone <- readErr
+	}()
+	select {
+	case readErr := <-readDone:
+		if readErr != nil {
+			t.Fatalf("read first SSE fragment: %v", readErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SSE fragment was not delivered")
+	}
+	if string(first) != firstFragment {
+		t.Fatalf("first fragment = %q, want %q", first, firstFragment)
+	}
+	cancel()
+	response.Body.Close()
+
+	select {
+	case <-upstreamCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not observe active stream cancellation")
+	}
+}
+
 func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 	const body = "data: terminal\n\n"
 	upstreamClosed := make(chan time.Time, 1)

@@ -30,6 +30,11 @@ Split and coalesced SSE tests compare the complete raw body. They must not assum
 that an upstream write, HTTP read, or TCP read corresponds to one downstream
 event or read.
 
+Cancellation coverage includes both cancellation before upstream response headers
+and cancellation after a response has begun streaming. The active-stream case
+must read a flushed fragment first, then verify that the upstream request context
+is canceled.
+
 ## Limit Tests
 
 Rate, token, and budget windows use an injectable clock; tests never sleep for a
