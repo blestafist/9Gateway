@@ -18,10 +18,18 @@ type requestIDContextKey struct{}
 
 // NewHandler returns the gateway's HTTP handler using the provided upstream client.
 func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health)
-	mux.Handle("/v1/", newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey))
-	return newHandler(slog.Default(), mux)
+	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
+	router := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/health":
+			health(response, request)
+		case strings.HasPrefix(request.URL.Path, "/v1/"):
+			proxy.ServeHTTP(response, request)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+	return newHandler(slog.Default(), router)
 }
 
 type proxyHandler struct {
@@ -43,8 +51,7 @@ func newProxyHandler(client *http.Client, baseURL, apiKey string) http.Handler {
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	targetURL := *handler.baseURL
-	targetURL.Path = request.URL.Path
-	targetURL.RawPath = request.URL.RawPath
+	targetURL.Path, targetURL.RawPath = joinURLPath(handler.baseURL, request.URL)
 	targetURL.RawQuery = request.URL.RawQuery
 	targetURL.Fragment = ""
 
@@ -66,6 +73,27 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	copyEndToEndHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
 	_, _ = io.Copy(response, upstreamResponse.Body)
+}
+
+func joinURLPath(baseURL, requestURL *url.URL) (string, string) {
+	join := func(basePath, requestPath string) string {
+		baseSlash := strings.HasSuffix(basePath, "/")
+		requestSlash := strings.HasPrefix(requestPath, "/")
+		switch {
+		case baseSlash && requestSlash:
+			return basePath + requestPath[1:]
+		case !baseSlash && !requestSlash:
+			return basePath + "/" + requestPath
+		default:
+			return basePath + requestPath
+		}
+	}
+
+	path := join(baseURL.Path, requestURL.Path)
+	if baseURL.RawPath == "" && requestURL.RawPath == "" {
+		return path, ""
+	}
+	return path, join(baseURL.EscapedPath(), requestURL.EscapedPath())
 }
 
 var hopByHopHeaders = map[string]struct{}{

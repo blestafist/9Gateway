@@ -33,8 +33,9 @@ path tests lease and concurrency-slot release.
 
 ## Security And Performance
 
-Test credential redaction, fixed upstream host, safe path joining, body size
-limits, and separation of admin and gateway credentials. Compare direct mock or
-9router against gateway TTFT, stream close, total duration, and parallelism
-before optimizing. The release blocker is observable coding-agent latency, not
-an arbitrary requests-per-second target.
+Test credential redaction, fixed upstream host, and safe path joining with base
+prefixes, duplicate slashes, dot-like segments, and encoded slashes. Also test
+body size limits and separation of admin and gateway credentials. Compare direct
+mock or 9router against gateway TTFT, stream close, total duration, and
+parallelism before optimizing. The release blocker is observable coding-agent
+latency, not an arbitrary requests-per-second target.

@@ -11,6 +11,11 @@ Build the target only from the configured 9router base URL and the client path;
 the client cannot select another host. Path joining must not allow `//host` or
 similar open-proxy/SSRF behavior.
 
+Retain any configured base path and add or remove only the slash at its boundary
+with the request path. Preserve the request query and escaped-path representation
+without cleaning duplicate slashes, dot-like segments, or encoded slashes. The
+configured scheme and authority always remain authoritative.
+
 ## Request Body
 
 Generic endpoints should stream request bodies. Known endpoints may later use a

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,122 @@ func TestProxyForwardsMethodPathAndQuery(t *testing.T) {
 		}
 		if upstreamRequest.URL.RawQuery != request.URL.RawQuery {
 			t.Fatalf("query = %s, want %s", upstreamRequest.URL.RawQuery, request.URL.RawQuery)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive request")
+	}
+}
+
+func TestJoinURLPath(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		baseURL     string
+		requestURL  string
+		wantPath    string
+		wantRawPath string
+	}{
+		{
+			name:       "no prefix",
+			baseURL:    "https://router.example",
+			requestURL: "/v1/models",
+			wantPath:   "/v1/models",
+		},
+		{
+			name:       "prefix",
+			baseURL:    "https://router.example/gateway",
+			requestURL: "/v1/models",
+			wantPath:   "/gateway/v1/models",
+		},
+		{
+			name:       "trailing slash",
+			baseURL:    "https://router.example/gateway/",
+			requestURL: "/v1/models",
+			wantPath:   "/gateway/v1/models",
+		},
+		{
+			name:        "escaped slash",
+			baseURL:     "https://router.example/gateway%2Ftenant",
+			requestURL:  "/v1/models%2Fspecial",
+			wantPath:    "/gateway/tenant/v1/models/special",
+			wantRawPath: "/gateway%2Ftenant/v1/models%2Fspecial",
+		},
+		{
+			name:       "duplicate request slash",
+			baseURL:    "https://router.example/gateway",
+			requestURL: "//v1//models",
+			wantPath:   "/gateway//v1//models",
+		},
+		{
+			name:       "dot-like segments",
+			baseURL:    "https://router.example/gateway",
+			requestURL: "/v1/../models/./current",
+			wantPath:   "/gateway/v1/../models/./current",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			baseURL, err := url.Parse(test.baseURL)
+			if err != nil {
+				t.Fatalf("parse base URL: %v", err)
+			}
+			requestURL, err := url.ParseRequestURI(test.requestURL)
+			if err != nil {
+				t.Fatalf("parse request URL: %v", err)
+			}
+
+			gotPath, gotRawPath := joinURLPath(baseURL, requestURL)
+			if gotPath != test.wantPath {
+				t.Fatalf("path = %q, want %q", gotPath, test.wantPath)
+			}
+			if gotRawPath != test.wantRawPath {
+				t.Fatalf("raw path = %q, want %q", gotRawPath, test.wantRawPath)
+			}
+		})
+	}
+}
+
+func TestProxyJoinsConfiguredBasePathWithoutChangingAuthority(t *testing.T) {
+	type requestDetails struct {
+		host       string
+		path       string
+		requestURI string
+	}
+	details := make(chan requestDetails, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		details <- requestDetails{
+			host:       request.Host,
+			path:       request.URL.Path,
+			requestURI: request.URL.RequestURI(),
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	configuredURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL+"/gateway", "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodGet, gateway.URL+"/v1//models%2Fspecial?target=//attacker.example", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET prefixed path: %v", err)
+	}
+	response.Body.Close()
+
+	select {
+	case got := <-details:
+		if got.host != configuredURL.Host {
+			t.Fatalf("upstream host = %q, want configured host %q", got.host, configuredURL.Host)
+		}
+		if got.path != "/gateway/v1//models/special" {
+			t.Fatalf("upstream path = %q, want %q", got.path, "/gateway/v1//models/special")
+		}
+		if got.requestURI != "/gateway/v1//models%2Fspecial?target=//attacker.example" {
+			t.Fatalf("upstream request URI = %q, want %q", got.requestURI, "/gateway/v1//models%2Fspecial?target=//attacker.example")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("upstream did not receive request")
