@@ -77,11 +77,6 @@ type ChatAccumulator struct {
 	usage           UsageObservation
 	choices         map[int]*AccumulatedChoice
 	choiceOrder     []int
-	// These fields permit callers to feed successive cumulative observer
-	// snapshots without replaying already applied observations. Standalone
-	// results (the common case) are still applied in full.
-	observedEvents  int
-	observedChoices int
 	terminal        bool
 }
 
@@ -105,12 +100,12 @@ func NewAccumulator(maxPayloadBytes int64) (*ChatAccumulator, error) {
 	return NewChatAccumulator(maxPayloadBytes)
 }
 
-// Accumulate applies a parsed observer result. Choice observations are consumed
-// in upstream order. A result can be a standalone snapshot, or a successive
-// cumulative Observer.State snapshot; the latter is detected using
-// EventsObserved and already consumed choice count. The update is
-// transactional: if any content or argument fragment would cross the limit, no
-// part of that result is applied and the accumulator becomes terminal.
+// Accumulate applies every choice observation in the supplied parsed result in
+// upstream order. Results are treated as independent observations; callers that
+// provide cumulative snapshots must pass only the newly observed entries.
+// The update is transactional: if any content or argument fragment would cross
+// the limit, no part of that result is applied and the accumulator becomes
+// terminal.
 func (accumulator *ChatAccumulator) Accumulate(result ObservationResult) error {
 	if accumulator.terminal {
 		return ErrAccumulatorOverflow
@@ -120,21 +115,11 @@ func (accumulator *ChatAccumulator) Accumulate(result ObservationResult) error {
 	working.mergeMetadata(result.Metadata)
 	working.mergeUsage(result.State.Usage)
 
-	choices := result.State.Choices
-	start := 0
-	if result.State.EventsObserved > working.observedEvents &&
-		working.observedEvents > 0 && len(choices) >= working.observedChoices {
-		start = working.observedChoices
-	}
-	for _, observation := range choices[start:] {
+	for _, observation := range result.State.Choices {
 		if err := working.applyChoiceObservation(observation); err != nil {
 			accumulator.terminal = true
 			return ErrAccumulatorOverflow
 		}
-	}
-	if result.State.EventsObserved > working.observedEvents {
-		working.observedEvents = result.State.EventsObserved
-		working.observedChoices = len(choices)
 	}
 	*accumulator = *working
 	return nil
@@ -186,8 +171,6 @@ func (accumulator *ChatAccumulator) clone() *ChatAccumulator {
 		metadata:        cloneResponseMetadata(accumulator.metadata),
 		usage:           cloneUsageObservation(accumulator.usage),
 		choiceOrder:     append([]int(nil), accumulator.choiceOrder...),
-		observedEvents:  accumulator.observedEvents,
-		observedChoices: accumulator.observedChoices,
 		terminal:        accumulator.terminal,
 		choices:         make(map[int]*AccumulatedChoice, len(accumulator.choices)),
 	}

@@ -55,6 +55,78 @@ func TestChatAccumulatorPreservesIdentityChoiceOrderAndIndexes(t *testing.T) {
 	}
 }
 
+func TestChatAccumulatorAppliesIndependentResultsInFull(t *testing.T) {
+	accumulator, err := NewChatAccumulator(128)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := ObservationResult{
+		State: ObserverState{
+			EventsObserved: 1,
+			Choices: []ChoiceObservation{{
+				Index: 3,
+				Delta: DeltaObservation{
+					Content: stringPointer("first"),
+					ToolCalls: []ToolCallObservation{{
+						Index: 7,
+						ID:    "call-7",
+						Type:  "function",
+						Function: ToolCallFunctionObservation{
+							Name:      "lookup",
+							Arguments: `{"city":"`,
+						},
+					},
+					}},
+			}},
+		},
+	}
+	second := ObservationResult{
+		State: ObserverState{
+			// These are independent results, despite looking like cumulative
+			// observer snapshots to a caller that tracks event counts.
+			EventsObserved: 2,
+			Choices: []ChoiceObservation{
+				{
+					Index: 3,
+					Delta: DeltaObservation{
+						Content: stringPointer(" second"),
+						ToolCalls: []ToolCallObservation{{
+							Index: 7,
+							ID:    "later-id",
+							Type:  "later-type",
+							Function: ToolCallFunctionObservation{
+								Name:      "later-name",
+								Arguments: `Paris"}`,
+							},
+						}},
+					},
+				},
+				{Index: 9, Delta: DeltaObservation{Content: stringPointer("other")}},
+			},
+		},
+	}
+	if err := accumulator.Accumulate(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Accumulate(second); err != nil {
+		t.Fatal(err)
+	}
+
+	state := accumulator.Snapshot()
+	if len(state.Choices) != 2 || state.Choices[0].Index != 3 || state.Choices[1].Index != 9 {
+		t.Fatalf("choices = %+v, want independent repeated choice and new choice", state.Choices)
+	}
+	choice := state.ChoicesByIndex[3]
+	if choice.Message.Content != "first second" || len(choice.ToolCalls) != 1 {
+		t.Fatalf("repeated choice = %+v, want both content observations and one tool call", choice)
+	}
+	toolCall := choice.ToolCalls[0]
+	if toolCall.ID != "call-7" || toolCall.Type != "function" || toolCall.Function.Name != "lookup" || toolCall.Function.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("repeated tool call = %+v, want accumulated fragments and first metadata", toolCall)
+	}
+}
+
 func TestChatAccumulatorExactLimitAndTerminalOverflow(t *testing.T) {
 	accumulator, err := NewChatAccumulator(5)
 	if err != nil {
@@ -76,6 +148,31 @@ func TestChatAccumulatorExactLimitAndTerminalOverflow(t *testing.T) {
 	}
 	if got := accumulator.Snapshot().ID; got != "" {
 		t.Fatalf("post-overflow metadata ID = %q, want empty", got)
+	}
+}
+
+func TestChatAccumulatorUTF8PayloadLimitUsesBytesTransactionally(t *testing.T) {
+	accumulator, err := NewChatAccumulator(int64(len("界")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Choices: []ChoiceObservation{{
+		Index: 1,
+		Delta: DeltaObservation{Content: stringPointer("界")},
+	}}}}); err != nil {
+		t.Fatalf("exact multibyte limit error = %v, want nil", err)
+	}
+	before := accumulator.Snapshot()
+
+	if err := accumulator.Accumulate(ObservationResult{Metadata: ResponseMetadata{ID: "must-not-apply"}, State: ObserverState{Choices: []ChoiceObservation{{
+		Index: 1,
+		Delta: DeltaObservation{Content: stringPointer("a")},
+	}}}}); !errors.Is(err, ErrAccumulatorOverflow) {
+		t.Fatalf("one-byte-over error = %v, want ErrAccumulatorOverflow", err)
+	}
+	after := accumulator.Snapshot()
+	if !after.Terminal || after.PayloadBytes != before.PayloadBytes || after.ID != before.ID || len(after.Choices) != 1 || after.Choices[0].Message.Content != before.Choices[0].Message.Content {
+		t.Fatalf("one-byte-over changed prior state: before=%+v after=%+v", before, after)
 	}
 }
 
