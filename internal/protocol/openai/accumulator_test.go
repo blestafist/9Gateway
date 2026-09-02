@@ -101,4 +101,92 @@ func TestChatAccumulatorSnapshotIsCallerSafe(t *testing.T) {
 	}
 }
 
+func TestChatAccumulatorReconstructsMessageDeltas(t *testing.T) {
+	accumulator, err := NewChatAccumulator(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	role := "assistant"
+	conflictingRole := "system"
+	firstReason := "stop"
+	replacementReason := "length"
+	empty := ""
+	unicodeBytes := []byte("界")
+	unicodeFirst := string(unicodeBytes[:1])
+	unicodeSecond := string(unicodeBytes[1:])
+
+	observations := []ChoiceObservation{
+		{Index: 7, Delta: DeltaObservation{Role: &role}},
+		{Index: 7, Delta: DeltaObservation{Role: &conflictingRole, Content: stringPointer("TEST")}},
+		{Index: 7, Delta: DeltaObservation{Content: &empty}},
+		{Index: 7, Delta: DeltaObservation{Content: stringPointer("_OK")}, FinishReason: &firstReason},
+		{Index: 7, Delta: DeltaObservation{Content: stringPointer(unicodeFirst)}},
+		{Index: 7, Delta: DeltaObservation{Content: stringPointer(unicodeSecond)}, FinishReason: &replacementReason},
+		{Index: 2, Delta: DeltaObservation{Content: stringPointer("other")}},
+	}
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Choices: observations}}); err != nil {
+		t.Fatal(err)
+	}
+
+	state := accumulator.Snapshot()
+	if len(state.Choices) != 2 || state.Choices[0].Index != 7 || state.Choices[1].Index != 2 {
+		t.Fatalf("choice order = %+v, want indexes [7 2]", state.Choices)
+	}
+	choice := state.ChoicesByIndex[7]
+	if choice.Message.Role != role {
+		t.Fatalf("role = %q, want first non-empty role %q", choice.Message.Role, role)
+	}
+	if choice.Message.Content != "TEST_OK界" {
+		t.Fatalf("content = %q, want TEST_OK界", choice.Message.Content)
+	}
+	if choice.FinishReason == nil || *choice.FinishReason != replacementReason {
+		t.Fatalf("finish reason = %v, want latest non-nil reason %q", choice.FinishReason, replacementReason)
+	}
+
+	// A finish reason is metadata only: subsequent content remains accepted.
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Choices: []ChoiceObservation{{
+		Index: 7,
+		Delta: DeltaObservation{Content: stringPointer(" after-finish")},
+	}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := accumulator.Snapshot().ChoicesByIndex[7].Message.Content; got != "TEST_OK界 after-finish" {
+		t.Fatalf("content after finish = %q, want TEST_OK界 after-finish", got)
+	}
+}
+
+func TestChatAccumulatorOverflowIsTransactionalAndTerminal(t *testing.T) {
+	accumulator, err := NewChatAccumulator(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := "assistant"
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Choices: []ChoiceObservation{{
+		Index: 1,
+		Delta: DeltaObservation{Role: &role, Content: stringPointer("ok")},
+	}}}}); err != nil {
+		t.Fatal(err)
+	}
+	before := accumulator.Snapshot()
+
+	// The role and new choice must not leak when the content fragment overflows.
+	if err := accumulator.Accumulate(ObservationResult{Metadata: ResponseMetadata{ID: "should-not-apply"}, State: ObserverState{Choices: []ChoiceObservation{{
+		Index: 9,
+		Delta: DeltaObservation{Role: stringPointer("user"), Content: stringPointer("!!!")},
+	}}}}); !errors.Is(err, ErrAccumulatorOverflow) {
+		t.Fatalf("overflow error = %v, want ErrAccumulatorOverflow", err)
+	}
+	after := accumulator.Snapshot()
+	if !after.Terminal || after.PayloadBytes != before.PayloadBytes || len(after.Choices) != 1 || after.Choices[0].Message.Content != "ok" || after.ID != "" {
+		t.Fatalf("state after overflow = %+v, want unchanged state marked terminal", after)
+	}
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Choices: []ChoiceObservation{{
+		Index: 1,
+		Delta: DeltaObservation{Content: stringPointer("later")},
+	}}}}); !errors.Is(err, ErrAccumulatorOverflow) {
+		t.Fatalf("post-overflow error = %v, want ErrAccumulatorOverflow", err)
+	}
+}
+
 func stringPointer(value string) *string { return &value }
