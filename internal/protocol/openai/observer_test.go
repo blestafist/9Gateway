@@ -182,3 +182,163 @@ func TestObserverRejectsNonObjectJSONWithoutChangingState(t *testing.T) {
 		t.Fatalf("EventsObserved = %d, want 0", got)
 	}
 }
+
+func TestObserverRecordsChoiceAndDeltaObservationsInUpstreamOrder(t *testing.T) {
+	observer := NewObserver()
+	data := `{"choices":[{"index":4,"delta":{"content":"first","unknown_delta":{"ignored":true}}},{"index":1,"delta":{"role":"assistant"}},{"index":4,"delta":{"tool_calls":[{"index":2,"id":"call-2","type":"function","function":{"name":"lookup","arguments":"{\"city\":\""}},{"index":0,"function":{"arguments":"Paris\"}"}}]}}]}`
+
+	if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+		t.Fatalf("Observe error = %v, want nil", err)
+	}
+
+	state := observer.State()
+	if len(state.Choices) != 3 {
+		t.Fatalf("Choices length = %d, want 3", len(state.Choices))
+	}
+	if got := state.Choices[0].Index; got != 4 {
+		t.Fatalf("first choice index = %d, want 4", got)
+	}
+	if got := *state.Choices[0].Delta.Content; got != "first" {
+		t.Fatalf("first choice content = %q, want %q", got, "first")
+	}
+	if got := state.Choices[1].Index; got != 1 {
+		t.Fatalf("second choice index = %d, want 1", got)
+	}
+	if state.Choices[1].Delta.Role == nil || *state.Choices[1].Delta.Role != "assistant" {
+		t.Fatalf("second choice role = %v, want assistant", state.Choices[1].Delta.Role)
+	}
+	if state.Choices[1].Delta.Content != nil {
+		t.Fatalf("role-only choice content = %v, want absent", state.Choices[1].Delta.Content)
+	}
+
+	toolCalls := state.Choices[2].Delta.ToolCalls
+	if len(toolCalls) != 2 {
+		t.Fatalf("tool calls length = %d, want 2", len(toolCalls))
+	}
+	if toolCalls[0].Index != 2 || toolCalls[0].ID != "call-2" || toolCalls[0].Type != "function" {
+		t.Fatalf("first tool call = %+v, want indexed call-2 function", toolCalls[0])
+	}
+	if toolCalls[0].Function.Name != "lookup" || toolCalls[0].Function.Arguments != `{"city":"` {
+		t.Fatalf("first function = %+v, want name and raw fragment", toolCalls[0].Function)
+	}
+	if toolCalls[1].Index != 0 || toolCalls[1].Function.Arguments != `Paris"}` {
+		t.Fatalf("second function = %+v, want index 0 and raw fragment", toolCalls[1].Function)
+	}
+}
+
+func TestObserverDistinguishesContentAbsenceAndEmpty(t *testing.T) {
+	observer := NewObserver()
+	for _, data := range []string{
+		`{"choices":[{"index":0,"delta":{}}]}`,
+		`{"choices":[{"index":0,"delta":{"content":""}}]}`,
+	} {
+		if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+			t.Fatalf("Observe(%q) error = %v, want nil", data, err)
+		}
+	}
+
+	choices := observer.State().Choices
+	if choices[0].Delta.Content != nil {
+		t.Fatalf("missing content = %v, want nil", choices[0].Delta.Content)
+	}
+	if choices[1].Delta.Content == nil || *choices[1].Delta.Content != "" {
+		t.Fatalf("empty content = %v, want non-nil empty string", choices[1].Delta.Content)
+	}
+}
+
+func TestObserverKeepsSplitToolArgumentFragmentsAsSeparateObservations(t *testing.T) {
+	observer := NewObserver()
+	for _, data := range []string{
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"city\":\""}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"Paris\"}"}}]}}]}`,
+	} {
+		if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+			t.Fatalf("Observe(%q) error = %v, want nil", data, err)
+		}
+	}
+
+	choices := observer.State().Choices
+	if len(choices) != 2 || len(choices[0].Delta.ToolCalls) != 1 || len(choices[1].Delta.ToolCalls) != 1 {
+		t.Fatalf("split tool-call observations = %+v, want one per chunk", choices)
+	}
+	if got := choices[0].Delta.ToolCalls[0].Function.Arguments; got != `{"city":"` {
+		t.Fatalf("first argument fragment = %q, want raw first fragment", got)
+	}
+	if got := choices[1].Delta.ToolCalls[0].Function.Arguments; got != `Paris"}` {
+		t.Fatalf("second argument fragment = %q, want raw second fragment", got)
+	}
+}
+
+func TestObserverRecordsFinishReasonSemanticsAndLatestNonNilReason(t *testing.T) {
+	observer := NewObserver()
+	for _, data := range []string{
+		`{"choices":[{"index":3,"delta":{},"finish_reason":null},{"index":8,"delta":{}}]}`,
+		`{"choices":[{"index":3,"delta":{},"finish_reason":""},{"index":8,"delta":{},"finish_reason":"length"}]}`,
+		`{"choices":[{"index":3,"delta":{},"finish_reason":"stop"},{"index":8,"delta":{},"finish_reason":null}]}`,
+	} {
+		if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+			t.Fatalf("Observe(%q) error = %v, want nil", data, err)
+		}
+	}
+
+	choices := observer.State().Choices
+	if !choices[0].FinishReasonPresent || choices[0].FinishReason != nil {
+		t.Fatalf("null finish reason = %+v, want present nil", choices[0])
+	}
+	if choices[1].FinishReasonPresent || choices[1].FinishReason != nil {
+		t.Fatalf("missing finish reason = %+v, want absent nil", choices[1])
+	}
+	if !choices[2].FinishReasonPresent || choices[2].FinishReason == nil || *choices[2].FinishReason != "" {
+		t.Fatalf("empty finish reason = %+v, want present empty", choices[2])
+	}
+	if reason, ok := observer.State().LatestFinishReasons[3]; !ok || reason != "stop" {
+		t.Fatalf("latest reason for choice 3 = %q, %v; want stop, true", reason, ok)
+	}
+	if reason, ok := observer.State().LatestFinishReasons[8]; !ok || reason != "length" {
+		t.Fatalf("latest reason for choice 8 = %q, %v; want length, true", reason, ok)
+	}
+}
+
+func TestObserverFinishReasonDoesNotMarkObserverDone(t *testing.T) {
+	observer := NewObserver()
+	for _, data := range []string{
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[{"index":0,"delta":{"content":"after"}}]}`,
+	} {
+		if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+			t.Fatalf("Observe(%q) error = %v, want nil", data, err)
+		}
+	}
+
+	state := observer.State()
+	if state.EventsObserved != 2 || len(state.Choices) != 2 {
+		t.Fatalf("state after finish reason = %+v, want both events and choices", state)
+	}
+	if state.Choices[1].Delta.Content == nil || *state.Choices[1].Delta.Content != "after" {
+		t.Fatalf("post-finish observation = %+v, want content after", state.Choices[1])
+	}
+}
+
+func TestObserverStateSnapshotDoesNotExposeChoiceState(t *testing.T) {
+	observer := NewObserver()
+	if err := observer.Observe(streaming.SSEEvent{Data: `{"choices":[{"index":2,"delta":{"content":"kept","tool_calls":[{"index":1,"function":{"arguments":"fragment"}}]},"finish_reason":"stop"}]}`}); err != nil {
+		t.Fatalf("Observe error = %v, want nil", err)
+	}
+
+	snapshot := observer.State()
+	snapshot.Choices[0].Index = 99
+	*snapshot.Choices[0].Delta.Content = "changed"
+	snapshot.Choices[0].Delta.ToolCalls[0].Function.Arguments = "changed"
+	snapshot.LatestFinishReasons[2] = "changed"
+
+	state := observer.State()
+	if state.Choices[0].Index != 2 || *state.Choices[0].Delta.Content != "kept" {
+		t.Fatalf("choice state changed through snapshot: %+v", state.Choices[0])
+	}
+	if state.Choices[0].Delta.ToolCalls[0].Function.Arguments != "fragment" {
+		t.Fatalf("tool-call state changed through snapshot: %+v", state.Choices[0].Delta.ToolCalls[0])
+	}
+	if state.LatestFinishReasons[2] != "stop" {
+		t.Fatalf("finish reason changed through snapshot: %q", state.LatestFinishReasons[2])
+	}
+}
