@@ -342,3 +342,130 @@ func TestObserverStateSnapshotDoesNotExposeChoiceState(t *testing.T) {
 		t.Fatalf("finish reason changed through snapshot: %q", state.LatestFinishReasons[2])
 	}
 }
+
+func TestObserverNormalizesTokenUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		data []string
+		want UsageObservation
+	}{
+		{
+			name: "OpenAI names",
+			data: []string{`{"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}`},
+			want: UsageObservation{InputTokens: intPointer(4), OutputTokens: intPointer(6), TotalTokens: intPointer(10)},
+		},
+		{
+			name: "input output names",
+			data: []string{`{"usage":{"input_tokens":7,"output_tokens":8}}`},
+			want: UsageObservation{InputTokens: intPointer(7), OutputTokens: intPointer(8)},
+		},
+		{
+			name: "partial usage and usage only terminal chunk",
+			data: []string{
+				`{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+				`{"usage":{"prompt_tokens":11}}`,
+			},
+			want: UsageObservation{InputTokens: intPointer(11)},
+		},
+		{
+			name: "later replacement preserves absent fields",
+			data: []string{
+				`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`,
+				`{"usage":{"completion_tokens":9}}`,
+			},
+			want: UsageObservation{InputTokens: intPointer(1), OutputTokens: intPointer(9), TotalTokens: intPointer(3)},
+		},
+		{
+			name: "total remains absent",
+			data: []string{`{"usage":{"input_tokens":12,"output_tokens":13}}`},
+			want: UsageObservation{InputTokens: intPointer(12), OutputTokens: intPointer(13)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observer := NewObserver()
+			for _, data := range test.data {
+				if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+					t.Fatalf("Observe(%q) error = %v, want nil", data, err)
+				}
+			}
+			assertUsageObservation(t, observer.State().Usage, test.want)
+		})
+	}
+}
+
+func TestObserverUsageAliasPrecedenceIsIndependentOfJSONMemberOrder(t *testing.T) {
+	for _, data := range []string{
+		`{"usage":{"prompt_tokens":20,"input_tokens":21,"completion_tokens":30,"output_tokens":31}}`,
+		`{"usage":{"output_tokens":31,"completion_tokens":30,"input_tokens":21,"prompt_tokens":20}}`,
+	} {
+		observer := NewObserver()
+		if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+			t.Fatalf("Observe(%q) error = %v, want nil", data, err)
+		}
+		assertUsageObservation(t, observer.State().Usage, UsageObservation{
+			InputTokens: intPointer(20), OutputTokens: intPointer(30),
+		})
+	}
+}
+
+func TestObserverInvalidUsagePreservesStateAndCanBeReused(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "negative", data: `{"usage":{"prompt_tokens":-1}}`},
+		{name: "fractional", data: `{"usage":{"completion_tokens":1.5}}`},
+		{name: "non integer", data: `{"usage":{"total_tokens":"10"}}`},
+		{name: "invalid alias despite canonical value", data: `{"usage":{"prompt_tokens":4,"input_tokens":-1}}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observer := NewObserver()
+			if err := observer.Observe(streaming.SSEEvent{Data: `{"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`}); err != nil {
+				t.Fatalf("initial Observe error = %v, want nil", err)
+			}
+			before := observer.State()
+			if err := observer.Observe(streaming.SSEEvent{Data: test.data}); !errors.Is(err, ErrInvalidUsage) {
+				t.Fatalf("Observe(%q) error = %v, want errors.Is(..., ErrInvalidUsage)", test.data, err)
+			}
+			after := observer.State()
+			if after.EventsObserved != before.EventsObserved {
+				t.Fatalf("EventsObserved after invalid usage = %d, want %d", after.EventsObserved, before.EventsObserved)
+			}
+			assertUsageObservation(t, after.Usage, before.Usage)
+
+			if err := observer.Observe(streaming.SSEEvent{Data: `{"usage":{"output_tokens":8}}`}); err != nil {
+				t.Fatalf("Observe after invalid usage error = %v, want nil", err)
+			}
+			if got := observer.State().Usage.OutputTokens; got == nil || *got != 8 {
+				t.Fatalf("completion tokens after reuse = %v, want 8", got)
+			}
+			if got := observer.State().Usage.InputTokens; got == nil || *got != 2 {
+				t.Fatalf("prompt tokens after reuse = %v, want preserved 2", got)
+			}
+		})
+	}
+}
+
+func assertUsageObservation(t *testing.T, got, want UsageObservation) {
+	t.Helper()
+	assertOptionalInt(t, "input_tokens", got.InputTokens, want.InputTokens)
+	assertOptionalInt(t, "output_tokens", got.OutputTokens, want.OutputTokens)
+	assertOptionalInt(t, "total_tokens", got.TotalTokens, want.TotalTokens)
+}
+
+func assertOptionalInt(t *testing.T, name string, got, want *int) {
+	t.Helper()
+	if got == nil || want == nil {
+		if got != nil || want != nil {
+			t.Fatalf("%s = %v, want %v", name, got, want)
+		}
+		return
+	}
+	if *got != *want {
+		t.Fatalf("%s = %d, want %d", name, *got, *want)
+	}
+}

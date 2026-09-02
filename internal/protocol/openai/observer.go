@@ -13,12 +13,31 @@ import (
 // object representing an OpenAI streaming chunk.
 var ErrMalformedStreamChunk = errors.New("openai: malformed streaming chunk")
 
+// ErrInvalidUsage indicates that a known usage field was present but was not a
+// non-negative JSON integer.
+var ErrInvalidUsage = errors.New("openai: invalid usage")
+
 // ObserverState is the state accumulated by an Observer. It records only the
 // successfully parsed chunks; it has no transport or completion semantics.
 type ObserverState struct {
 	EventsObserved      int
 	Choices             []ChoiceObservation
 	LatestFinishReasons map[int]string
+	Usage               UsageObservation
+}
+
+// UsageObservation is the latest explicitly observed token usage. InputTokens
+// normalizes prompt_tokens and input_tokens; OutputTokens normalizes
+// completion_tokens and output_tokens. A nil pointer means that the
+// corresponding value has not been observed. The
+// canonical OpenAI names take precedence over their input/output aliases when
+// both names are present in one usage object: prompt_tokens wins over
+// input_tokens, and completion_tokens wins over output_tokens. This precedence
+// is independent of JSON object member order.
+type UsageObservation struct {
+	InputTokens  *int `json:"input_tokens,omitempty"`
+	OutputTokens *int `json:"output_tokens,omitempty"`
+	TotalTokens  *int `json:"total_tokens,omitempty"`
 }
 
 // ChoiceObservation is one choice entry from one observed streaming chunk.
@@ -84,6 +103,7 @@ func (observer *Observer) State() ObserverState {
 	state := observer.state
 	state.Choices = cloneChoiceObservations(observer.state.Choices)
 	state.LatestFinishReasons = cloneFinishReasons(observer.state.LatestFinishReasons)
+	state.Usage = cloneUsageObservation(observer.state.Usage)
 	return state
 }
 
@@ -111,10 +131,15 @@ func (observer *Observer) Observe(event streaming.SSEEvent) error {
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformedStreamChunk, err)
 	}
+	usage, err := observeUsage(chunk.Usage)
+	if err != nil {
+		return err
+	}
 
 	observer.state.EventsObserved++
 	observer.observeMetadata(chunk)
 	observer.observeChoices(chunk.Choices)
+	observer.state.Usage = mergeUsageObservation(observer.state.Usage, usage)
 	return nil
 }
 
@@ -289,6 +314,92 @@ func cloneString(value *string) *string {
 	return &clone
 }
 
+func cloneUsageObservation(usage UsageObservation) UsageObservation {
+	return UsageObservation{
+		InputTokens:  cloneInt(usage.InputTokens),
+		OutputTokens: cloneInt(usage.OutputTokens),
+		TotalTokens:  cloneInt(usage.TotalTokens),
+	}
+}
+
+func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func mergeUsageObservation(current, update UsageObservation) UsageObservation {
+	if update.InputTokens != nil {
+		current.InputTokens = cloneInt(update.InputTokens)
+	}
+	if update.OutputTokens != nil {
+		current.OutputTokens = cloneInt(update.OutputTokens)
+	}
+	if update.TotalTokens != nil {
+		current.TotalTokens = cloneInt(update.TotalTokens)
+	}
+	return current
+}
+
+func observeUsage(raw json.RawMessage) (UsageObservation, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return UsageObservation{}, nil
+	}
+
+	var fields usageJSON
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		// A usage value without any known fields is not usage observation. Only
+		// reject malformed values for known fields below.
+		return UsageObservation{}, nil
+	}
+
+	prompt, err := decodeUsageInt(fields.PromptTokens, "prompt_tokens")
+	if err != nil {
+		return UsageObservation{}, err
+	}
+	input, err := decodeUsageInt(fields.InputTokens, "input_tokens")
+	if err != nil {
+		return UsageObservation{}, err
+	}
+	if prompt == nil {
+		prompt = input
+	}
+
+	completion, err := decodeUsageInt(fields.CompletionTokens, "completion_tokens")
+	if err != nil {
+		return UsageObservation{}, err
+	}
+	output, err := decodeUsageInt(fields.OutputTokens, "output_tokens")
+	if err != nil {
+		return UsageObservation{}, err
+	}
+	if completion == nil {
+		completion = output
+	}
+
+	total, err := decodeUsageInt(fields.TotalTokens, "total_tokens")
+	if err != nil {
+		return UsageObservation{}, err
+	}
+	return UsageObservation{InputTokens: prompt, OutputTokens: completion, TotalTokens: total}, nil
+}
+
+func decodeUsageInt(raw json.RawMessage, name string) (*int, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidUsage, name)
+	}
+	var value int
+	if err := json.Unmarshal(raw, &value); err != nil || value < 0 {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidUsage, name)
+	}
+	return &value, nil
+}
+
 func (observer *Observer) observeMetadata(chunk streamChunk) {
 	if observer.metadata.ID == "" {
 		var id string
@@ -320,4 +431,12 @@ type streamChunk struct {
 	Model   json.RawMessage `json:"model"`
 	Choices json.RawMessage `json:"choices"`
 	Usage   json.RawMessage `json:"usage"`
+}
+
+type usageJSON struct {
+	PromptTokens     json.RawMessage `json:"prompt_tokens"`
+	CompletionTokens json.RawMessage `json:"completion_tokens"`
+	InputTokens      json.RawMessage `json:"input_tokens"`
+	OutputTokens     json.RawMessage `json:"output_tokens"`
+	TotalTokens      json.RawMessage `json:"total_tokens"`
 }
