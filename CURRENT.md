@@ -2,13 +2,13 @@
 
 Current milestone: minimal OpenAI request inspection.
 
-Done: `T001`-`T043`.
+Done: `T001`-`T044`.
 
-Current: `T044` - add bounded request-body inspection.
+Current: `T045`.
 
-Next: `T045`.
+Next: `T046`.
 
-Queued: `T044`-`T060`.
+Queued: `T045`-`T060`.
 
 Known issues: none recorded.
 

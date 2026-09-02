@@ -6,13 +6,18 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/pestit/9gateway/internal/protocol/openai"
 )
 
 const requestIDHeader = "X-Gateway-Request-ID"
+
+const requestInspectionLimit int64 = 64 * 1024
 
 type requestIDContextKey struct{}
 
@@ -33,29 +38,38 @@ func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey str
 }
 
 type proxyHandler struct {
-	client  *http.Client
-	baseURL *url.URL
-	apiKey  string
+	client           *http.Client
+	baseURL          *url.URL
+	apiKey           string
+	responseDispatch responseDispatchFunc
 }
 
-func newProxyHandler(client *http.Client, baseURL, apiKey string) http.Handler {
+type responseDispatchFunc func(http.ResponseWriter, *http.Response, *openai.RequestMetadata)
+
+func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler {
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
-		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		return &proxyHandler{client: client, apiKey: apiKey, responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
 			http.Error(response, "invalid upstream URL", http.StatusInternalServerError)
-		})
+		}}
 	}
 
-	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey}
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, responseDispatch: dispatchResponse}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if handler.baseURL == nil {
+		http.Error(response, "invalid upstream URL", http.StatusInternalServerError)
+		return
+	}
+
 	targetURL := *handler.baseURL
 	targetURL.Path, targetURL.RawPath = joinURLPath(handler.baseURL, request.URL)
 	targetURL.RawQuery = request.URL.RawQuery
 	targetURL.Fragment = ""
 
-	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), request.Body)
+	requestBody, metadata := inspectChatRequest(request)
+	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), requestBody)
 	if err != nil {
 		http.Error(response, "failed to create upstream request", http.StatusBadGateway)
 		return
@@ -70,6 +84,62 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	defer upstreamResponse.Body.Close()
+	dispatch := handler.responseDispatch
+	if dispatch == nil {
+		dispatch = dispatchResponse
+	}
+	dispatch(response, upstreamResponse, metadata)
+}
+
+func inspectChatRequest(request *http.Request) (io.ReadCloser, *openai.RequestMetadata) {
+	if request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" || !isJSONMediaType(request.Header) {
+		return request.Body, nil
+	}
+	if request.Body == nil {
+		return nil, nil
+	}
+
+	inspected, replacement, available, _ := openai.InspectRequestBody(request.Body, requestInspectionLimit)
+	if replacement == nil {
+		return request.Body, nil
+	}
+	body := &replayedRequestBody{Reader: replacement, source: request.Body}
+	if !available {
+		return body, nil
+	}
+	metadata, err := openai.ParseRequestMetadata(inspected)
+	if err != nil {
+		return body, nil
+	}
+	return body, &metadata
+}
+
+func isJSONMediaType(header http.Header) bool {
+	contentTypes := header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentTypes[0])
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+type replayedRequestBody struct {
+	io.Reader
+	source io.Closer
+}
+
+func (body *replayedRequestBody) Close() error {
+	if body.source == nil {
+		return nil
+	}
+	return body.source.Close()
+}
+
+func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Response, _ *openai.RequestMetadata) {
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
 	if classifyResponseHeader(upstreamResponse.Header) == ResponseModeSSE {
