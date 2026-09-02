@@ -4,6 +4,8 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+
+	"github.com/pestit/9gateway/internal/protocol/openai"
 )
 
 // ResponseMode identifies the transport behavior selected from an upstream
@@ -39,4 +41,13 @@ func classifyResponseHeader(header http.Header) ResponseMode {
 		return ResponseModeOpaque
 	}
 	return classifyResponse(contentTypes[0])
+}
+
+// shouldAggregateSSE reports whether a known chat-completions request asked
+// for a non-streaming response while upstream actually returned SSE.
+func shouldAggregateSSE(request *http.Request, metadata *openai.RequestMetadata, responseMode ResponseMode) bool {
+	if request == nil || request.URL == nil || request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" {
+		return false
+	}
+	return metadata != nil && metadata.Stream != nil && !*metadata.Stream && responseMode == ResponseModeSSE
 }

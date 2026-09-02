@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/pestit/9gateway/internal/protocol/openai"
 )
 
 func TestClassifyResponse(t *testing.T) {
@@ -92,5 +94,46 @@ func TestClassifyResponseDoesNotReadRequestStreamField(t *testing.T) {
 				t.Fatalf("classifyResponse with request stream=%s = %q, want %q", stream, got, ResponseModeSSE)
 			}
 		})
+	}
+}
+
+func TestShouldAggregateSSE(t *testing.T) {
+	streamFalse := false
+	streamTrue := true
+
+	for _, endpoint := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "eligible chat completions", path: "/v1/chat/completions", want: true},
+		{name: "unknown endpoint", path: "/v1/unknown", want: false},
+	} {
+		for _, stream := range []struct {
+			name     string
+			metadata *openai.RequestMetadata
+		}{
+			{name: "false", metadata: &openai.RequestMetadata{Stream: &streamFalse}},
+			{name: "true", metadata: &openai.RequestMetadata{Stream: &streamTrue}},
+			{name: "absent", metadata: &openai.RequestMetadata{}},
+			{name: "unavailable", metadata: nil},
+		} {
+			for _, responseMode := range []struct {
+				name string
+				mode ResponseMode
+				want bool
+			}{
+				{name: "JSON", mode: ResponseModeJSON},
+				{name: "SSE", mode: ResponseModeSSE, want: endpoint.want && stream.name == "false"},
+				{name: "opaque", mode: ResponseModeOpaque},
+			} {
+				t.Run(endpoint.name+"/stream "+stream.name+"/response "+responseMode.name, func(t *testing.T) {
+					request := httptest.NewRequest(http.MethodPost, "http://gateway.example.test"+endpoint.path, nil)
+					if got := shouldAggregateSSE(request, stream.metadata, responseMode.mode); got != responseMode.want {
+						t.Fatalf("shouldAggregateSSE(%q, %q, %q) = %t, want %t", endpoint.path, stream.name, responseMode.mode, got, responseMode.want)
+					}
+				})
+			}
+		}
 	}
 }
