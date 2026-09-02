@@ -2,11 +2,11 @@
 
 Current milestone: minimal OpenAI request inspection.
 
-Done: `T001`-`T040`.
+Done: `T001`-`T041`.
 
-Current: `T041` - define minimal request metadata.
+Current: `T042` - parse request metadata from JSON bytes.
 
-Next: `T042` - parse request metadata from JSON bytes.
+Next: `T043` - inspect bounded request metadata.
 
 Queued: `T043`-`T060`.
 
