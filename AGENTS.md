@@ -73,6 +73,16 @@ task context.
 - Update `CURRENT.md` after completing a task: move its ID to `Done`, select the
   next task, and retain only immediate milestone state.
 
+## Orchestration
+
+- Orchestrators must read each named task themselves and give the worker a
+  self-contained assignment; never tell the worker to discover or read the task.
+- Use one worker per task. Execute dependent tasks sequentially, not as one
+  batched worker assignment.
+- Each task worker must implement, verify, update `CURRENT.md`, and commit.
+- After the requested series, launch review agent(s); have worker(s) fix
+  confirmed findings, re-verify, and commit fixes, repeating review as warranted.
+
 ## Verification
 
 After every implementation task run, when the Go module exists:
