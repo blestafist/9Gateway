@@ -95,7 +95,7 @@ func inspectChatRequest(request *http.Request) (io.ReadCloser, *openai.RequestMe
 	if request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" || !isJSONMediaType(request.Header) {
 		return request.Body, nil
 	}
-	if request.Body == nil {
+	if request.Body == nil || request.Body == http.NoBody {
 		return nil, nil
 	}
 

@@ -12,6 +12,33 @@ import (
 	"github.com/pestit/9gateway/internal/transport"
 )
 
+func TestIsJSONMediaType(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		values []string
+		want   bool
+	}{
+		{name: "application json", values: []string{"application/json"}, want: true},
+		{name: "parameters", values: []string{"application/json; charset=utf-8"}, want: true},
+		{name: "json suffix", values: []string{"text/problem+json"}, want: true},
+		{name: "mixed case", values: []string{"Application/Problem+JSON; Charset=UTF-8"}, want: true},
+		{name: "missing", want: false},
+		{name: "repeated", values: []string{"application/json", "application/problem+json"}, want: false},
+		{name: "malformed", values: []string{"application/json; charset"}, want: false},
+		{name: "non json", values: []string{"application/octet-stream"}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			header := make(http.Header)
+			for _, value := range test.values {
+				header.Add("Content-Type", value)
+			}
+			if got := isJSONMediaType(header); got != test.want {
+				t.Fatalf("isJSONMediaType(%v) = %t, want %t", test.values, got, test.want)
+			}
+		})
+	}
+}
+
 func TestProxyPreservesInspectedChatAndUnknownRequestBodies(t *testing.T) {
 	overLimitBody := append([]byte(`{"padding":"`), bytes.Repeat([]byte{'x'}, int(requestInspectionLimit))...)
 	overLimitBody = append(overLimitBody, []byte(`"}`)...)

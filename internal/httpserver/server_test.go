@@ -1105,6 +1105,8 @@ func TestProxyPreservesRequestContentLengthSemantics(t *testing.T) {
 
 	for _, test := range []struct {
 		name                 string
+		path                 string
+		contentType          string
 		body                 io.Reader
 		wantBody             string
 		wantContentLength    int64
@@ -1112,18 +1114,42 @@ func TestProxyPreservesRequestContentLengthSemantics(t *testing.T) {
 	}{
 		{
 			name:              "known length",
+			path:              "/v1/responses",
+			contentType:       "application/octet-stream",
 			body:              strings.NewReader("known request body"),
 			wantBody:          "known request body",
 			wantContentLength: int64(len("known request body")),
 		},
 		{
 			name:              "empty body",
+			path:              "/v1/chat/completions",
+			contentType:       "application/json",
+			body:              http.NoBody,
 			wantContentLength: 0,
 		},
 		{
 			name:                 "unknown length",
+			path:                 "/v1/responses",
+			contentType:          "application/octet-stream",
 			body:                 io.NopCloser(strings.NewReader("streamed request body")),
 			wantBody:             "streamed request body",
+			wantContentLength:    -1,
+			wantTransferEncoding: "chunked",
+		},
+		{
+			name:              "inspected known length",
+			path:              "/v1/chat/completions",
+			contentType:       "application/json",
+			body:              strings.NewReader(`{"model":"gpt-test"}`),
+			wantBody:          `{"model":"gpt-test"}`,
+			wantContentLength: int64(len(`{"model":"gpt-test"}`)),
+		},
+		{
+			name:                 "inspected unknown length",
+			path:                 "/v1/chat/completions",
+			contentType:          "application/json",
+			body:                 io.NopCloser(strings.NewReader(`{"model":"gpt-test"}`)),
+			wantBody:             `{"model":"gpt-test"}`,
 			wantContentLength:    -1,
 			wantTransferEncoding: "chunked",
 		},
@@ -1147,13 +1173,14 @@ func TestProxyPreservesRequestContentLengthSemantics(t *testing.T) {
 			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 
-			request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/responses", test.body)
+			request, err := http.NewRequest(http.MethodPost, gateway.URL+test.path, test.body)
 			if err != nil {
 				t.Fatalf("create request: %v", err)
 			}
+			request.Header.Set("Content-Type", test.contentType)
 			response, err := http.DefaultClient.Do(request)
 			if err != nil {
-				t.Fatalf("POST /v1/responses: %v", err)
+				t.Fatalf("POST %s: %v", test.path, err)
 			}
 			response.Body.Close()
 
