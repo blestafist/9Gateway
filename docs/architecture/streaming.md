@@ -11,8 +11,11 @@ lookup, blocking telemetry operation, or full event reconstruction may precede
 the flush. The transparent implementation reads into a bounded buffer, writes
 the bytes as received, flushes through `http.ResponseController`, and repeats
 without interpreting read boundaries as event boundaries. A lightweight
-observer may inspect chunks but cannot govern normal transport lifetime. If
-observation becomes asynchronous, copy or transfer buffer ownership before
+observer may inspect chunks but cannot govern normal transport lifetime. The
+pull-based observation driver is not attached to this hot path. If a future
+live attachment is added, it must observe copied bytes only after downstream
+write and flush; it may drop or disable observation rather than block delivery.
+If observation becomes asynchronous, copy or transfer buffer ownership before
 reusing the read buffer.
 
 ## Termination
