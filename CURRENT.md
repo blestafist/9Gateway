@@ -2,13 +2,13 @@
 
 Current milestone: minimal OpenAI request inspection.
 
-Done: `T001`-`T045`.
+Done: `T001`-`T046`.
 
-Current: `T046`.
+Current: `T047`.
 
-Next: `T047`.
+Next: `T048`.
 
-Queued: `T046`-`T060`.
+Queued: `T047`-`T060`.
 
 Known issues: none recorded.
 
