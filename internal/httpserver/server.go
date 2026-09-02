@@ -72,7 +72,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	defer upstreamResponse.Body.Close()
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
-	if classifyResponse(upstreamResponse.Header.Get("Content-Type")) == ResponseModeSSE {
+	if classifyResponseHeader(upstreamResponse.Header) == ResponseModeSSE {
 		_ = streamResponseBody(response, upstreamResponse.Body)
 		return
 	}

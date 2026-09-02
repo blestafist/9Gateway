@@ -103,7 +103,6 @@ func (reader *Reader) Next() (SSEEvent, error) {
 				reader.hasContent = true
 				reader.dataLines = append(reader.dataLines, value)
 			case "event":
-				reader.hasContent = true
 				reader.eventName = value
 			}
 		}

@@ -55,11 +55,11 @@ upstream representation together with its `Content-Encoding` header.
 Choose behavior after receiving actual upstream headers:
 
 - `text/event-stream`: SSE.
-- `application/json` or `application/*+json`: JSON.
+- `application/json` or any valid media type ending in `+json`: JSON.
 - anything else: opaque passthrough.
 
 The incoming `stream` value does not determine upstream response format.
-Missing or malformed `Content-Type` uses the opaque fallback. This stage does
+Missing, repeated, or malformed `Content-Type` uses the opaque fallback. This stage does
 not sniff response body bytes. After safe headers and status are copied, SSE
 uses the dedicated transparent streaming loop; JSON and opaque responses use
 ordinary byte copying. The streaming loop is protocol-neutral.

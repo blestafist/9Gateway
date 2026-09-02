@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"mime"
+	"net/http"
 	"strings"
 )
 
@@ -25,10 +26,17 @@ func classifyResponse(contentType string) ResponseMode {
 	switch {
 	case mediaType == "text/event-stream":
 		return ResponseModeSSE
-	case mediaType == "application/json" ||
-		(strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json")):
+	case mediaType == "application/json" || strings.HasSuffix(mediaType, "+json"):
 		return ResponseModeJSON
 	default:
 		return ResponseModeOpaque
 	}
+}
+
+func classifyResponseHeader(header http.Header) ResponseMode {
+	contentTypes := header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		return ResponseModeOpaque
+	}
+	return classifyResponse(contentTypes[0])
 }

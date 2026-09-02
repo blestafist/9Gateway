@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -37,6 +38,11 @@ func TestClassifyResponse(t *testing.T) {
 			want:        ResponseModeJSON,
 		},
 		{
+			name:        "JSON structured syntax suffix outside application",
+			contentType: "text/problem+json",
+			want:        ResponseModeJSON,
+		},
+		{
 			name:        "mixed case media type",
 			contentType: "Application/Problem+JSON; Charset=UTF-8",
 			want:        ResponseModeJSON,
@@ -62,6 +68,16 @@ func TestClassifyResponse(t *testing.T) {
 				t.Fatalf("classifyResponse(%q) = %q, want %q", test.contentType, got, test.want)
 			}
 		})
+	}
+}
+
+func TestClassifyResponseHeaderRejectsMultipleContentTypes(t *testing.T) {
+	header := make(http.Header)
+	header.Add("Content-Type", "text/event-stream")
+	header.Add("Content-Type", "application/json")
+
+	if got := classifyResponseHeader(header); got != ResponseModeOpaque {
+		t.Fatalf("classifyResponseHeader() = %q, want %q", got, ResponseModeOpaque)
 	}
 }
 

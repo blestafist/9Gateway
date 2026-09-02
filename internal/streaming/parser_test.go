@@ -86,16 +86,18 @@ func TestReaderEmitsCompleteFramesSequentially(t *testing.T) {
 
 func TestReaderParsesDataAndEventFields(t *testing.T) {
 	for _, test := range []struct {
-		name  string
-		input string
-		want  SSEEvent
+		name      string
+		input     string
+		want      SSEEvent
+		wantEvent bool
 	}{
-		{name: "one data line", input: "data: hello\n\n", want: SSEEvent{Data: "hello"}},
-		{name: "named event", input: "event: update\ndata: hello\n\n", want: SSEEvent{Event: "update", Data: "hello"}},
-		{name: "multiple data lines", input: "data: first\ndata: second\n\n", want: SSEEvent{Data: "first\nsecond"}},
-		{name: "empty data", input: "data:\n\n", want: SSEEvent{Data: ""}},
-		{name: "unknown field", input: "id: ignored\ndata: kept\nretry: 10\n\n", want: SSEEvent{Data: "kept"}},
-		{name: "CRLF", input: "event: update\r\ndata: hello\r\n\r\n", want: SSEEvent{Event: "update", Data: "hello"}},
+		{name: "one data line", input: "data: hello\n\n", want: SSEEvent{Data: "hello"}, wantEvent: true},
+		{name: "named event", input: "event: update\ndata: hello\n\n", want: SSEEvent{Event: "update", Data: "hello"}, wantEvent: true},
+		{name: "multiple data lines", input: "data: first\ndata: second\n\n", want: SSEEvent{Data: "first\nsecond"}, wantEvent: true},
+		{name: "empty data", input: "data:\n\n", want: SSEEvent{Data: ""}, wantEvent: true},
+		{name: "unknown field", input: "id: ignored\ndata: kept\nretry: 10\n\n", want: SSEEvent{Data: "kept"}, wantEvent: true},
+		{name: "event field only", input: "event: heartbeat\n\n", want: SSEEvent{}},
+		{name: "CRLF", input: "event: update\r\ndata: hello\r\n\r\n", want: SSEEvent{Event: "update", Data: "hello"}, wantEvent: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reader, err := NewReader(strings.NewReader(test.input), 1024)
@@ -104,6 +106,12 @@ func TestReaderParsesDataAndEventFields(t *testing.T) {
 			}
 
 			got, err := reader.Next()
+			if !test.wantEvent {
+				if err != io.EOF || got != (SSEEvent{}) {
+					t.Fatalf("event-only result = %#v, %v, want empty event and io.EOF", got, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("first Next error = %v", err)
 			}

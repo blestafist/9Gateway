@@ -44,7 +44,8 @@ The generic parser supports `event:`, one or more `data:` lines, comments, blank
 line event termination, split reads, and multiple events per read. Data lines
 within one event are joined with a newline; an optional single space after the
 field colon is removed, and unknown colon fields are ignored. Empty input,
-comments, and unknown fields alone do not fabricate an event. The T035 contract
+comments, unknown fields, and an `event:` field without `data:` do not fabricate
+an event. The T035 contract
 already enforces a bounded frame size; field-level semantics are implemented in
 T036-T040. The parser knows nothing about OpenAI, and read boundaries are never
 assumed to be line or event boundaries.

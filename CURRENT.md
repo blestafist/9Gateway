@@ -1,19 +1,20 @@
 # Current Work
 
-Current milestone: transparent streaming transport (complete).
+Current milestone: minimal OpenAI request inspection.
 
 Done: `T001`-`T040`.
 
-Current: none.
+Current: `T041` - define minimal request metadata.
 
-Next: select the next milestone.
+Next: `T042` - parse request metadata from JSON bytes.
 
-Queued: none.
+Queued: `T043`-`T060`.
 
-Known issues: none recorded for the completed transparent streaming milestone.
+Known issues: none recorded.
 
-Important: `T021`-`T040` are complete. The transparent streaming milestone and
-bounded generic SSE parser remain separate from OpenAI stream observation,
-SSE-to-JSON aggregation, authentication, SQLite, limits, budgets, accounting,
-and telemetry persistence. Upstream EOF, not `[DONE]` or `finish_reason`, controls
-normal transparent stream completion.
+Important: transparent SSE remains byte-preserving and independent from the
+bounded generic parser. T041-T060 add bounded request inspection, protocol-level
+observation, and only the explicit `stream:false` plus actual-upstream-SSE
+compatibility path. Authentication, SQLite, limits, budgets, accounting, tool
+calls, and telemetry persistence remain out of scope. Upstream EOF, not `[DONE]`
+or `finish_reason`, controls normal transparent stream completion.
