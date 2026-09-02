@@ -18,9 +18,10 @@ var ErrMalformedStreamChunk = errors.New("openai: malformed streaming chunk")
 var ErrInvalidUsage = errors.New("openai: invalid usage")
 
 // ObserverState is the state accumulated by an Observer. It records only the
-// successfully parsed chunks; it has no transport or completion semantics.
+// successfully observed events; it has no transport semantics.
 type ObserverState struct {
 	EventsObserved      int
+	DoneObserved        bool
 	Choices             []ChoiceObservation
 	LatestFinishReasons map[int]string
 	Usage               UsageObservation
@@ -122,6 +123,11 @@ func (observer *Observer) Metadata() ResponseMetadata {
 // and do not affect OpenAI chunk parsing. A malformed event returns an error,
 // but does not make the observer terminal; subsequent events can be observed.
 func (observer *Observer) Observe(event streaming.SSEEvent) error {
+	if event.Data == "[DONE]" {
+		observer.state.DoneObserved = true
+		return nil
+	}
+
 	data := bytes.TrimSpace([]byte(event.Data))
 	if len(data) == 0 || data[0] != '{' {
 		return fmt.Errorf("%w: expected a JSON object", ErrMalformedStreamChunk)

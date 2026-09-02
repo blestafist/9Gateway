@@ -183,6 +183,65 @@ func TestObserverRejectsNonObjectJSONWithoutChangingState(t *testing.T) {
 	}
 }
 
+func TestObserverRecognizesExactDoneSentinelAsMetadataOnly(t *testing.T) {
+	observer := NewObserver()
+
+	if err := observer.Observe(streaming.SSEEvent{Data: "[DONE]"}); err != nil {
+		t.Fatalf("Observe exact DONE error = %v, want nil", err)
+	}
+
+	state := observer.State()
+	if !state.DoneObserved {
+		t.Fatalf("DoneObserved = false, want true")
+	}
+	if state.EventsObserved != 0 || len(state.Choices) != 0 {
+		t.Fatalf("state after DONE = %+v, want metadata only", state)
+	}
+}
+
+func TestObserverRepeatedDoneIsIdempotentAndPostDoneEventsAreObserved(t *testing.T) {
+	observer := NewObserver()
+
+	for _, event := range []streaming.SSEEvent{
+		{Data: "[DONE]"},
+		{Data: "[DONE]"},
+		{Data: `{"choices":[{"index":0,"delta":{"content":"after"}}]}`},
+	} {
+		if err := observer.Observe(event); err != nil {
+			t.Fatalf("Observe(%q) error = %v, want nil", event.Data, err)
+		}
+	}
+
+	state := observer.State()
+	if !state.DoneObserved {
+		t.Fatalf("DoneObserved = false, want true")
+	}
+	if state.EventsObserved != 1 || len(state.Choices) != 1 {
+		t.Fatalf("state after repeated/post-DONE events = %+v, want one JSON event", state)
+	}
+	if state.Choices[0].Delta.Content == nil || *state.Choices[0].Delta.Content != "after" {
+		t.Fatalf("post-DONE choice = %+v, want content after", state.Choices[0])
+	}
+}
+
+func TestObserverNonExactDoneVariantsUseNormalJSONObservation(t *testing.T) {
+	observer := NewObserver()
+
+	for _, data := range []string{" [DONE]", "[DONE] ", `"[DONE]"`} {
+		if err := observer.Observe(streaming.SSEEvent{Data: data}); !errors.Is(err, ErrMalformedStreamChunk) {
+			t.Fatalf("Observe(%q) error = %v, want errors.Is(..., ErrMalformedStreamChunk)", data, err)
+		}
+	}
+
+	state := observer.State()
+	if state.DoneObserved {
+		t.Fatalf("DoneObserved = true after non-exact variants, want false")
+	}
+	if state.EventsObserved != 0 {
+		t.Fatalf("EventsObserved after non-exact variants = %d, want 0", state.EventsObserved)
+	}
+}
+
 func TestObserverRecordsChoiceAndDeltaObservationsInUpstreamOrder(t *testing.T) {
 	observer := NewObserver()
 	data := `{"choices":[{"index":4,"delta":{"content":"first","unknown_delta":{"ignored":true}}},{"index":1,"delta":{"role":"assistant"}},{"index":4,"delta":{"tool_calls":[{"index":2,"id":"call-2","type":"function","function":{"name":"lookup","arguments":"{\"city\":\""}},{"index":0,"function":{"arguments":"Paris\"}"}}]}}]}`
