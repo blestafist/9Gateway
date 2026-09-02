@@ -19,10 +19,20 @@ type ObserverState struct {
 	EventsObserved int
 }
 
+// ResponseMetadata is the small set of response envelope fields observed by
+// an Observer. Created is a pointer so an explicit zero remains distinct from
+// an absent field.
+type ResponseMetadata struct {
+	ID      string `json:"id,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Created *int64 `json:"created,omitempty"`
+}
+
 // Observer parses OpenAI streaming chunks from complete, protocol-neutral SSE
 // events. It deliberately does not read from or write to a transport.
 type Observer struct {
-	state ObserverState
+	state    ObserverState
+	metadata ResponseMetadata
 }
 
 // NewObserver creates an empty OpenAI streaming observer.
@@ -33,6 +43,17 @@ func NewObserver() *Observer {
 // State returns a copy of the observer's current state.
 func (observer *Observer) State() ObserverState {
 	return observer.state
+}
+
+// Metadata returns a snapshot of the response envelope metadata observed so
+// far. The Created pointer is copied so callers cannot mutate observer state.
+func (observer *Observer) Metadata() ResponseMetadata {
+	metadata := observer.metadata
+	if metadata.Created != nil {
+		created := *metadata.Created
+		metadata.Created = &created
+	}
+	return metadata
 }
 
 // Observe parses one complete SSE event. Event names are transport metadata
@@ -50,7 +71,30 @@ func (observer *Observer) Observe(event streaming.SSEEvent) error {
 	}
 
 	observer.state.EventsObserved++
+	observer.observeMetadata(chunk)
 	return nil
+}
+
+func (observer *Observer) observeMetadata(chunk streamChunk) {
+	if observer.metadata.ID == "" {
+		var id string
+		if err := json.Unmarshal(chunk.ID, &id); err == nil && id != "" {
+			observer.metadata.ID = id
+		}
+	}
+	if observer.metadata.Model == "" {
+		var model string
+		if err := json.Unmarshal(chunk.Model, &model); err == nil && model != "" {
+			observer.metadata.Model = model
+		}
+	}
+	if observer.metadata.Created == nil && len(chunk.Created) > 0 {
+		var created int64
+		value := bytes.TrimSpace(chunk.Created)
+		if !bytes.Equal(value, []byte("null")) && json.Unmarshal(value, &created) == nil {
+			observer.metadata.Created = &created
+		}
+	}
 }
 
 // streamChunk is intentionally limited to the response envelope. The
