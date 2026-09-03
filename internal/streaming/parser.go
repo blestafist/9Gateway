@@ -19,13 +19,17 @@ type SSEEvent struct {
 // ErrEventTooLarge indicates that a framed event exceeds the configured limit.
 var ErrEventTooLarge = errors.New("streaming: event exceeds maximum size")
 
+// ErrEventIncomplete indicates that an event containing data ended before its
+// blank-line delimiter. The reader never fabricates an event from such input.
+var ErrEventIncomplete = errors.New("streaming: event ended before blank-line delimiter")
+
 // Reader emits complete SSE events sequentially from a stream. It joins data
 // fields with newlines, uses a blank line to complete an event, and ignores
 // fields it does not understand. A frame with only comments or unknown fields
 // does not produce an event. maxEventSize is measured in bytes of one
 // framed event, including all field, comment, and line-ending bytes through the
 // blank-line delimiter. A size error is terminal; subsequent calls return the
-// same ErrEventTooLarge without reading more input.
+// same terminal error without reading more input.
 type Reader struct {
 	input        *bufio.Reader
 	maxEventSize int
@@ -33,6 +37,7 @@ type Reader struct {
 	eventName    string
 	dataLines    []string
 	hasContent   bool
+	hasField     bool
 	line         []byte
 	terminalErr  error
 }
@@ -63,7 +68,9 @@ func NewReader(input io.Reader, maxEventSize int) (*Reader, error) {
 // Data lines are joined with a newline, and an optional event field supplies the
 // event name. Comments and unknown colon fields are ignored. An input stream
 // with no event returns io.EOF, and EOF after a completed event is returned on
-// the following call. Returned strings are independent of the reader's buffers.
+// the following call. Unterminated events return ErrEventIncomplete rather than
+// being fabricated at EOF. Returned strings are independent of the reader's
+// buffers.
 func (reader *Reader) Next() (SSEEvent, error) {
 	if reader.terminalErr != nil {
 		return SSEEvent{}, reader.terminalErr
@@ -98,6 +105,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 				reader.line = reader.line[:0]
 				continue
 			}
+			reader.hasField = true
 			switch field {
 			case "data":
 				reader.hasContent = true
@@ -108,6 +116,14 @@ func (reader *Reader) Next() (SSEEvent, error) {
 		}
 
 		if readErr == io.EOF {
+			// A data-bearing event is only complete once its blank-line
+			// delimiter has arrived. Comments and unknown fields do not form
+			// events, so they may still be ignored when the input ends.
+			field, _ := parseField(reader.line)
+			if reader.hasField || reader.hasContent || reader.eventName != "" || (len(reader.line) > 0 && !isCommentLine(reader.line)) || field == "data" {
+				reader.terminalErr = ErrEventIncomplete
+				return SSEEvent{}, ErrEventIncomplete
+			}
 			reader.terminalErr = io.EOF
 			return SSEEvent{}, io.EOF
 		}
@@ -119,6 +135,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 func (reader *Reader) resetEvent() {
 	reader.eventSize = 0
 	reader.hasContent = false
+	reader.hasField = false
 	reader.eventName = ""
 	reader.dataLines = reader.dataLines[:0]
 	reader.line = reader.line[:0]

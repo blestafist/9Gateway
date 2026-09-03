@@ -41,6 +41,27 @@ func TestReaderEmptyInputReturnsEOFWithoutFabricatingEvent(t *testing.T) {
 	}
 }
 
+func TestReaderRejectsUnterminatedEventAtEOF(t *testing.T) {
+	for _, input := range []string{
+		"data: value",
+		"data: value\n",
+		"event: update\ndata: value\n",
+	} {
+		t.Run(input, func(t *testing.T) {
+			reader, err := NewReader(strings.NewReader(input), 1024)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			if event, err := reader.Next(); event != (SSEEvent{}) || err != ErrEventIncomplete {
+				t.Fatalf("Next = %#v, %v, want incomplete-event error", event, err)
+			}
+			if _, err := reader.Next(); err != ErrEventIncomplete {
+				t.Fatalf("Next after incomplete event = %v, want same terminal error", err)
+			}
+		})
+	}
+}
+
 func TestReaderReturnsUnnamedAndNamedEventsAsIndependentValues(t *testing.T) {
 	unnamed := SSEEvent{Data: "unnamed"}
 	named := SSEEvent{Event: "message", Data: "named"}

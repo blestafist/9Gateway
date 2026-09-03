@@ -75,6 +75,77 @@ func TestAggregateSSEToJSONHandlesSplitReads(t *testing.T) {
 	}
 }
 
+func TestAggregateSSEToJSONCompletesOnCleanEOF(t *testing.T) {
+	const terminal = `data: {"id":"chat-1","model":"model-1","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}
+
+`
+	withDone := terminal + "data: [DONE]\n\n"
+
+	doneData, err := AggregateSSEToJSON(bytes.NewBufferString(withDone), 4096, 1024)
+	if err != nil {
+		t.Fatalf("DONE aggregation: %v", err)
+	}
+	eofData, err := AggregateSSEToJSON(bytes.NewBufferString(terminal), 4096, 1024)
+	if err != nil {
+		t.Fatalf("EOF aggregation: %v", err)
+	}
+	if !bytes.Equal(eofData, doneData) {
+		t.Fatalf("clean EOF output = %s, DONE output = %s", eofData, doneData)
+	}
+}
+
+func TestAggregateSSEToJSONCleanEOFRequiresMeaningfulCompleteData(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+		want error
+	}{
+		{name: "empty EOF", data: "", want: ErrEmptyStream},
+		{name: "comment-only EOF", data: ": keep-alive\n\n", want: ErrEmptyStream},
+		{name: "truncated event", data: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}", want: ErrStreamIncomplete},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := AggregateSSEToJSON(bytes.NewBufferString(test.data), 4096, 1024)
+			if !errors.Is(err, test.want) || data != nil {
+				t.Fatalf("aggregation = (%s, %v), want nil and errors.Is(..., %v)", data, err, test.want)
+			}
+		})
+	}
+}
+
+func TestAggregateSSEToJSONAllowsUsageAfterFinishAtEOF(t *testing.T) {
+	input := `data: {"choices":[{"index":0,"delta":{"content":"answer"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}
+
+`
+	data, err := AggregateSSEToJSON(bytes.NewBufferString(input), 4096, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage UsageObservation `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Choices) != 1 || response.Choices[0].FinishReason != "stop" {
+		t.Fatalf("choices = %#v", response.Choices)
+	}
+	if response.Usage.TotalTokens == nil || *response.Usage.TotalTokens != 5 {
+		t.Fatalf("usage = %#v", response.Usage)
+	}
+}
+
 func TestAggregateSSEToJSONReturnsControlledErrorsAndDoesNotReadAfterDONE(t *testing.T) {
 	tests := []struct {
 		name string
@@ -84,7 +155,7 @@ func TestAggregateSSEToJSONReturnsControlledErrorsAndDoesNotReadAfterDONE(t *tes
 		{name: "empty", data: "", want: ErrEmptyStream},
 		{name: "comments-only", data: ": ping\n\n", want: ErrEmptyStream},
 		{name: "malformed", data: "data: {bad}\n\ndata: [DONE]\n\n", want: ErrMalformedStreamChunk},
-		{name: "incomplete", data: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n", want: ErrStreamIncomplete},
+		{name: "truncated", data: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}", want: ErrStreamIncomplete},
 		{name: "payload-overflow", data: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"long\"}}]}\n\ndata: [DONE]\n\n", want: ErrAccumulatorOverflow},
 		{name: "event-overflow", data: "data: {\"choices\":[]}\n\ndata: [DONE]\n\n", want: streaming.ErrEventTooLarge},
 	}
