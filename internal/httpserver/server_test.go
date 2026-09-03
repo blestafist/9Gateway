@@ -536,6 +536,99 @@ func TestProxyConvertsGzipChatSSEToUncompressedJSON(t *testing.T) {
 	}
 }
 
+func TestDecodedRepresentationReaderAcceptsExactLimitAndRejectsOneByteOver(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want error
+	}{
+		{name: "exact limit", body: strings.Repeat("x", int(aggregationMaxDecodedBytes))},
+		{name: "one byte over", body: strings.Repeat("x", int(aggregationMaxDecodedBytes)+1), want: errDecodedRepresentationTooLarge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &decodedRepresentationReader{
+				reader:    strings.NewReader(test.body),
+				remaining: aggregationMaxDecodedBytes,
+			}
+			got, err := io.ReadAll(reader)
+			if test.want != nil {
+				if !errors.Is(err, test.want) {
+					t.Fatalf("read error = %v, want errors.Is(..., %v)", err, test.want)
+				}
+				if len(got) != int(aggregationMaxDecodedBytes) {
+					t.Fatalf("decoded bytes = %d, want %d before overflow", len(got), aggregationMaxDecodedBytes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read exact-limit representation: %v", err)
+			}
+			if len(got) != int(aggregationMaxDecodedBytes) {
+				t.Fatalf("decoded bytes = %d, want %d", len(got), aggregationMaxDecodedBytes)
+			}
+		})
+	}
+}
+
+func TestProxyConvertsChatSSEWithExactAccumulatedPayloadLimit(t *testing.T) {
+	const chunkSize = 60 * 1024
+	content := strings.Repeat("x", aggregationMaxPayloadSize)
+	var stream strings.Builder
+	stream.Grow(len(content) + len(content)/chunkSize*128)
+	stream.WriteString(`data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n")
+	for offset := 0; offset < len(content); {
+		end := offset + chunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		stream.WriteString(`data: {"choices":[{"index":0,"delta":{"content":"`)
+		stream.WriteString(content[offset:end])
+		stream.WriteString(`"}}]}` + "\n\n")
+		offset = end
+	}
+	stream.WriteString(`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n")
+	stream.WriteString("data: [DONE]\n\n")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, stream.String())
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST chat completions: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read converted response: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", response.StatusCode, body[:min(len(body), 200)])
+	}
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal converted response: %v", err)
+	}
+	if len(decoded.Choices) != 1 || len(decoded.Choices[0].Message.Content) != aggregationMaxPayloadSize {
+		t.Fatalf("converted content length = %d, want %d", len(decoded.Choices[0].Message.Content), aggregationMaxPayloadSize)
+	}
+}
+
 func TestProxyValidatesGzipTrailerAfterSSEDONE(t *testing.T) {
 	const stream = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"
 	var compressed bytes.Buffer
@@ -584,6 +677,65 @@ func TestProxyValidatesGzipTrailerAfterSSEDONE(t *testing.T) {
 				t.Fatalf("status = %d, want 502 (body %q)", response.StatusCode, body)
 			}
 		})
+	}
+}
+
+func TestProxyCancellationUnblocksGzipDrainAfterSSEDONE(t *testing.T) {
+	const stream = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Content-Encoding", "gzip")
+		compressor := gzip.NewWriter(response)
+		if _, err := compressor.Write([]byte(stream)); err != nil {
+			return
+		}
+		if err := compressor.Flush(); err != nil {
+			return
+		}
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(started)
+		<-request.Context().Done()
+		close(cancelled)
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	finished := make(chan struct{})
+	go func() {
+		response, _ := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		close(finished)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not flush semantic DONE")
+	}
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not observe cancellation while gzip trailer was withheld")
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("gateway request did not finish after gzip drain cancellation")
 	}
 }
 
