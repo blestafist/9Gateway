@@ -9,558 +9,639 @@ Every implementation task must finish with `go fmt ./...`, `go test ./...`, and
 `go build ./...`. Add behavioral tests in the same task as changed HTTP or
 streaming behavior. Update `CURRENT.md` and commit after completing one task.
 
-## Minimal OpenAI Request Inspection
+## Transport Compatibility Hardening
 
-### T041 - Define minimal request metadata
+### T061 - Sanitize transformed response headers
 
-Goal: add the smallest OpenAI request metadata model without defining a complete
-request schema.
-
-Scope:
-
-- Create `internal/protocol/openai` now that protocol-specific code belongs there.
-- Define metadata for model, explicit stream state, and the two known output-token
-  limits: `max_tokens` and `max_completion_tokens`.
-- Represent stream absence separately from explicit `false`; pointers or a small
-  tri-state type are acceptable.
-- Keep the type independent of HTTP, transport, config, storage, and policy.
-
-Acceptance and tests:
-
-- Unit tests can construct metadata for absent, false, and true stream states.
-- Zero, absent, and positive token limits remain distinguishable.
-- Package and exported API documentation explains that this is partial metadata.
-
-Reference: `docs/architecture/repository.md#initial-structure`,
-`docs/architecture/repository.md#dependencies`.
-
-Out of scope: JSON parsing, full messages, tools, provider schemas, validation,
-body buffering, authentication, and limits.
-
-### T042 - Parse request metadata from JSON bytes
-
-Goal: extract the T041 fields from a bounded byte slice while tolerating unknown
-OpenAI-compatible request fields.
+Goal: ensure the explicit SSE-to-JSON compatibility path does not forward
+representation metadata that describes the discarded upstream SSE body.
 
 Scope:
 
-- Add one parser in `internal/protocol/openai` for `model`, `stream`,
-  `max_tokens`, and `max_completion_tokens`.
-- Use a narrow decode shape; do not define messages, tools, reasoning, or other
-  payload fields.
-- Return a controlled error for malformed JSON or wrong types in inspected fields.
-- Do not reserialize or mutate the input bytes.
+- Define the narrow set of representation-specific headers invalidated when an
+  upstream SSE representation is replaced with generated JSON.
+- Remove at least `Content-Encoding`, `Content-Length`, `Content-Range`,
+  `Accept-Ranges`, `ETag`, `Content-MD5`, `Digest`, and `Content-Digest` from the
+  transformed response while retaining safe end-to-end headers.
+- Set the generated JSON content type and exact content length only after
+  successful aggregation.
+- Leave transparent JSON, opaque, and SSE responses byte- and header-preserving.
 
 Acceptance and tests:
 
-- Table tests cover model, stream true/false/absent, both token-limit fields,
-  unknown nested fields, whitespace, malformed JSON, and wrong known-field types.
-- Input bytes are unchanged after every parse attempt.
+- A real transformed response cannot retain an upstream validator, digest,
+  range, encoding, or length header.
+- Safe headers such as request correlation and rate-limit metadata survive the
+  conversion.
+- Transparent response tests prove the same headers remain untouched when no
+  transformation occurs.
 
-Reference: `docs/architecture/transport.md#request-body`,
-`docs/architecture/repository.md#principles`.
-
-Dependencies and out of scope: depends on T041. Do not read an `io.Reader`, choose
-between the two token fields, or attach parsing to HTTP.
-
-### T043 - Add bounded request-body inspection
-
-Goal: inspect a known request body without unbounded buffering and reconstruct an
-identical body for upstream forwarding.
-
-Scope:
-
-- Add a small helper at the HTTP/protocol boundary that reads at most an explicit
-  positive byte limit plus one detection byte.
-- If the entire body fits, return its bytes for metadata parsing and a replacement
-  reader containing the exact original bytes.
-- If it exceeds the limit, report inspection unavailable and reconstruct the full
-  stream from the consumed prefix plus unread remainder without dropping bytes.
-- Never close the incoming body inside the helper and never read a generic body to
-  discover its total size.
-
-Acceptance and tests:
-
-- Exact-limit, below-limit, over-limit, empty, fragmented-reader, and read-error
-  cases are deterministic and bounded.
-- Reading the replacement yields byte-identical input for both inspected and
-  over-limit bodies.
-- An over-limit reader is not drained or fully buffered.
-
-Reference: `docs/architecture/transport.md#request-body`,
-`docs/architecture/testing.md#security-and-performance`.
-
-Dependencies and out of scope: depends on T042. No YAML option, HTTP status,
-tokenizer, logging capture, or generic endpoint integration.
-
-### T044 - Inspect chat-completions requests in the proxy
-
-Goal: make explicit request stream state available to response dispatch while
-preserving transparent upstream request bytes.
-
-Scope:
-
-- Apply T043 only to `POST /v1/chat/completions` with a JSON media type; all other
-  methods and `/v1/*` paths retain direct streaming behavior.
-- Use one private constant for the temporary inspection bound; configuration is a
-  later task.
-- Parse metadata when the complete body fits. Malformed, over-limit, or unreadable
-  metadata means unknown metadata and must not rewrite the payload.
-- Preserve original `ContentLength`, request headers, bytes, cancellation, and
-  configured upstream authority.
-- Keep metadata local to the request; do not add global state or logs.
-
-Acceptance and tests:
-
-- Real HTTP tests prove byte identity for valid, malformed, and over-limit chat
-  bodies and for an unknown `/v1/*` streaming body.
-- Explicit stream false, true, and absent reach the response-dispatch code as
-  distinct states using package-private instrumentation in tests.
-- Existing cancellation and unknown-endpoint tests remain valid.
-
-Reference: `docs/architecture/transport.md#generic-passthrough`,
-`docs/architecture/transport.md#request-body`.
-
-Dependencies and out of scope: depends on T043. Do not change response behavior,
-reject malformed JSON, expose metadata downstream, or implement policy.
-
-### T045 - Harden inspection media-type and body edge cases
-
-Goal: close request-inspection ambiguity before metadata affects compatibility
-behavior.
-
-Scope:
-
-- Classify request JSON with parsed media types: `application/json` and valid
-  `+json` suffixes, including parameters and mixed case.
-- Treat missing, repeated, or malformed request `Content-Type` as non-inspectable.
-- Preserve a known empty body, unknown-length body, and read errors according to
-  existing transparent proxy behavior.
-- Ensure inspection never changes transfer encoding or invents a length.
-
-Acceptance and tests:
-
-- Table tests cover request media types and repeated headers.
-- Real HTTP tests assert upstream bytes, `ContentLength`, and transfer encoding for
-  known and unknown lengths after successful and skipped inspection.
-- No request field controls actual upstream response classification.
-
-Reference: `docs/architecture/transport.md#request-body`,
-`docs/architecture/transport.md#headers`,
-`docs/architecture/transport.md#response-classification`.
-
-Dependencies and out of scope: depends on T044. Do not add request rejection,
-body-size policy, or response aggregation.
-
-## OpenAI Stream Observation
-
-### T046 - Define an OpenAI stream observer
-
-Goal: introduce a protocol-specific observer that consumes complete generic
-`streaming.SSEEvent` values without controlling transport.
-
-Scope:
-
-- Put OpenAI-specific code in `internal/protocol/openai`; it may import the generic
-  `internal/streaming` package, never the reverse.
-- Define observer state and an `Observe(SSEEvent)`-style API.
-- Parse JSON data into a narrow internal chunk shape and return a recognizable
-  parse error without making the observer terminal.
-- Do not connect the observer to transparent SSE transport yet.
-
-Acceptance and tests:
-
-- Valid JSON is accepted; malformed JSON returns a controlled error; a later valid
-  event is still accepted.
-- Event names and unknown JSON fields are harmless.
-- Dependency direction and transport isolation are preserved.
-
-Reference: `docs/architecture/repository.md#dependencies`,
-`docs/architecture/streaming.md#sse-framing`.
-
-Dependencies and out of scope: depends on T035-T040. No `[DONE]` semantics,
-aggregation, HTTP integration, goroutines, telemetry, or complete OpenAI schema.
-
-### T047 - Observe response identity metadata
-
-Goal: retain response ID, model, and created timestamp from OpenAI stream chunks.
-
-Scope:
-
-- Extend T046's narrow chunk shape only with `id`, `model`, and `created`.
-- Record the first non-empty ID/model and first present created value.
-- Define deterministic behavior for conflicting later values; keep the first and
-  expose no transport error.
-- Provide a read-only metadata snapshot so callers cannot mutate observer state.
-
-Acceptance and tests:
-
-- Metadata can arrive together or across chunks and remains stable afterward.
-- Missing fields and conflicting later values are covered.
-- Malformed chunks do not erase previously observed metadata.
-
-Reference: `docs/architecture/streaming.md#sse-framing`,
-`docs/architecture/repository.md#principles`.
-
-Dependencies and out of scope: depends on T046. Do not observe choices, usage,
-`[DONE]`, or attach to HTTP.
-
-### T048 - Observe choice and tool-call deltas
-
-Goal: expose choice index, message/tool-call deltas, and finish reason as
-observations without assigning them transport lifetime semantics.
-
-Scope:
-
-- Parse `choices[]` minimally: `index`, `delta.role`, `delta.content`, indexed
-  `delta.tool_calls` (`index`, `id`, `type`, `function.name`, and
-  `function.arguments`), and `finish_reason` with absence distinct from an empty
-  value.
-- Return observations in upstream array order and preserve choice indexes.
-- Store the last non-nil finish reason per choice in the observer snapshot.
-- Preserve function-argument fragments as strings; do not JSON-decode them.
-- Never interpret finish reason as completion or reject unknown delta fields.
-
-Acceptance and tests:
-
-- Cover multiple choices, missing/empty content, role-only chunks, indexed tool
-  calls, split function arguments, null/non-null finish reasons, unknown fields,
-  and repeated updates.
-- A finish reason does not mark the observer done.
-
-Reference: `docs/architecture/streaming.md#termination`,
+Reference: `docs/architecture/transport.md#headers`,
 `docs/architecture/streaming.md#sse-to-json`.
 
-Dependencies and out of scope: depends on T047. Usage, aggregation, validation of
-assembled function arguments, and transport integration remain excluded.
+Dependencies and out of scope: depends on T060. Do not generalize response
+rewriting, change upstream statuses, parse cache policy, or alter transparent
+transport.
 
-### T049 - Observe normalized token usage
+### T062 - Do not wait for EOF after unencoded DONE
 
-Goal: extract OpenAI and input/output naming variants into one usage snapshot.
-
-Scope:
-
-- Support `prompt_tokens`, `completion_tokens`, `input_tokens`, `output_tokens`,
-  and `total_tokens` when present.
-- Normalize prompt/input and completion/output counts without inventing missing
-  totals or deriving prices.
-- The latest explicitly present value wins; absence in a later chunk does not
-  erase an earlier value.
-- Reject negative or non-integer known usage values as observation errors while
-  keeping the observer reusable.
-
-Acceptance and tests:
-
-- Table tests cover both naming families, partial usage, usage-only terminal
-  chunks, later replacement, absent totals, invalid values, and prior-state
-  preservation after error.
-
-Reference: `docs/architecture/streaming.md#sse-framing`,
-`docs/architecture/accounting.md`.
-
-Dependencies and out of scope: depends on T046. No cost calculation, persistence,
-token estimation, aggregation, or HTTP attachment.
-
-### T050 - Observe the DONE sentinel
-
-Goal: recognize the exact OpenAI `[DONE]` sentinel as observer metadata only.
+Goal: prevent a non-stream client from hanging when an identity-encoded upstream
+SSE response sends exact `[DONE]` but keeps the HTTP body open.
 
 Scope:
 
-- Treat an event whose data is exactly `[DONE]` as observed completion metadata.
-- Do not JSON-decode the sentinel and do not treat whitespace variants as exact
-  unless the generic parser produced those exact bytes.
-- Repeated `[DONE]` is idempotent; events after it may still be observed.
-- Keep transparent transport and generic parser behavior unchanged.
+- For the explicit `stream:false` plus upstream-SSE conversion path, return the
+  rendered JSON immediately after exact `[DONE]` when no content decoding needs
+  trailer validation.
+- Close the upstream body through the existing request lifecycle so an upstream
+  handler blocked after `[DONE]` is canceled and its connection is not reused.
+- Retain clean-EOF completion when `[DONE]` is absent.
+- Retain bounded draining where a supported content coding requires trailer
+  validation; do not weaken gzip corruption detection.
+- Do not introduce grace periods, idle timers, or finish-reason completion.
 
 Acceptance and tests:
 
-- Exact, repeated, whitespace-variant, JSON-string, and post-DONE events are
-  covered.
-- `[DONE]` never causes an EOF, timer, cancellation, or synthetic event.
+- A real identity-encoded upstream that flushes `[DONE]` and then blocks produces
+  downstream JSON promptly without waiting for upstream EOF.
+- The blocked upstream observes cancellation after the generated response is
+  complete.
+- No-`[DONE]` EOF, valid gzip, corrupt gzip, bytes after `[DONE]`, and client
+  cancellation regressions remain deterministic and bounded.
 
 Reference: `docs/architecture/streaming.md#termination`,
-`docs/architecture/streaming.md#sse-framing`.
-
-Dependencies and out of scope: depends on T046-T049. No transport wiring or
-aggregation completion policy.
-
-### T051 - Make observation failure non-fatal by contract
-
-Goal: provide a best-effort event-observation driver whose parse failures do not
-stop later events or raw-byte delivery by its caller.
-
-Scope:
-
-- Add a small protocol-layer driver that repeatedly reads complete generic events
-  and invokes the observer, reporting observation errors through a supplied
-  callback or result collection.
-- A malformed JSON event must not stop subsequent valid events; framing and size
-  errors from the bounded generic reader remain terminal for observation only.
-- Do not attach this pull-based driver to the transparent transport hot path,
-  because reading complete events before writing would delay flushes.
-- Document that any future live attachment must observe copied bytes only after
-  downstream write and flush, and may drop/disable observation rather than block.
-
-Acceptance and tests:
-
-- A sequence valid/malformed/valid updates state from both valid events and
-  reports one error.
-- A generic parser size error ends observation predictably without panic.
-- A source copy used by the test remains byte-identical regardless of observer
-  errors.
-
-Reference: `docs/architecture/streaming.md#transparent-sse`,
-`docs/architecture/streaming.md#sse-framing`.
-
-Dependencies and out of scope: depends on T046-T050. No production goroutine,
-channel, transport hook, blocking telemetry, or accounting.
-
-## SSE To JSON Compatibility
-
-### T052 - Define the SSE aggregation mismatch predicate
-
-Goal: select aggregation only when a known OpenAI client explicitly requested
-non-stream output but the actual upstream response is SSE.
-
-Scope:
-
-- Add one pure predicate using T041 metadata and the actual T026 response mode.
-- Return true only for explicit `stream:false` plus `ResponseModeSSE` on the
-  inspected chat-completions path.
-- Stream true, absent/unknown metadata, malformed/over-limit requests, JSON, and
-  opaque responses remain transparent.
-- Keep classification based on actual upstream headers.
-
-Acceptance and tests:
-
-- Exhaustively table-test stream tri-state against JSON/SSE/opaque and eligible
-  versus unknown endpoints.
-- No HTTP behavior changes in this task.
-
-Reference: `docs/architecture/transport.md#response-classification`,
-`docs/architecture/streaming.md#sse-to-json`.
-
-Dependencies and out of scope: depends on T045. No accumulator, body buffering,
-header rewriting, or observer attachment.
-
-### T053 - Define a bounded chat accumulator
-
-Goal: create a bounded in-memory model for one OpenAI chat-completion result.
-
-Scope:
-
-- Add an accumulator in `internal/protocol/openai` for response ID, model,
-  created, choices keyed by upstream index, messages, tool calls, finish reasons,
-  and normalized usage.
-- Accept parsed observer results rather than raw HTTP or SSE bytes.
-- Preserve deterministic upstream choice order without requiring contiguous
-  indexes.
-- Add an explicit positive maximum accumulated payload size covering content and
-  function-argument fragments, with a terminal overflow error.
-
-Acceptance and tests:
-
-- Constructor validation, empty state, identity metadata, multiple/non-contiguous
-  choice indexes, stable order, exact-limit payload, overflow, and terminal-error
-  state are covered.
-
-Reference: `docs/architecture/streaming.md#sse-to-json`,
-`docs/architecture/repository.md#dependencies`.
-
-Dependencies and out of scope: depends on T047-T049. No HTTP, JSON rendering,
-pricing, config, or function-argument JSON decoding.
-
-### T054 - Accumulate message deltas and finish reasons
-
-Goal: reconstruct messages for all choices and retain their finish reasons.
-
-Scope:
-
-- Set each choice's role from its first non-empty role delta and keep it stable on
-  later conflicting role values.
-- Append content exactly in chunk order, including empty strings and UTF-8 data,
-  while enforcing T053's byte bound.
-- Preserve upstream choice indexes and first-observed choice order.
-- Keep the latest non-nil finish reason per choice; finish reason must not mark
-  aggregation complete because usage may arrive afterward.
-- Do not decode content, normalize whitespace, or interpret reasoning fields.
-
-Acceptance and tests:
-
-- `TEST` plus `_OK` yields `TEST_OK`; split Unicode content, role-only chunks,
-  empty deltas, conflicts, multiple indexes, finish-reason replacement,
-  deltas after finish reason, exact byte bounds, and overflow are covered.
-
-Reference: `docs/architecture/streaming.md#sse-to-json`.
-
-Dependencies and out of scope: depends on T048 and T053. Usage, tools, and
-rendering are excluded.
-
-### T055 - Accumulate indexed tool-call deltas
-
-Goal: reconstruct OpenAI tool calls whose metadata and arguments are split across
-SSE chunks.
-
-Scope:
-
-- Identify tool calls by choice index and tool-call index and preserve their
-  first-observed order.
-- Keep the first non-empty ID, type, and function name stable on later conflicts.
-- Concatenate `function.arguments` fragments exactly in event order while
-  enforcing T053's shared payload bound.
-- Do not JSON-decode, validate, normalize, or otherwise rewrite assembled
-  arguments.
-
-Acceptance and tests:
-
-- Cover one and multiple choices, multiple tool calls, non-contiguous indexes,
-  metadata split across chunks, conflicting metadata, fragmented JSON arguments,
-  exact byte bounds, and overflow.
-
-Reference: `docs/architecture/streaming.md#sse-to-json`.
-
-Dependencies and out of scope: depends on T048 and T053-T054. No `[DONE]`, EOF
-policy, HTTP integration, or execution/validation of tool calls.
-
-### T056 - Accumulate the latest observed usage
-
-Goal: include the latest explicitly observed normalized usage in the final result.
-
-Scope:
-
-- Copy usage values into accumulator-owned state; callers cannot mutate them.
-- Merge partial later usage without erasing fields that are absent.
-- Accept usage-only events after content and finish reason.
-- Preserve absence rather than serializing invented zero values.
-
-Acceptance and tests:
-
-- OpenAI and input/output naming variants normalized by T049 produce the same
-  accumulator state.
-- Partial updates, replacements, usage after finish, and no-usage streams are
-  covered.
-
-Reference: `docs/architecture/streaming.md#sse-to-json`,
-`docs/architecture/accounting.md`.
-
-Dependencies and out of scope: depends on T049 and T053-T055. No price lookup,
-derivation, persistence, token estimation, or HTTP.
-
-### T057 - Render OpenAI-compatible chat JSON
-
-Goal: render accumulator state as one non-stream OpenAI chat-completion response.
-
-Scope:
-
-- Produce `id`, `object:"chat.completion"`, `created`, `model`, all observed
-  choices with `index`, `message.role`, `message.content`, optional indexed
-  `message.tool_calls`, and `finish_reason`, plus usage when observed.
-- Use standard JSON encoding and return bytes with no dependency on HTTP.
-- Preserve optional/absent usage fields and valid JSON escaping.
-- Return a controlled error if no meaningful message, tool-call, or finish
-  metadata was accumulated.
-
-Acceptance and tests:
-
-- Compare decoded JSON structure for multiple choices, content, role, finish
-  reason, identity, fragmented tool-call arguments, Unicode/escaping, usage
-  present/absent, and empty-invalid state.
-- Output is valid JSON and contains no streaming-only `delta` field.
-
-Reference: `docs/architecture/streaming.md#sse-to-json`.
-
-Dependencies and out of scope: depends on T053-T056. No HTTP headers, function
-argument validation, tool execution, or pretty printing.
-
-### T058 - Aggregate a bounded SSE stream through DONE
-
-Goal: combine the generic reader, observer, accumulator, and renderer into a
-bounded conversion function that completes on exact `[DONE]`.
-
-Scope:
-
-- Accept an `io.Reader` plus explicit event-size and accumulated-content limits.
-- Process complete events sequentially; valid chunks update the accumulator.
-- Exact `[DONE]` completes input semantics, but drain no bytes after it in this
-  conversion-only path and return rendered JSON.
-- Return controlled errors for malformed required chunks, oversized events,
-  accumulated overflow, empty streams, and invalid final state.
-
-Acceptance and tests:
-
-- Realistic role/content/finish/usage/`[DONE]` and split-tool-call sequences render
-  valid JSON, including multiple choices.
-- Split/coalesced reads, malformed JSON, comments, unknown fields, bounds, empty
-  input, and bytes after `[DONE]` are covered deterministically.
-
-Reference: `docs/architecture/streaming.md#sse-framing`,
-`docs/architecture/streaming.md#sse-to-json`.
-
-Dependencies and out of scope: depends on T050 and T057. No HTTP integration,
-transparent passthrough changes, function-argument validation, or tool execution.
-
-### T059 - Complete aggregation on clean upstream EOF
-
-Goal: support 9router streams that end physically after terminal chunks without
-sending `[DONE]`.
-
-Scope:
-
-- Treat clean EOF after at least one meaningful valid OpenAI event as a conversion
-  completion signal and render accumulated JSON.
-- EOF before meaningful response data is a recognizable upstream/protocol error.
-- Do not require finish reason and do not add grace, idle, or completion timers.
-- Framing errors and truncated unterminated events remain errors according to the
-  generic parser's complete-event contract.
-
-Acceptance and tests:
-
-- Terminal chunks plus EOF without `[DONE]` render the same result as the DONE
-  case.
-- Empty EOF, comment-only EOF, truncated event, usage-after-finish then EOF, and
-  immediate close timing are covered without sleeps.
-
-Reference: `docs/architecture/streaming.md#termination`,
-`docs/architecture/streaming.md#sse-to-json`,
 `docs/architecture/testing.md#regressions`.
 
-Dependencies and out of scope: depends on T058. No synthetic `[DONE]`, timeout,
-HTTP response behavior, or acceptance of incomplete SSE framing.
+Dependencies and out of scope: depends on T061. Do not change transparent SSE,
+synthesize `[DONE]`, add a streaming timeout, or accept incomplete SSE framing.
 
-### T060 - Integrate SSE-to-JSON compatibility and regression
+### T063 - Decouple completion logging from response close
 
-Goal: for an explicitly non-stream chat-completions request whose upstream
-actually returns SSE, return one valid OpenAI-compatible JSON response instead of
-raw SSE or an unmarshal failure.
+Goal: ensure a slow structured-log sink cannot delay downstream EOF after the
+proxy has finished delivering a response.
 
 Scope:
 
-- Use T052 before committing downstream headers to choose transparent SSE or the
-  bounded T058-T059 aggregation path.
-- Aggregate the upstream body before writing downstream status/body. On success,
-  preserve upstream status and safe headers except remove streaming/length headers,
-  set `Content-Type: application/json`, and set the correct `Content-Length`.
-- On aggregation failure before downstream bytes, return a controlled 502 without
-  leaking upstream credentials, raw body, or parse details.
-- Stream true/absent/unknown, malformed or over-limit requests, non-chat endpoints,
-  JSON, and opaque responses retain existing transparent behavior.
-- Client cancellation must cancel aggregation and upstream work promptly.
+- Introduce the smallest bounded, non-blocking completion-record handoff between
+  HTTP middleware and structured logging.
+- Enqueue one immutable completion record after request handling; when the bound
+  is full, drop the record explicitly rather than blocking transport.
+- Keep request ID, method, path, status, and duration while excluding
+  Authorization and credentials.
+- Give the process entry point ownership of logger-worker shutdown; shutdown may
+  drain only for a bounded period.
+- Do not put per-chunk or per-token events on this path.
 
 Acceptance and tests:
 
-- Real upstream/gateway tests cover `stream:false` plus SSE with `[DONE]`, clean EOF
-  without `[DONE]`, split/coalesced events, multiple choices, split tool calls,
-  usage, non-200 success conversion, malformed SSE failure, and cancellation.
-- Add a named regression proving the client receives valid JSON and never
-  `failed to unmarshal` for the historical Bifrost mismatch.
-- Existing byte-transparent SSE, first-fragment flush, EOF-close, parallelism,
-  gzip, JSON, opaque, and unknown-endpoint regressions remain unchanged.
+- A deliberately blocked log sink cannot delay client-observed SSE EOF or an
+  ordinary response completion.
+- Queue saturation is deterministic, non-blocking, and exposes a dropped-record
+  count without unbounded goroutines.
+- Normal completion records preserve current safe fields, and shutdown does not
+  leak a worker.
 
-Reference: `docs/architecture/transport.md#response-classification`,
-`docs/architecture/streaming.md#sse-to-json`,
-`docs/architecture/testing.md#transport-integration`.
+Reference: `docs/architecture/observability.md#logging`,
+`docs/architecture/observability.md#telemetry`,
+`docs/architecture/operations.md#server-lifecycle`.
 
-Dependencies and out of scope: depends on T045 and T052-T059. Do not add tool-call
-execution or argument validation, authentication, SQLite, policy, accounting,
-telemetry persistence, retries, or response buffering in transparent modes.
+Dependencies and out of scope: depends on T062. Do not add SQLite telemetry,
+body capture, Prometheus, usage accounting, or a general event bus.
+
+## SQLite And Key Foundation
+
+### T064 - Add storage and credential configuration
+
+Goal: define the deployment configuration needed for SQLite-backed gateway keys
+without placing runtime key records or raw gateway keys in YAML.
+
+Scope:
+
+- Add a required SQLite path, an authentication pepper environment reference,
+  and a distinct admin credential environment reference to system config.
+- Generalize the existing strict environment-reference resolver so secrets are
+  resolved consistently without embedding secret names in field-specific code.
+- Reject empty resolved secrets, identical admin/upstream credentials, malformed
+  references, and unusable storage paths before starting the listener.
+- Keep strict unknown-YAML-field handling and preserve existing upstream config.
+
+Acceptance and tests:
+
+- Table tests cover valid file paths, `:memory:` for tests, missing environment
+  variables, empty values, malformed references, and credential separation.
+- Validation errors identify the configuration field but never print a resolved
+  secret.
+- No raw gateway API key or per-key policy field is added to YAML.
+
+Reference: `docs/architecture/operations.md#configuration`,
+`docs/architecture/storage.md#boundaries`,
+`docs/architecture/policy.md#authentication`.
+
+Dependencies and out of scope: depends on T063. Do not open SQLite, define key
+tables, add hot reload, or add admin HTTP routes.
+
+### T065 - Open and configure SQLite
+
+Goal: add the minimal SQLite storage lifecycle with explicit operational
+settings suitable for a single gateway instance.
+
+Scope:
+
+- Choose a maintained Go SQLite driver compatible with the project's single
+  binary deployment and document any build implications in the task commit.
+- Add `internal/storage` ownership of opening, pinging, and closing the database.
+- Enable WAL mode for file databases, foreign keys, a bounded busy timeout, and
+  conservative connection-pool settings.
+- Return contextual startup errors without leaking credentials or silently
+  creating parent directories.
+- Keep SQL entirely off streaming and limiter hot paths.
+
+Acceptance and tests:
+
+- Temporary-file integration tests verify WAL, foreign keys, reopen behavior,
+  and clean close; in-memory tests use a configuration that cannot split state
+  across pooled connections.
+- An invalid/unwritable path fails before HTTP serving.
+- `Close` and startup-failure cleanup are safe and deterministic.
+
+Reference: `docs/architecture/storage.md#boundaries`,
+`docs/architecture/operations.md#server-lifecycle`.
+
+Dependencies and out of scope: depends on T064. Do not create application
+tables, repositories, telemetry writers, runtime counters, or distributed locks.
+
+### T066 - Add embedded schema migrations
+
+Goal: create a deterministic migration runner and the first persistent API-key
+schema without requiring an external migration binary.
+
+Scope:
+
+- Embed ordered SQL migrations in `internal/storage` and apply them
+  transactionally during startup.
+- Track an explicit schema version and reject a database newer than this binary.
+- Create `api_keys` with ID, display name, display prefix, keyed hash, enabled
+  state, optional expiration, timestamps, and policy JSON.
+- Add constraints and indexes needed for unique identity/prefix lookup and active
+  key loading.
+- Never add a column for a raw gateway key or authentication pepper.
+
+Acceptance and tests:
+
+- A fresh database reaches the expected version and exposes the expected table,
+  columns, constraints, and indexes.
+- Reopening is idempotent; a failed migration rolls back; an unknown future
+  version fails safely.
+- Schema inspection proves raw keys and pepper are absent.
+
+Reference: `docs/architecture/storage.md#boundaries`,
+`docs/architecture/storage.md#api-keys`.
+
+Dependencies and out of scope: depends on T065. Do not add request history,
+usage aggregates, policy semantics, downgrade migrations, or admin routes.
+
+### T067 - Define API key records and repository
+
+Goal: persist and retrieve gateway-key records through narrow domain types that
+do not expose SQLite details to authentication or policy code.
+
+Scope:
+
+- Define validated records for ID, name, display prefix, fixed-size HMAC digest,
+  enabled state, optional expiration, timestamps, and opaque policy JSON.
+- Implement insert, lookup by display prefix, get by ID, list in deterministic
+  order, and enabled-state update against the T066 schema.
+- Copy byte slices at the boundary so callers cannot mutate stored digest state.
+- Distinguish not-found and uniqueness conflicts with recognizable safe errors.
+- Never accept or return the raw key or pepper.
+
+Acceptance and tests:
+
+- Integration tests cover round trips, expiration nullability, duplicate
+  constraints, deterministic listing, enable/disable, not-found, and reopen.
+- Malformed digests, empty identity fields, and invalid timestamps are rejected.
+- Repository errors contain no policy contents, digest bytes, or credentials.
+
+Reference: `docs/architecture/storage.md#api-keys`,
+`docs/architecture/repository.md#dependencies`.
+
+Dependencies and out of scope: depends on T066. Do not generate keys, interpret
+policy JSON, add HTTP, cache records, or update last-used timestamps.
+
+### T068 - Generate and fingerprint gateway keys
+
+Goal: issue recognizable random gateway API keys while persisting only a safe
+display prefix and `HMAC-SHA256(pepper, raw_key)`.
+
+Scope:
+
+- Add a cryptographically secure key generator with the `sk-gw-` namespace and
+  enough random entropy for online credentials.
+- Derive an unambiguous display prefix suitable for indexed candidate lookup.
+- Compute the keyed hash with HMAC-SHA256 and compare hashes with constant-time
+  primitives.
+- Return the raw key only in the creation result; the repository record contains
+  only its display prefix and digest.
+- Make randomness injectable only where deterministic tests require it.
+
+Acceptance and tests:
+
+- Generated keys have the documented format, unique random material, and stable
+  digest for the same pepper/key.
+- Different peppers or keys produce different digests; malformed key formats are
+  rejected before lookup.
+- Tests prove records, JSON/debug formatting, and errors do not contain the raw
+  key or pepper.
+
+Reference: `docs/architecture/policy.md#authentication`,
+`docs/architecture/storage.md#api-keys`.
+
+Dependencies and out of scope: depends on T067. Do not add password hashing,
+key import, rotation, HTTP authentication, or admin authorization.
+
+### T069 - Add admin-authenticated key creation
+
+Goal: provide the minimal administrative bootstrap operation that creates a
+persistent gateway key and reveals its raw value exactly once.
+
+Scope:
+
+- Add `POST /admin/v1/keys` protected by the distinct configured admin bearer
+  credential using constant-time comparison.
+- Accept a bounded JSON body containing display name and optional expiration;
+  reject unknown fields, malformed types, trailing JSON, and oversized input.
+- Generate a key through T068, insert its record through T067 with an empty
+  initial policy, and return HTTP 201 with safe metadata plus the one-time raw key.
+- Keep `/health` public and ensure gateway keys cannot authorize admin routes.
+- Use a package-private service boundary so later CLI and policy operations reuse
+  behavior rather than SQL.
+
+Acceptance and tests:
+
+- Real HTTP tests cover success, persistence after reopen, missing/wrong/admin
+  credentials, gateway-key rejection, invalid body, duplicate-safe generation
+  failure, and no upstream call.
+- The raw key appears only in the successful creation response and never in logs
+  or subsequent repository reads.
+- Admin responses receive a gateway request ID and use safe JSON errors.
+
+Reference: `docs/architecture/operations.md#administration`,
+`docs/architecture/policy.md#authentication`,
+`docs/architecture/testing.md#security-and-performance`.
+
+Dependencies and out of scope: depends on T064 and T067-T068. Do not add list,
+revoke, CLI, policy editing, body logging, or ordinary `/v1/*` authentication.
+
+### T070 - Load an immutable authentication snapshot
+
+Goal: keep request-time authentication independent from SQLite by loading active
+key candidates into a concurrency-safe immutable in-memory snapshot.
+
+Scope:
+
+- Define a storage-independent auth record and snapshot keyed by display prefix,
+  allowing collision candidates without storing raw keys or pepper.
+- Load all key records at startup and atomically replace the whole snapshot after
+  a successful administrative mutation.
+- Authenticate by format/prefix lookup, HMAC-SHA256 with the process pepper, and
+  constant-time digest comparison.
+- Return an immutable principal containing safe key identity and policy bytes.
+- Distinguish internal invalid, disabled, and expired outcomes using an
+  injectable clock while exposing no credential detail in errors.
+
+Acceptance and tests:
+
+- Tests cover valid, malformed, unknown, colliding-prefix, wrong-digest,
+  disabled, expired, and no-expiration keys.
+- Concurrent readers observe either the old or new complete snapshot, never a
+  partial mutation; run relevant tests with the race detector.
+- Request-time authentication performs no SQL, and returned state cannot mutate
+  the snapshot.
+
+Reference: `docs/architecture/policy.md#authentication`,
+`docs/architecture/storage.md#aggregates-and-caches`.
+
+Dependencies and out of scope: depends on T067-T069. Do not add HTTP middleware,
+rate limits, last-used writes, periodic refresh, or multi-instance invalidation.
+
+## Authentication And Model Policy
+
+### T071 - Render OpenAI-style gateway errors
+
+Goal: give gateway-owned failures a stable, secret-safe OpenAI-compatible JSON
+shape before authentication begins rejecting public requests.
+
+Scope:
+
+- Define a narrow error response with `message`, `type`, optional `param`, and
+  stable `code` inside the standard `error` envelope.
+- Add mappings for invalid API key, disabled/expired key, model denial, request
+  limit, concurrency limit, malformed admin request, upstream connection error,
+  and gateway internal error.
+- Set JSON content type and exact status before writing a gateway-generated body.
+- Preserve the existing request-ID response header.
+- Do not rewrite normal upstream error statuses, headers, or bodies.
+
+Acceptance and tests:
+
+- Decoded response tests verify each code/status mapping and optional fields.
+- Messages and encoded bodies cannot contain presented keys, pepper, upstream
+  credentials, URLs with userinfo, SQL, or parser internals.
+- An upstream 4xx/5xx remains byte-transparent when no gateway transformation is
+  required.
+
+Reference: `docs/architecture/observability.md#logging`,
+`docs/architecture/testing.md#security-and-performance`.
+
+Dependencies and out of scope: depends on T070. Do not introduce a broad error
+framework, rewrite every existing plain-text startup error, or add retries.
+
+### T072 - Authenticate all public v1 requests
+
+Goal: require a valid gateway bearer key on `/v1/*` before any upstream work and
+make its safe principal available to later policy middleware.
+
+Scope:
+
+- Accept exactly one syntactically valid `Authorization: Bearer <gateway-key>`
+  value; reject missing, repeated, malformed, unknown, disabled, and expired
+  credentials through T071.
+- Authenticate before request inspection, limiting, or upstream client calls and
+  place the immutable principal in request context.
+- Always replace the client credential with the configured 9router credential on
+  admitted upstream requests.
+- Keep `/health` public and `/admin/v1/*` exclusively under admin authentication.
+- Avoid reading or buffering the request body on rejected requests.
+
+Acceptance and tests:
+
+- Real HTTP tests prove every rejection makes zero upstream calls and receives a
+  request ID plus safe OpenAI-style error.
+- A valid key preserves method, path, query, body, cancellation, concurrency, and
+  existing streaming behavior.
+- Gateway credentials never reach upstream or completion logs.
+
+Reference: `docs/architecture/policy.md#authentication`,
+`docs/architecture/repository.md#request-orchestration`,
+`docs/architecture/testing.md#security-and-performance`.
+
+Dependencies and out of scope: depends on T070-T071. Do not add model checks,
+rate/concurrency limits, anonymous mode, alternate auth schemes, or admin changes.
+
+### T073 - Define and validate key policy JSON
+
+Goal: turn stored policy JSON into one immutable effective policy containing only
+the model and request/concurrency fields needed by this milestone.
+
+Scope:
+
+- Define policy fields for exact/glob model allow and deny lists, generic request
+  windows, and optional maximum concurrency.
+- Strictly decode stored JSON, reject unknown fields, invalid glob syntax,
+  duplicate rules, non-positive amounts/durations, and invalid concurrency.
+- Compile model patterns and normalized durations while loading the auth snapshot,
+  never per request.
+- Define empty policy as unrestricted and deny precedence over allow.
+- Keep the compiled policy storage-independent and immutable to callers.
+
+Acceptance and tests:
+
+- Table tests cover empty, valid combined, unknown-field, malformed-pattern,
+  invalid-window, invalid-concurrency, duplicate, and mutation-isolation cases.
+- Invalid policy prevents the affected snapshot replacement rather than silently
+  granting broader access.
+- No regex engine, token limits, budgets, logging policy, or pricing fields are
+  introduced.
+
+Reference: `docs/architecture/policy.md#effective-policy`,
+`docs/architecture/storage.md#api-keys`.
+
+Dependencies and out of scope: depends on T070. Do not add policy admin routes,
+global/model-specific counters, tokenization, or database schema normalization.
+
+### T074 - Enforce model allow and deny rules
+
+Goal: reject a known disallowed model after authentication but before upstream
+work without changing request bytes.
+
+Scope:
+
+- Evaluate exact and glob patterns against the parsed model on inspectable
+  `POST /v1/chat/completions` requests.
+- Make deny override allow; when an allow list exists, require a match; an empty
+  allow list permits models not denied.
+- Return the T071 model error with `param:"model"` before upstream transport.
+- Preserve transparent passthrough when the endpoint or model is unknown because
+  the body is malformed, oversized, unsupported, or intentionally uninspected.
+- Do not reserialize, normalize, alias, or route model names.
+
+Acceptance and tests:
+
+- Tests cover exact/glob allow, exact/glob deny, deny precedence, allow-only miss,
+  unrestricted policy, case sensitivity, and multiple keys with different policy.
+- Rejected requests never reach upstream; admitted bodies remain byte-identical.
+- Unknown `/v1/*`, malformed JSON, and over-limit bodies retain existing behavior.
+
+Reference: `docs/architecture/policy.md#effective-policy`,
+`docs/architecture/transport.md#generic-passthrough`.
+
+Dependencies and out of scope: depends on T072-T073. Do not reject unknown
+models, inspect additional endpoints, add aliases, or modify payloads.
+
+### T075 - Add admin key policy updates
+
+Goal: make a persistent key's enabled state and milestone policy administratively
+changeable without exposing secret material.
+
+Scope:
+
+- Add admin-authenticated `PUT /admin/v1/keys/{id}/policy` with a bounded strict
+  JSON body containing `enabled` and the complete T073 policy document.
+- Validate and compile the replacement policy before changing persistent state.
+- Persist status/policy together, then rebuild and atomically publish the T070
+  snapshot; define a safe error if refresh fails instead of publishing partial
+  state.
+- Make replacement idempotent and return safe validation and not-found responses.
+- Return only deterministic safe key metadata and policy, never digest, pepper,
+  admin credential, upstream credential, or raw key.
+
+Acceptance and tests:
+
+- Real HTTP tests cover valid replacement, invalid policy rollback, enable/disable,
+  idempotence, not-found, unauthorized access, immediate auth/policy effect, and
+  persistence after reopen.
+- A disabled key cannot call `/v1/*`, and changed model/limit policy is visible to
+  the next authenticated request without process restart.
+- Responses and logs contain no raw key or digest material.
+
+Reference: `docs/architecture/operations.md#administration`,
+`docs/architecture/storage.md#aggregates-and-caches`.
+
+Dependencies and out of scope: depends on T069-T073. Do not add delete, policy
+patch semantics, list endpoints, CLI, usage history, key rotation, or last-used
+tracking.
+
+## Request And Concurrency Limits
+
+### T076 - Implement generic per-key request windows
+
+Goal: atomically enforce every configured request-count window for a key using
+in-memory fixed windows and deterministic time.
+
+Scope:
+
+- Add a minimal injectable clock and define fixed-window boundaries explicitly.
+- Track counters by stable key ID and normalized window, with no shared capacity
+  between keys.
+- Check all configured windows and consume one request from all of them atomically
+  only when every window admits the request.
+- Return the earliest useful reset time on rejection and lazily discard expired
+  state so inactive keys do not grow memory forever.
+- Treat RPM as ordinary `amount / 1m` policy, not a separate algorithm.
+
+Acceptance and tests:
+
+- Unit tests cover exact capacity, one-over-limit, boundary reset, multiple
+  simultaneous windows, different keys, clock movement, cleanup, and concurrent
+  attempts without sleeps.
+- A rejected multi-window attempt consumes no capacity in any window.
+- The race detector proves configured capacity cannot be oversubscribed.
+
+Reference: `docs/architecture/policy.md#request-limits`,
+`docs/architecture/testing.md#limit-tests`.
+
+Dependencies and out of scope: depends on T073. Do not add sliding windows,
+refunds, SQLite counters, distributed limiting, tokens, budgets, or HTTP behavior.
+
+### T077 - Integrate request limits and Retry-After
+
+Goal: consume per-key request capacity before upstream work and return a useful
+OpenAI-style 429 when any configured window is exhausted.
+
+Scope:
+
+- Run T076 after authentication/model policy and before opening the upstream
+  request or acquiring concurrency.
+- On rejection return `request_limit_exceeded` with `Retry-After` delta-seconds
+  rounded up from the limiter reset time.
+- Consume admitted capacity once and do not refund it for upstream status,
+  connection failure, client cancellation, or gateway transformation failure.
+- Requests with no configured windows take a minimal unrestricted path.
+- Do not read or mutate the body to enforce a request-count limit.
+
+Acceptance and tests:
+
+- Real HTTP tests cover RPM, an arbitrary duration, multiple windows, exact reset
+  boundary, positive `Retry-After`, different keys, and zero upstream calls on
+  rejection using a fake clock.
+- Admitted JSON, opaque, SSE, and SSE-to-JSON requests preserve existing behavior.
+- Upstream failures and cancellation still consume exactly one request unit.
+
+Reference: `docs/architecture/policy.md#request-limits`,
+`docs/architecture/repository.md#request-orchestration`.
+
+Dependencies and out of scope: depends on T071-T072 and T074-T076. Do not add
+capacity refunds, queueing, response-header passthrough changes, tokens, or cost.
+
+### T078 - Implement per-key concurrency leases
+
+Goal: reject excess simultaneous work per key and represent each admitted slot
+with an idempotent lease suitable for later token and budget reservations.
+
+Scope:
+
+- Track active requests by stable key ID with unlimited behavior when no maximum
+  is configured.
+- Acquire atomically and reject immediately at the configured maximum; never
+  queue hidden waiters.
+- Return a lease whose `Release` frees exactly one slot and is safe under repeated
+  or concurrent calls.
+- Remove idle per-key state after the final lease without racing a new acquire.
+- Keep lease API narrow enough to gain reservation fields later, but do not add
+  speculative token or budget methods now.
+
+Acceptance and tests:
+
+- Tests cover unlimited, limits one and many, exact saturation, separate keys,
+  immediate reuse, double/concurrent release, cleanup, and acquire/release races.
+- Active count never exceeds the configured maximum and never underflows.
+- Rejected acquisition cannot release another request's slot.
+
+Reference: `docs/architecture/policy.md#concurrency`,
+`docs/architecture/policy.md#lease`,
+`docs/architecture/testing.md#limit-tests`.
+
+Dependencies and out of scope: depends on T073. Do not add HTTP, queues,
+semaphores shared across keys, token/budget reservation, SQLite, or admin kill.
+
+### T079 - Hold concurrency through the full proxy lifecycle
+
+Goal: acquire a per-key concurrency lease before upstream work and release it
+exactly once only after the request has fully stopped using gateway/upstream
+resources.
+
+Scope:
+
+- Acquire after request-window admission and before creating or sending the
+  upstream request; reject saturation with `concurrency_limit_exceeded` HTTP 429.
+- Hold the lease through response headers and complete JSON/opaque copy,
+  transparent SSE EOF, SSE-to-JSON aggregation, and any required bounded drain.
+- Release on normal completion, upstream connection/read error, downstream
+  write/flush error, client cancellation, compatibility failure, and internal
+  early return.
+- Ensure cancellation still propagates upstream before request cleanup finishes.
+- Do not make lease lifecycle depend on `[DONE]` or `finish_reason`.
+
+Acceptance and tests:
+
+- Real HTTP tests prove a limit-one key rejects a second request while the first
+  is blocked in request upload, before headers, in JSON body, in SSE, and in
+  aggregation, then admits immediately after every completion/error/cancel path.
+- Different keys remain concurrent and a configured limit greater than one does
+  not serialize admitted requests.
+- Existing first-fragment flush and EOF-close regression timing remains valid.
+
+Reference: `docs/architecture/policy.md#concurrency`,
+`docs/architecture/repository.md#request-orchestration`,
+`docs/architecture/testing.md#limit-tests`.
+
+Dependencies and out of scope: depends on T072, T077-T078. Do not add token or
+budget reconciliation, response retries, forced stream errors, or persistence of
+active leases.
+
+### T080 - Harden the authentication and limits milestone
+
+Goal: verify the complete authentication, model-policy, request-window, and
+concurrency lifecycle without regressing transparent transport.
+
+Scope:
+
+- Add a focused real-HTTP scenario using two persistent keys with different model,
+  request-window, and concurrency policies against the shared mock upstream.
+- Exercise success, invalid/disabled/expired auth, model denial, rate rejection,
+  concurrent saturation, upstream error, client cancellation, SSE EOF, and
+  process restart with persistent keys.
+- Add secret-redaction assertions over gateway responses and captured structured
+  logs for gateway, admin, upstream credentials, pepper, and stored digest.
+- Run the full suite under the race detector and resolve confirmed races or lease
+  leaks within this task.
+- Update architecture/testing wording that still labels completed SSE-to-JSON
+  coverage as future work.
+
+Acceptance and tests:
+
+- No rejected policy request reaches upstream; every admitted request preserves
+  method, path, query, required headers, body bytes, status, and transparent
+  response behavior except the explicit compatibility path.
+- Concurrent tests cannot oversubscribe windows or leases and leave no key
+  permanently blocked after cancellation or failure.
+- `go test -race ./...`, `go fmt ./...`, `go test ./...`, and `go build ./...`
+  pass, and `CURRENT.md` marks T061-T080 done with the next milestone unset.
+
+Reference: `docs/architecture/testing.md#transport-integration`,
+`docs/architecture/testing.md#limit-tests`,
+`docs/architecture/testing.md#security-and-performance`.
+
+Dependencies and out of scope: depends on T061-T079. Do not add token accounting,
+budget, request-history persistence, body inspector, metrics endpoint, CLI, Web
+UI, provider routing, protocol translation, Redis, or PostgreSQL.
