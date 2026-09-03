@@ -49,10 +49,11 @@ type AccumulatedToolCall struct {
 // AccumulatedChoice is one choice keyed by its upstream Index. The ordered
 // Choices slice in AccumulatorState is the deterministic rendering order.
 type AccumulatedChoice struct {
-	Index        int                   `json:"index"`
-	Message      AccumulatedMessage    `json:"message"`
-	ToolCalls    []AccumulatedToolCall `json:"tool_calls,omitempty"`
-	FinishReason *string               `json:"finish_reason,omitempty"`
+	Index               int                   `json:"index"`
+	Message             AccumulatedMessage    `json:"message"`
+	ToolCalls           []AccumulatedToolCall `json:"tool_calls,omitempty"`
+	FinishReason        *string               `json:"finish_reason,omitempty"`
+	FinishReasonPresent bool                  `json:"-"`
 }
 
 // AccumulatorState is a caller-owned snapshot of an accumulator. Choices are
@@ -239,6 +240,9 @@ func (accumulator *ChatAccumulator) applyChoiceObservation(observation ChoiceObs
 	if observation.FinishReason != nil {
 		reason := *observation.FinishReason
 		choice.FinishReason = &reason
+	}
+	if observation.FinishReasonPresent {
+		choice.FinishReasonPresent = true
 	}
 	return nil
 }
