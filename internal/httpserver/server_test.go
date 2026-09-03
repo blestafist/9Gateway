@@ -536,6 +536,135 @@ func TestProxyConvertsGzipChatSSEToUncompressedJSON(t *testing.T) {
 	}
 }
 
+func TestProxyValidatesGzipTrailerAfterSSEDONE(t *testing.T) {
+	const stream = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"
+	var compressed bytes.Buffer
+	compressor := gzip.NewWriter(&compressed)
+	if _, err := compressor.Write([]byte(stream)); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := append([]byte(nil), compressed.Bytes()...)
+	corrupt[len(corrupt)-1] ^= 0xff
+
+	for _, test := range []struct {
+		name string
+		body []byte
+	}{
+		{name: "corrupt trailer", body: corrupt},
+		{name: "truncated trailer", body: compressed.Bytes()[:len(compressed.Bytes())-2]},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "text/event-stream")
+				response.Header().Set("Content-Encoding", "gzip")
+				_, _ = response.Write(test.body)
+			}))
+			t.Cleanup(upstream.Close)
+			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			t.Cleanup(gateway.Close)
+
+			request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Content-Type", "application/json")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if response.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 (body %q)", response.StatusCode, body)
+			}
+		})
+	}
+}
+
+func TestProxyConvertsCleanEOFGzipChatSSE(t *testing.T) {
+	const stream = "data: {\"id\":\"gzip-eof\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	var compressed bytes.Buffer
+	compressor := gzip.NewWriter(&compressed)
+	if _, err := compressor.Write([]byte(stream)); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Content-Encoding", "gzip")
+		_, _ = response.Write(compressed.Bytes())
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if response.StatusCode != http.StatusOK || !json.Valid(body) {
+		t.Fatalf("status/body = %d/%q, want successful JSON", response.StatusCode, body)
+	}
+}
+
+func TestProxyRejectsDecodedSSERepresentationOverflow(t *testing.T) {
+	const firstEvent = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n"
+	const emptyEvent = "data: {}\n\n"
+	stream := firstEvent + strings.Repeat(emptyEvent, int(aggregationMaxDecodedBytes/int64(len(emptyEvent)))+1) + "data: [DONE]\n\n"
+	var compressed bytes.Buffer
+	compressor := gzip.NewWriter(&compressed)
+	if _, err := compressor.Write([]byte(stream)); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Content-Encoding", "gzip")
+		_, _ = response.Write(compressed.Bytes())
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (body %q)", response.StatusCode, body)
+	}
+}
+
 func TestProxyPreservesCompressedTransparentChatSSE(t *testing.T) {
 	const plain = "data: transparent-gzip\n\n"
 	var compressed bytes.Buffer

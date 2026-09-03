@@ -54,7 +54,14 @@ const (
 	// path. Transparent responses never use them or buffer their body.
 	aggregationMaxEventSize   = 64 * 1024
 	aggregationMaxPayloadSize = 4 * 1024 * 1024
+	// This bounds the complete decoded representation, including framing and
+	// any bytes after [DONE] that are consumed to validate content codings.
+	// Keep it above the accumulated payload limit so a normal 4 MiB result can
+	// still be represented without making the decoder an unbounded work sink.
+	aggregationMaxDecodedBytes int64 = 8 * 1024 * 1024
 )
+
+var errDecodedRepresentationTooLarge = errors.New("decoded representation exceeds limit")
 
 func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler {
 	parsedURL, err := url.Parse(baseURL)
@@ -180,6 +187,14 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
 			return
 		}
+		// AggregateSSEToJSON intentionally stops reading at [DONE]. Finish
+		// consuming only the bounded decoded representation here so gzip readers
+		// validate their trailers before the generated response is committed.
+		// Bytes read during this drain are never passed to the accumulator.
+		if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
+			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
+			return
+		}
 		copyResponseHeaders(response.Header(), upstreamResponse.Header)
 		response.Header().Del("Content-Type")
 		response.Header().Del("Content-Length")
@@ -220,7 +235,7 @@ func aggregationReader(upstreamResponse *http.Response) (io.Reader, func(), erro
 		}
 	}
 	if len(codings) == 0 {
-		return upstreamResponse.Body, nil, nil
+		return &decodedRepresentationReader{reader: upstreamResponse.Body, remaining: aggregationMaxDecodedBytes}, nil, nil
 	}
 
 	reader := io.Reader(upstreamResponse.Body)
@@ -242,7 +257,66 @@ func aggregationReader(upstreamResponse *http.Response) (io.Reader, func(), erro
 		closers = append(closers, decoded)
 	}
 
-	return reader, func() { closeReaders(closers) }, nil
+	return &decodedRepresentationReader{reader: reader, remaining: aggregationMaxDecodedBytes}, func() { closeReaders(closers) }, nil
+}
+
+// decodedRepresentationReader bounds bytes after content decoding rather than
+// compressed wire bytes. The one-byte probe after the exact limit distinguishes
+// an exact-size clean EOF from a representation that has more decoded data.
+type decodedRepresentationReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (reader *decodedRepresentationReader) Read(destination []byte) (int, error) {
+	if len(destination) == 0 {
+		return 0, nil
+	}
+	if reader.remaining == 0 {
+		var probe [1]byte
+		read, err := reader.reader.Read(probe[:])
+		if read > 0 {
+			return 0, errDecodedRepresentationTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(destination)) > reader.remaining {
+		destination = destination[:reader.remaining]
+	}
+	read, err := reader.reader.Read(destination)
+	if read > 0 {
+		reader.remaining -= int64(read)
+	}
+	return read, err
+}
+
+func drainAggregationBody(body io.Reader, context context.Context) error {
+	buffer := make([]byte, 32*1024)
+	for {
+		if err := context.Err(); err != nil {
+			return err
+		}
+		read, err := body.Read(buffer)
+		if read == 0 && err == nil {
+			return io.ErrNoProgress
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func aggregationContext(upstreamResponse *http.Response, request *http.Request) context.Context {
+	if request != nil {
+		return request.Context()
+	}
+	if upstreamResponse != nil && upstreamResponse.Request != nil {
+		return upstreamResponse.Request.Context()
+	}
+	return context.Background()
 }
 
 func closeReaders(closers []io.Closer) {
