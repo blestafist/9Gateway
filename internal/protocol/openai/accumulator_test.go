@@ -3,6 +3,8 @@ package openai
 import (
 	"errors"
 	"testing"
+
+	"github.com/pestit/9gateway/internal/streaming"
 )
 
 func TestNewChatAccumulatorValidatesPayloadLimit(t *testing.T) {
@@ -195,6 +197,121 @@ func TestChatAccumulatorSnapshotIsCallerSafe(t *testing.T) {
 	snapshot.ChoicesByIndex[1].ToolCalls[0].Function.Arguments = "changed-again"
 	if state := accumulator.State(); *state.Created != 1 || state.Choices[0].ToolCalls[0].Function.Arguments != "x" || state.ChoicesByIndex[1].ToolCalls[0].Function.Arguments != "x" {
 		t.Fatalf("snapshot mutation changed accumulator: %+v", state)
+	}
+}
+
+func TestChatAccumulatorAccumulatesNormalizedUsage(t *testing.T) {
+	variants := []struct {
+		name string
+		data string
+	}{
+		{name: "openai names", data: `{"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}`},
+		{name: "input output names", data: `{"usage":{"input_tokens":4,"output_tokens":6,"total_tokens":10}}`},
+	}
+
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			observer := NewObserver()
+			if err := observer.Observe(streaming.SSEEvent{Data: variant.data}); err != nil {
+				t.Fatal(err)
+			}
+			usage := observer.State().Usage
+			accumulator, err := NewChatAccumulator(64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: usage}}); err != nil {
+				t.Fatal(err)
+			}
+
+			got := accumulator.State().Usage
+			assertUsageObservation(t, got, UsageObservation{
+				InputTokens: intPointer(4), OutputTokens: intPointer(6), TotalTokens: intPointer(10),
+			})
+
+			// The source pointers are caller-owned and must not become aliases of
+			// accumulator state.
+			*usage.InputTokens = 40
+			*usage.OutputTokens = 60
+			*usage.TotalTokens = 100
+			assertUsageObservation(t, accumulator.State().Usage, UsageObservation{
+				InputTokens: intPointer(4), OutputTokens: intPointer(6), TotalTokens: intPointer(10),
+			})
+		})
+	}
+}
+
+func TestChatAccumulatorMergesPartialUsageReplacements(t *testing.T) {
+	accumulator, err := NewChatAccumulator(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
+		InputTokens: intPointer(1), OutputTokens: intPointer(2), TotalTokens: intPointer(3),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
+		OutputTokens: intPointer(9),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	assertUsageObservation(t, accumulator.State().Usage, UsageObservation{
+		InputTokens: intPointer(1), OutputTokens: intPointer(9), TotalTokens: intPointer(3),
+	})
+
+	// A later partial update replaces explicitly observed fields while keeping
+	// fields omitted by that update.
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
+		InputTokens: intPointer(4),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	assertUsageObservation(t, accumulator.State().Usage, UsageObservation{
+		InputTokens: intPointer(4), OutputTokens: intPointer(9), TotalTokens: intPointer(3),
+	})
+}
+
+func TestChatAccumulatorAcceptsUsageAfterFinishReason(t *testing.T) {
+	accumulator, err := NewChatAccumulator(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := "stop"
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Choices: []ChoiceObservation{{
+		Index:        0,
+		FinishReason: &finish,
+	}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
+		InputTokens: intPointer(7), OutputTokens: intPointer(8), TotalTokens: intPointer(15),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	state := accumulator.State()
+	if len(state.Choices) != 1 || state.Choices[0].FinishReason == nil || *state.Choices[0].FinishReason != finish {
+		t.Fatalf("finish state = %+v, want finish reason %q", state.Choices, finish)
+	}
+	assertUsageObservation(t, state.Usage, UsageObservation{
+		InputTokens: intPointer(7), OutputTokens: intPointer(8), TotalTokens: intPointer(15),
+	})
+}
+
+func TestChatAccumulatorPreservesAbsentUsage(t *testing.T) {
+	accumulator, err := NewChatAccumulator(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Choices: []ChoiceObservation{{
+		Index: 0,
+		Delta: DeltaObservation{Content: stringPointer("no usage")},
+	}}}}); err != nil {
+		t.Fatal(err)
+	}
+	state := accumulator.State()
+	if state.Usage.InputTokens != nil || state.Usage.OutputTokens != nil || state.Usage.TotalTokens != nil {
+		t.Fatalf("absent usage = %+v, want all fields absent", state.Usage)
 	}
 }
 

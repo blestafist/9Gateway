@@ -195,7 +195,10 @@ func (accumulator *ChatAccumulator) mergeMetadata(metadata ResponseMetadata) {
 }
 
 func (accumulator *ChatAccumulator) mergeUsage(usage UsageObservation) {
-	accumulator.usage = mergeUsageObservation(accumulator.usage, usage)
+	// Merge from a copy so every value supplied by a caller is detached before
+	// it becomes part of the accumulator state. Missing fields intentionally
+	// leave the latest known values unchanged.
+	accumulator.usage = mergeUsageObservation(accumulator.usage, cloneUsageObservation(usage))
 }
 
 func (accumulator *ChatAccumulator) applyChoiceObservation(observation ChoiceObservation) error {
