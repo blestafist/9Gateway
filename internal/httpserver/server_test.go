@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -409,6 +410,101 @@ func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 	}
 	if !bytes.Equal(gotBody, wantBody) {
 		t.Fatalf("response body = %q, want %q", gotBody, wantBody)
+	}
+}
+
+func TestProxyConvertsExplicitNonStreamChatSSEToJSON(t *testing.T) {
+	const stream = `data: {"id":"chatcmpl-bifrost","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}
+
+data: [DONE]
+
+`
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("X-Upstream-Trace", "trace-value")
+		response.Header().Set("Content-Length", strconv.Itoa(len(stream)))
+		response.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(response, stream)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","stream":false,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST chat completions: %v", err)
+	}
+	gotBody, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response body: %v", readErr)
+	}
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusBadGateway)
+	}
+	if response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", response.Header.Get("Content-Type"))
+	}
+	if response.Header.Get("Content-Length") != strconv.Itoa(len(gotBody)) {
+		t.Fatalf("Content-Length = %q, want %d", response.Header.Get("Content-Length"), len(gotBody))
+	}
+	if !json.Valid(gotBody) || bytes.Contains(gotBody, []byte("failed to unmarshal")) || bytes.Contains(gotBody, []byte("text/event-stream")) {
+		t.Fatalf("Bifrost mismatch response is not valid converted JSON: %q", gotBody)
+	}
+	var decoded struct {
+		ID      string `json:"id"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage map[string]int `json:"usage"`
+	}
+	if err := json.Unmarshal(gotBody, &decoded); err != nil {
+		t.Fatalf("unmarshal converted response: %v", err)
+	}
+	if decoded.ID != "chatcmpl-bifrost" || len(decoded.Choices) != 1 || decoded.Choices[0].Message.Content != "hello" || decoded.Usage["total_tokens"] != 3 {
+		t.Fatalf("converted response = %#v", decoded)
+	}
+	if response.Header.Get("X-Upstream-Trace") != "trace-value" {
+		t.Fatalf("safe upstream header was not preserved")
+	}
+}
+
+func TestProxyAggregationFailureIsControlledAndDoesNotCommitUpstreamResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Authorization", "Bearer upstream-secret")
+		_, _ = io.WriteString(response, "data: {not-json}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", response.StatusCode)
+	}
+	if strings.Contains(string(body), "not-json") || strings.Contains(string(body), "upstream-secret") || strings.Contains(string(body), "malformed") {
+		t.Fatalf("aggregation details leaked: %q", body)
 	}
 }
 

@@ -1,14 +1,14 @@
 # Current Work
 
-Current milestone: minimal OpenAI request inspection.
+Current milestone: completed transport compatibility milestone.
 
-Done: `T001`-`T059`.
+Done: `T001`-`T060`.
 
-Current: `T060`.
+Current: none.
 
 Next: none.
 
-Queued: `T060`.
+Queued: none.
 
 Known issues: none recorded.
 

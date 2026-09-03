@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,13 @@ type proxyHandler struct {
 
 type responseDispatchFunc func(http.ResponseWriter, *http.Response, *openai.RequestMetadata)
 
+const (
+	// These limits apply only to the explicit stream:false/SSE compatibility
+	// path. Transparent responses never use them or buffer their body.
+	aggregationMaxEventSize   = 64 * 1024
+	aggregationMaxPayloadSize = 4 * 1024 * 1024
+)
+
 func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler {
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
@@ -54,7 +62,10 @@ func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler 
 		}}
 	}
 
-	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, responseDispatch: dispatchResponse}
+	// A nil responseDispatch selects the built-in dispatcher. Keeping the
+	// injectable legacy-shaped callback available is useful to transport tests
+	// and avoids making request classification part of that callback's API.
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -84,11 +95,11 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	defer upstreamResponse.Body.Close()
-	dispatch := handler.responseDispatch
-	if dispatch == nil {
-		dispatch = dispatchResponse
+	if handler.responseDispatch != nil {
+		handler.responseDispatch(response, upstreamResponse, metadata)
+		return
 	}
-	dispatch(response, upstreamResponse, metadata)
+	dispatchResponse(response, upstreamResponse, metadata, request)
 }
 
 func inspectChatRequest(request *http.Request) (io.ReadCloser, *openai.RequestMetadata) {
@@ -139,10 +150,36 @@ func (body *replayedRequestBody) Close() error {
 	return body.source.Close()
 }
 
-func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Response, _ *openai.RequestMetadata) {
+// dispatchResponse forwards an upstream response. The optional request is used
+// for the one compatibility transformation; omitting it retains the original
+// direct-call behavior for callers that only need transparent dispatch.
+func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, requests ...*http.Request) {
+	var request *http.Request
+	if len(requests) != 0 {
+		request = requests[0]
+	}
+	responseMode := classifyResponseHeader(upstreamResponse.Header)
+	if shouldAggregateSSE(request, metadata, responseMode) {
+		body, err := openai.AggregateSSEToJSON(upstreamResponse.Body, aggregationMaxEventSize, aggregationMaxPayloadSize)
+		if err != nil {
+			// Aggregation happens before any downstream headers or body bytes are
+			// committed. Deliberately expose no upstream body or parser detail.
+			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
+			return
+		}
+		copyResponseHeaders(response.Header(), upstreamResponse.Header)
+		response.Header().Del("Content-Type")
+		response.Header().Del("Content-Length")
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		response.WriteHeader(upstreamResponse.StatusCode)
+		_, _ = response.Write(body)
+		return
+	}
+
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
-	if classifyResponseHeader(upstreamResponse.Header) == ResponseModeSSE {
+	if responseMode == ResponseModeSSE {
 		_ = streamResponseBody(response, upstreamResponse.Body)
 		return
 	}
