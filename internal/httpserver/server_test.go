@@ -479,6 +479,321 @@ data: [DONE]
 	}
 }
 
+func TestProxyConvertsGzipChatSSEToUncompressedJSON(t *testing.T) {
+	const stream = "data: {\"id\":\"gzip-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	var compressed bytes.Buffer
+	compressor := gzip.NewWriter(&compressed)
+	if _, err := compressor.Write([]byte(stream)); err != nil {
+		t.Fatalf("compress SSE: %v", err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatalf("close compressor: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Content-Encoding", "gzip")
+		response.Header().Set("Content-Length", strconv.Itoa(compressed.Len()))
+		response.Header().Set("X-Upstream-Trace", "trace-value")
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write(compressed.Bytes())
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST chat completions: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read converted response: %v", readErr)
+	}
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusCreated)
+	}
+	if !json.Valid(body) {
+		t.Fatalf("converted body is not JSON: %q", body)
+	}
+	if response.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("Content-Encoding = %q, want absent", response.Header.Get("Content-Encoding"))
+	}
+	if response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", response.Header.Get("Content-Type"))
+	}
+	if response.Header.Get("Content-Length") != strconv.Itoa(len(body)) {
+		t.Fatalf("Content-Length = %q, want %d", response.Header.Get("Content-Length"), len(body))
+	}
+	if response.Header.Get("X-Upstream-Trace") != "trace-value" {
+		t.Fatal("safe upstream header was not preserved")
+	}
+}
+
+func TestProxyPreservesCompressedTransparentChatSSE(t *testing.T) {
+	const plain = "data: transparent-gzip\n\n"
+	var compressed bytes.Buffer
+	compressor := gzip.NewWriter(&compressed)
+	if _, err := compressor.Write([]byte(plain)); err != nil {
+		t.Fatalf("compress SSE: %v", err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatalf("close compressor: %v", err)
+	}
+	wantBody := compressed.Bytes()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Content-Encoding", "gzip")
+		response.Header().Set("Content-Length", strconv.Itoa(len(wantBody)))
+		_, _ = response.Write(wantBody)
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("POST chat completions: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read transparent SSE: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("status/content type = %d/%q, want 200/text/event-stream", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	if response.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", response.Header.Get("Content-Encoding"))
+	}
+	if response.Header.Get("Content-Length") != strconv.Itoa(len(wantBody)) {
+		t.Fatalf("Content-Length = %q, want %d", response.Header.Get("Content-Length"), len(wantBody))
+	}
+	if !bytes.Equal(body, wantBody) {
+		t.Fatalf("transparent body changed: got %x, want %x", body, wantBody)
+	}
+}
+
+func TestProxyRejectsUnsupportedOrMalformedEncodingDuringChatSSEConversion(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		encoding string
+		body     []byte
+	}{
+		{name: "unsupported", encoding: "br", body: []byte("not decoded")},
+		{name: "malformed gzip", encoding: "gzip", body: []byte("not gzip")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "text/event-stream")
+				response.Header().Set("Content-Encoding", test.encoding)
+				response.Header().Set("X-Upstream-Secret", "do-not-copy")
+				_, _ = response.Write(test.body)
+			}))
+			t.Cleanup(upstream.Close)
+
+			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			t.Cleanup(gateway.Close)
+			request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Content-Type", "application/json")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", response.StatusCode)
+			}
+			if strings.Contains(string(body), "do-not-copy") || strings.Contains(string(body), "not decoded") || strings.Contains(string(body), "gzip") {
+				t.Fatalf("encoding details leaked: %q", body)
+			}
+		})
+	}
+}
+
+func TestProxyAggregatesChatSSEAtGatewayOnCleanEOFWithSplitToolCallsAndChoices(t *testing.T) {
+	fragments := []string{
+		`data: {"id":"chat-eof","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant"}},{"index":1,"delta":{"role":"assistant"}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\"city\":\""}}]}}]}` + "\n\n",
+		`data: {"choices":[{"index":1,"delta":{"content":"second"}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"Paris\"}"}}]}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"},{"index":1,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+	}
+	for _, fragment := range fragments {
+		data := strings.TrimSuffix(strings.TrimPrefix(fragment, "data: "), "\n\n")
+		if !json.Valid([]byte(data)) {
+			t.Fatalf("invalid test event: %q", data)
+		}
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.WriteHeader(http.StatusCreated)
+		for _, fragment := range fragments {
+			for _, part := range []string{fragment[:len(fragment)/2], fragment[len(fragment)/2:]} {
+				if _, err := io.WriteString(response, part); err != nil {
+					return
+				}
+				if flusher, ok := response.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			}
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST chat completions: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read converted response: %v", readErr)
+	}
+	if response.StatusCode != http.StatusCreated || response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("status/content type = %d/%q body=%q, want 201/application/json", response.StatusCode, response.Header.Get("Content-Type"), body)
+	}
+	var decoded struct {
+		ID      string `json:"id"`
+		Choices []struct {
+			Message struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("converted body is not JSON: %v", err)
+	}
+	if decoded.ID != "chat-eof" || len(decoded.Choices) != 2 || decoded.Choices[0].Message.ToolCalls[0].Function.Arguments != `{"city":"Paris"}` || decoded.Choices[1].Message.Content != "second" {
+		t.Fatalf("converted response = %#v", decoded)
+	}
+}
+
+func TestProxyKeepsChatSSETransparentUnlessRequestExplicitlyDisablesStreaming(t *testing.T) {
+	const body = "data: raw-chat-event\n\n"
+	upstream := newStreamingUpstream(t, streamingUpstreamScript{
+		contentType: "text/event-stream",
+		fragments:   []string{body},
+	})
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	requestBodies := []struct {
+		name string
+		body string
+	}{
+		{name: "true", body: `{"stream":true}`},
+		{name: "absent", body: `{}`},
+		{name: "unknown type", body: `{"stream":"false"}`},
+		{name: "malformed", body: `{"stream":false`},
+		{name: "over limit", body: string(append([]byte(`{"stream":false,"padding":"`), bytes.Repeat([]byte{'x'}, int(requestInspectionLimit))...))},
+	}
+	for _, test := range requestBodies {
+		t.Run(test.name, func(t *testing.T) {
+			requestBody := test.body
+			if test.name == "over limit" {
+				requestBody += `"}`
+			}
+			request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(requestBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Content-Type", "application/json")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatalf("POST chat completions: %v", err)
+			}
+			gotBody, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read transparent body: %v", readErr)
+			}
+			if response.Header.Get("Content-Type") != "text/event-stream" || string(gotBody) != body {
+				t.Fatalf("transparent response = %q, Content-Type %q", gotBody, response.Header.Get("Content-Type"))
+			}
+		})
+	}
+}
+
+func TestProxyCancelsChatSSEAggregationPromptly(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"held\"}}]}\n\n")
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(started)
+		<-request.Context().Done()
+		close(cancelled)
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	done := make(chan struct{})
+	go func() {
+		response, _ := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not start aggregation stream")
+	}
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not observe aggregation cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("gateway client did not finish after aggregation cancellation")
+	}
+}
+
 func TestProxyAggregationFailureIsControlledAndDoesNotCommitUpstreamResponse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "text/event-stream")

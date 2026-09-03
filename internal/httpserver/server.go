@@ -1,9 +1,11 @@
 package httpserver
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"mime"
@@ -160,7 +162,18 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 	}
 	responseMode := classifyResponseHeader(upstreamResponse.Header)
 	if shouldAggregateSSE(request, metadata, responseMode) {
-		body, err := openai.AggregateSSEToJSON(upstreamResponse.Body, aggregationMaxEventSize, aggregationMaxPayloadSize)
+		aggregationBody, closeAggregationBody, err := aggregationReader(upstreamResponse)
+		if err != nil {
+			// A response transformation cannot safely preserve an unsupported or
+			// malformed representation. Fail before copying upstream headers or
+			// committing any downstream bytes.
+			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
+			return
+		}
+		if closeAggregationBody != nil {
+			defer closeAggregationBody()
+		}
+		body, err := openai.AggregateSSEToJSON(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize)
 		if err != nil {
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
@@ -170,6 +183,8 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 		copyResponseHeaders(response.Header(), upstreamResponse.Header)
 		response.Header().Del("Content-Type")
 		response.Header().Del("Content-Length")
+		response.Header().Del("Content-Encoding")
+		response.Header().Del("Content-Range")
 		response.Header().Set("Content-Type", "application/json")
 		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		response.WriteHeader(upstreamResponse.StatusCode)
@@ -184,6 +199,56 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 		return
 	}
 	_, _ = io.Copy(response, upstreamResponse.Body)
+}
+
+// aggregationReader returns the decoded representation needed by the bounded
+// SSE converter. Transparent dispatch deliberately does not call this helper:
+// compressed responses remain byte- and header-preserving in that mode.
+func aggregationReader(upstreamResponse *http.Response) (io.Reader, func(), error) {
+	if upstreamResponse == nil || upstreamResponse.Body == nil {
+		return nil, nil, io.ErrUnexpectedEOF
+	}
+
+	var codings []string
+	for _, value := range upstreamResponse.Header.Values("Content-Encoding") {
+		for _, part := range strings.Split(value, ",") {
+			coding := strings.TrimSpace(part)
+			if coding == "" {
+				return nil, nil, errors.New("invalid content encoding")
+			}
+			codings = append(codings, coding)
+		}
+	}
+	if len(codings) == 0 {
+		return upstreamResponse.Body, nil, nil
+	}
+
+	reader := io.Reader(upstreamResponse.Body)
+	closers := make([]io.Closer, 0, len(codings))
+	for index := len(codings) - 1; index >= 0; index-- {
+		if strings.EqualFold(codings[index], "identity") {
+			continue
+		}
+		if !strings.EqualFold(codings[index], "gzip") {
+			closeReaders(closers)
+			return nil, nil, errors.New("unsupported content encoding")
+		}
+		decoded, err := gzip.NewReader(reader)
+		if err != nil {
+			closeReaders(closers)
+			return nil, nil, errors.New("invalid gzip content encoding")
+		}
+		reader = decoded
+		closers = append(closers, decoded)
+	}
+
+	return reader, func() { closeReaders(closers) }, nil
+}
+
+func closeReaders(closers []io.Closer) {
+	for index := len(closers) - 1; index >= 0; index-- {
+		_ = closers[index].Close()
+	}
 }
 
 func streamResponseBody(response http.ResponseWriter, body io.Reader) error {
