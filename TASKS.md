@@ -205,30 +205,34 @@ Reference: `docs/architecture/streaming.md#sse-framing`,
 Dependencies and out of scope: depends on T046. Do not observe choices, usage,
 `[DONE]`, or attach to HTTP.
 
-### T048 - Observe choice deltas and finish reasons
+### T048 - Observe choice and tool-call deltas
 
-Goal: expose choice index, role/content deltas, and finish reason as observations
-without assigning them transport lifetime semantics.
+Goal: expose choice index, message/tool-call deltas, and finish reason as
+observations without assigning them transport lifetime semantics.
 
 Scope:
 
-- Parse `choices[]` minimally: `index`, `delta.role`, `delta.content`, and
-  `finish_reason` with absence distinct from an empty value.
+- Parse `choices[]` minimally: `index`, `delta.role`, `delta.content`, indexed
+  `delta.tool_calls` (`index`, `id`, `type`, `function.name`, and
+  `function.arguments`), and `finish_reason` with absence distinct from an empty
+  value.
 - Return observations in upstream array order and preserve choice indexes.
 - Store the last non-nil finish reason per choice in the observer snapshot.
+- Preserve function-argument fragments as strings; do not JSON-decode them.
 - Never interpret finish reason as completion or reject unknown delta fields.
 
 Acceptance and tests:
 
-- Cover multiple choices, missing/empty content, role-only chunks, null/non-null
-  finish reasons, unknown fields, and repeated updates.
+- Cover multiple choices, missing/empty content, role-only chunks, indexed tool
+  calls, split function arguments, null/non-null finish reasons, unknown fields,
+  and repeated updates.
 - A finish reason does not mark the observer done.
 
 Reference: `docs/architecture/streaming.md#termination`,
 `docs/architecture/streaming.md#sse-to-json`.
 
-Dependencies and out of scope: depends on T047. Tool calls, usage, aggregation,
-and transport integration remain excluded.
+Dependencies and out of scope: depends on T047. Usage, aggregation, validation of
+assembled function arguments, and transport integration remain excluded.
 
 ### T049 - Observe normalized token usage
 
@@ -340,77 +344,84 @@ Reference: `docs/architecture/transport.md#response-classification`,
 Dependencies and out of scope: depends on T045. No accumulator, body buffering,
 header rewriting, or observer attachment.
 
-### T053 - Define a single-choice chat accumulator
+### T053 - Define a bounded chat accumulator
 
 Goal: create a bounded in-memory model for one OpenAI chat-completion result.
 
 Scope:
 
 - Add an accumulator in `internal/protocol/openai` for response ID, model,
-  created, one choice index, role, content, finish reason, and normalized usage.
+  created, choices keyed by upstream index, messages, tool calls, finish reasons,
+  and normalized usage.
 - Accept parsed observer results rather than raw HTTP or SSE bytes.
-- Enforce one choice for this milestone with a recognizable controlled error for
-  a second distinct index.
-- Add an explicit positive maximum accumulated content size and terminal overflow
-  error.
+- Preserve deterministic upstream choice order without requiring contiguous
+  indexes.
+- Add an explicit positive maximum accumulated payload size covering content and
+  function-argument fragments, with a terminal overflow error.
 
 Acceptance and tests:
 
-- Constructor validation, empty state, identity metadata, one-choice acceptance,
-  second-choice rejection, exact-limit content, overflow, and terminal-error state
-  are covered.
+- Constructor validation, empty state, identity metadata, multiple/non-contiguous
+  choice indexes, stable order, exact-limit payload, overflow, and terminal-error
+  state are covered.
 
 Reference: `docs/architecture/streaming.md#sse-to-json`,
 `docs/architecture/repository.md#dependencies`.
 
 Dependencies and out of scope: depends on T047-T049. No HTTP, JSON rendering,
-tools, multiple choices, pricing, or config.
+pricing, config, or function-argument JSON decoding.
 
-### T054 - Accumulate role and content deltas
+### T054 - Accumulate message deltas and finish reasons
 
-Goal: reconstruct one assistant message from sequential OpenAI choice deltas.
+Goal: reconstruct messages for all choices and retain their finish reasons.
 
 Scope:
 
-- Set role from the first non-empty role delta and keep it stable on later
-  conflicting role values.
+- Set each choice's role from its first non-empty role delta and keep it stable on
+  later conflicting role values.
 - Append content exactly in chunk order, including empty strings and UTF-8 data,
   while enforcing T053's byte bound.
-- Preserve the upstream choice index.
+- Preserve upstream choice indexes and first-observed choice order.
+- Keep the latest non-nil finish reason per choice; finish reason must not mark
+  aggregation complete because usage may arrive afterward.
 - Do not decode content, normalize whitespace, or interpret reasoning fields.
 
 Acceptance and tests:
 
 - `TEST` plus `_OK` yields `TEST_OK`; split Unicode content, role-only chunks,
-  empty deltas, conflicts, indexes, exact byte bounds, and overflow are covered.
+  empty deltas, conflicts, multiple indexes, finish-reason replacement,
+  deltas after finish reason, exact byte bounds, and overflow are covered.
 
 Reference: `docs/architecture/streaming.md#sse-to-json`.
 
-Dependencies and out of scope: depends on T048 and T053. Finish reason, usage,
-tools, multiple choices, and rendering are excluded.
+Dependencies and out of scope: depends on T048 and T053. Usage, tools, and
+rendering are excluded.
 
-### T055 - Accumulate finish reason without completing early
+### T055 - Accumulate indexed tool-call deltas
 
-Goal: retain the last non-nil finish reason while allowing later metadata events.
+Goal: reconstruct OpenAI tool calls whose metadata and arguments are split across
+SSE chunks.
 
 Scope:
 
-- Apply finish reasons for the accumulator's choice index.
-- Distinguish absent/null from an explicit string and keep the latest explicit
-  value.
-- Do not mark aggregation complete on finish reason; usage may arrive afterward.
-- Keep controlled choice-index and terminal-size errors unchanged.
+- Identify tool calls by choice index and tool-call index and preserve their
+  first-observed order.
+- Keep the first non-empty ID, type, and function name stable on later conflicts.
+- Concatenate `function.arguments` fragments exactly in event order while
+  enforcing T053's shared payload bound.
+- Do not JSON-decode, validate, normalize, or otherwise rewrite assembled
+  arguments.
 
 Acceptance and tests:
 
-- Null, stop, length, replacement, and usage-after-finish sequences are covered.
-- Finish reason alone does not make a final result available.
+- Cover one and multiple choices, multiple tool calls, non-contiguous indexes,
+  metadata split across chunks, conflicting metadata, fragmented JSON arguments,
+  exact byte bounds, and overflow.
 
-Reference: `docs/architecture/streaming.md#termination`,
-`docs/architecture/streaming.md#sse-to-json`.
+Reference: `docs/architecture/streaming.md#sse-to-json`.
 
-Dependencies and out of scope: depends on T053-T054. No `[DONE]`, EOF policy,
-HTTP integration, or provider-specific reason mapping.
+Dependencies and out of scope: depends on T048 and T053-T054. No `[DONE]`, EOF
+policy, HTTP integration, or execution/validation of tool calls.
 
 ### T056 - Accumulate the latest observed usage
 
@@ -442,24 +453,25 @@ Goal: render accumulator state as one non-stream OpenAI chat-completion response
 
 Scope:
 
-- Produce `id`, `object:"chat.completion"`, `created`, `model`, one choice with
-  `index`, `message.role`, `message.content`, and `finish_reason`, plus usage when
-  observed.
+- Produce `id`, `object:"chat.completion"`, `created`, `model`, all observed
+  choices with `index`, `message.role`, `message.content`, optional indexed
+  `message.tool_calls`, and `finish_reason`, plus usage when observed.
 - Use standard JSON encoding and return bytes with no dependency on HTTP.
 - Preserve optional/absent usage fields and valid JSON escaping.
-- Return a controlled error if no meaningful choice/content/finish metadata was
-  accumulated.
+- Return a controlled error if no meaningful message, tool-call, or finish
+  metadata was accumulated.
 
 Acceptance and tests:
 
-- Compare decoded JSON structure for content, role, finish reason, identity,
-  Unicode/escaping, usage present/absent, and empty-invalid state.
+- Compare decoded JSON structure for multiple choices, content, role, finish
+  reason, identity, fragmented tool-call arguments, Unicode/escaping, usage
+  present/absent, and empty-invalid state.
 - Output is valid JSON and contains no streaming-only `delta` field.
 
 Reference: `docs/architecture/streaming.md#sse-to-json`.
 
-Dependencies and out of scope: depends on T053-T056. No HTTP headers, tools,
-multiple choices, or pretty printing.
+Dependencies and out of scope: depends on T053-T056. No HTTP headers, function
+argument validation, tool execution, or pretty printing.
 
 ### T058 - Aggregate a bounded SSE stream through DONE
 
@@ -477,7 +489,8 @@ Scope:
 
 Acceptance and tests:
 
-- A realistic role/content/finish/usage/`[DONE]` sequence renders valid JSON.
+- Realistic role/content/finish/usage/`[DONE]` and split-tool-call sequences render
+  valid JSON, including multiple choices.
 - Split/coalesced reads, malformed JSON, comments, unknown fields, bounds, empty
   input, and bytes after `[DONE]` are covered deterministically.
 
@@ -485,7 +498,7 @@ Reference: `docs/architecture/streaming.md#sse-framing`,
 `docs/architecture/streaming.md#sse-to-json`.
 
 Dependencies and out of scope: depends on T050 and T057. No HTTP integration,
-transparent passthrough changes, tools, or multiple choices.
+transparent passthrough changes, function-argument validation, or tool execution.
 
 ### T059 - Complete aggregation on clean upstream EOF
 
@@ -537,8 +550,8 @@ Scope:
 Acceptance and tests:
 
 - Real upstream/gateway tests cover `stream:false` plus SSE with `[DONE]`, clean EOF
-  without `[DONE]`, split/coalesced events, usage, non-200 success conversion,
-  malformed SSE failure, and cancellation.
+  without `[DONE]`, split/coalesced events, multiple choices, split tool calls,
+  usage, non-200 success conversion, malformed SSE failure, and cancellation.
 - Add a named regression proving the client receives valid JSON and never
   `failed to unmarshal` for the historical Bifrost mismatch.
 - Existing byte-transparent SSE, first-fragment flush, EOF-close, parallelism,
@@ -549,5 +562,5 @@ Reference: `docs/architecture/transport.md#response-classification`,
 `docs/architecture/testing.md#transport-integration`.
 
 Dependencies and out of scope: depends on T045 and T052-T059. Do not add tool-call
-aggregation, multiple choices, authentication, SQLite, policy, accounting,
+execution or argument validation, authentication, SQLite, policy, accounting,
 telemetry persistence, retries, or response buffering in transparent modes.
