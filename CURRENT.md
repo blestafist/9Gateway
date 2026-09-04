@@ -2,11 +2,11 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T066`.
+Done: `T001`-`T067`.
 
-Current: `T067` - define API key records and repository.
+Current: `T068` - generate and fingerprint gateway keys.
 
-Next: `T068` - generate and fingerprint gateway keys.
+Next: `T069` - add admin-authenticated key creation.
 
 Queued: `T068`-`T080` in dependency order in `TASKS.md`.
 
