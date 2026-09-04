@@ -2,19 +2,19 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T061`.
+Done: `T001`-`T062`.
 
-Current: `T062` - do not wait for EOF after unencoded DONE.
+Current: `T063` - decouple completion logging from response close.
 
-Next: `T063` - decouple completion logging from response close.
+Next: `T064` - add storage and credential configuration.
 
-Queued: `T063`-`T080` in dependency order in `TASKS.md`.
+Queued: `T064`-`T080` in dependency order in `TASKS.md`.
 
-Known issues: T062-T063 capture the bounded transport/observability audit findings.
+Known issues: T063 captures the bounded observability audit finding.
 
 Important: transparent SSE remains byte-preserving and independent from the
-bounded generic parser. T061-T063 first close narrow compatibility/observability
-risks found by the milestone audit. T064-T080 then add SQLite-backed gateway keys,
+bounded generic parser. T061-T062 close narrow transport risks found by the
+milestone audit. T063-T080 then add SQLite-backed gateway keys,
 minimal admin bootstrap, hot-path authentication, model policy, generic request
 windows, and per-key concurrency. Token accounting, budgets, request-history
 persistence, CLI, tool-call execution/validation, and Web UI remain out of scope.

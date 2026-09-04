@@ -550,6 +550,76 @@ data: [DONE]
 	}
 }
 
+func TestProxyReturnsIdentityChatSSEAfterDONEWithoutWaitingForUpstreamEOF(t *testing.T) {
+	const stream = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n: bytes after done\n\n"
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Content-Encoding", "identity")
+		if _, err := io.WriteString(response, stream); err != nil {
+			return
+		}
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(started)
+		<-request.Context().Done()
+		close(cancelled)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	responseCh := make(chan *http.Response, 1)
+	errorCh := make(chan error, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(request)
+		if requestErr != nil {
+			errorCh <- requestErr
+			return
+		}
+		responseCh <- response
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not flush DONE")
+	}
+
+	var response *http.Response
+	select {
+	case err := <-errorCh:
+		t.Fatalf("POST chat completions: %v", err)
+	case response = <-responseCh:
+	case <-time.After(time.Second):
+		t.Fatal("gateway waited for upstream EOF after identity DONE")
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read converted response: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK || !json.Valid(body) {
+		t.Fatalf("status/body = %d/%q, want successful JSON", response.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte("bytes after done")) {
+		t.Fatalf("converted response included bytes after DONE: %q", body)
+	}
+
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not observe cancellation after converted response completed")
+	}
+}
+
 func TestProxyConvertsGzipChatSSEToUncompressedJSON(t *testing.T) {
 	const stream = "data: {\"id\":\"gzip-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
 	var compressed bytes.Buffer

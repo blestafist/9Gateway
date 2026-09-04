@@ -169,7 +169,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 	}
 	responseMode := classifyResponseHeader(upstreamResponse.Header)
 	if shouldAggregateSSE(request, metadata, responseMode) {
-		aggregationBody, closeAggregationBody, err := aggregationReader(upstreamResponse)
+		aggregationBody, closeAggregationBody, requiresDrain, err := aggregationReaderWithDrain(upstreamResponse)
 		if err != nil {
 			// A response transformation cannot safely preserve an unsupported or
 			// malformed representation. Fail before copying upstream headers or
@@ -180,20 +180,27 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 		if closeAggregationBody != nil {
 			defer closeAggregationBody()
 		}
-		body, err := openai.AggregateSSEToJSON(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize)
+		body, done, err := openai.AggregateSSEToJSONWithTermination(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize)
 		if err != nil {
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
 			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
 			return
 		}
-		// AggregateSSEToJSON intentionally stops reading at [DONE]. Finish
-		// consuming only the bounded decoded representation here so gzip readers
-		// validate their trailers before the generated response is committed.
-		// Bytes read during this drain are never passed to the accumulator.
-		if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
-			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
-			return
+		// AggregateSSEToJSON intentionally stops reading at [DONE]. Encodings
+		// with trailers still need a bounded drain to validate them; an identity
+		// representation has nothing left to validate and must not wait for EOF.
+		if !done || requiresDrain {
+			if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
+				http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
+				return
+			}
+		} else {
+			// There is no decoder trailer to validate for an identity body. Close
+			// it before committing the generated response so a handler blocked
+			// after DONE observes cancellation and the transport cannot reuse the
+			// incomplete connection.
+			_ = upstreamResponse.Body.Close()
 		}
 		copyTransformedResponseHeaders(response.Header(), upstreamResponse.Header)
 		response.Header().Set("Content-Type", "application/json")
@@ -216,8 +223,13 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 // SSE converter. Transparent dispatch deliberately does not call this helper:
 // compressed responses remain byte- and header-preserving in that mode.
 func aggregationReader(upstreamResponse *http.Response) (io.Reader, func(), error) {
+	reader, closeReader, _, err := aggregationReaderWithDrain(upstreamResponse)
+	return reader, closeReader, err
+}
+
+func aggregationReaderWithDrain(upstreamResponse *http.Response) (io.Reader, func(), bool, error) {
 	if upstreamResponse == nil || upstreamResponse.Body == nil {
-		return nil, nil, io.ErrUnexpectedEOF
+		return nil, nil, false, io.ErrUnexpectedEOF
 	}
 
 	var codings []string
@@ -225,35 +237,37 @@ func aggregationReader(upstreamResponse *http.Response) (io.Reader, func(), erro
 		for _, part := range strings.Split(value, ",") {
 			coding := strings.TrimSpace(part)
 			if coding == "" {
-				return nil, nil, errors.New("invalid content encoding")
+				return nil, nil, false, errors.New("invalid content encoding")
 			}
 			codings = append(codings, coding)
 		}
 	}
 	if len(codings) == 0 {
-		return &decodedRepresentationReader{reader: upstreamResponse.Body, remaining: aggregationMaxDecodedBytes}, nil, nil
+		return &decodedRepresentationReader{reader: upstreamResponse.Body, remaining: aggregationMaxDecodedBytes}, nil, false, nil
 	}
 
 	reader := io.Reader(upstreamResponse.Body)
 	closers := make([]io.Closer, 0, len(codings))
+	requiresDrain := false
 	for index := len(codings) - 1; index >= 0; index-- {
 		if strings.EqualFold(codings[index], "identity") {
 			continue
 		}
+		requiresDrain = true
 		if !strings.EqualFold(codings[index], "gzip") {
 			closeReaders(closers)
-			return nil, nil, errors.New("unsupported content encoding")
+			return nil, nil, false, errors.New("unsupported content encoding")
 		}
 		decoded, err := gzip.NewReader(reader)
 		if err != nil {
 			closeReaders(closers)
-			return nil, nil, errors.New("invalid gzip content encoding")
+			return nil, nil, false, errors.New("invalid gzip content encoding")
 		}
 		reader = decoded
 		closers = append(closers, decoded)
 	}
 
-	return &decodedRepresentationReader{reader: reader, remaining: aggregationMaxDecodedBytes}, func() { closeReaders(closers) }, nil
+	return &decodedRepresentationReader{reader: reader, remaining: aggregationMaxDecodedBytes}, func() { closeReaders(closers) }, requiresDrain, nil
 }
 
 // decodedRepresentationReader bounds bytes after content decoding rather than
