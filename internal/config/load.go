@@ -27,14 +27,18 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("decode config YAML: %w", err)
 	}
 	secretFields := []*struct {
-		name  string
-		value *string
+		name              string
+		value             *string
+		requiredReference bool
 	}{
 		{name: "upstream_api_key", value: &config.UpstreamAPIKey},
-		{name: "auth_pepper", value: &config.AuthPepper},
-		{name: "admin_credential", value: &config.AdminCredential},
+		{name: "auth_pepper", value: &config.AuthPepper, requiredReference: true},
+		{name: "admin_credential", value: &config.AdminCredential, requiredReference: true},
 	}
 	for _, field := range secretFields {
+		if field.requiredReference && !isEnvironmentReference(*field.value) {
+			return Config{}, fmt.Errorf("configuration field %q must be an environment reference", field.name)
+		}
 		*field.value, err = resolveEnvironmentReference(field.name, *field.value)
 		if err != nil {
 			return Config{}, err
@@ -45,6 +49,10 @@ func Load(path string) (Config, error) {
 	}
 
 	return config, nil
+}
+
+func isEnvironmentReference(value string) bool {
+	return strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}")
 }
 
 func resolveEnvironmentReference(field, value string) (string, error) {

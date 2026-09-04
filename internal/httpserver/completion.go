@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,7 +34,7 @@ type CompletionLogger struct {
 	accepting atomic.Bool
 	dropped   atomic.Uint64
 	stopOnce  sync.Once
-	enqueueMu sync.Mutex
+	inFlight  atomic.Int64
 }
 
 // NewCompletionLogger starts a single worker for a bounded completion queue.
@@ -94,8 +95,12 @@ func (completionLogger *CompletionLogger) write(record CompletionRecord) {
 // Enqueue hands off one completion record without waiting. It returns false
 // when the logger is shutting down or its bounded queue is full.
 func (completionLogger *CompletionLogger) Enqueue(record CompletionRecord) bool {
-	completionLogger.enqueueMu.Lock()
-	defer completionLogger.enqueueMu.Unlock()
+	// Keep the handoff non-blocking without a mutex. Shutdown changes
+	// accepting to false and waits for operations admitted before that change.
+	// Increment before checking accepting: an enqueue racing Shutdown is either
+	// counted by Shutdown, or observes the closed admission gate and drops.
+	completionLogger.inFlight.Add(1)
+	defer completionLogger.inFlight.Add(-1)
 	if !completionLogger.accepting.Load() {
 		completionLogger.dropped.Add(1)
 		return false
@@ -119,10 +124,15 @@ func (completionLogger *CompletionLogger) Dropped() uint64 {
 // bounded queue, subject to the supplied deadline. A blocked sink can make
 // the worker outlive this bounded wait; it cannot delay any HTTP response.
 func (completionLogger *CompletionLogger) Shutdown(ctx context.Context) error {
-	completionLogger.enqueueMu.Lock()
 	completionLogger.accepting.Store(false)
+	for completionLogger.inFlight.Load() != 0 {
+		if err := ctx.Err(); err != nil {
+			completionLogger.stopOnce.Do(func() { close(completionLogger.stop) })
+			return err
+		}
+		runtime.Gosched()
+	}
 	completionLogger.stopOnce.Do(func() { close(completionLogger.stop) })
-	completionLogger.enqueueMu.Unlock()
 
 	select {
 	case <-completionLogger.done:

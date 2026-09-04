@@ -427,6 +427,7 @@ func TestProxyPreservesRepresentationHeadersWithoutTransformation(t *testing.T) 
 				response.Header().Set("Content-MD5", "transparent-md5")
 				response.Header().Set("Digest", "sha-256=transparent-digest")
 				response.Header().Set("Content-Digest", "sha-256=:transparent-content-digest:")
+				response.Header().Set("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
 				response.Header().Set("X-Gateway-Trace", "trace-value")
 				_, _ = response.Write(body)
 			}))
@@ -457,6 +458,7 @@ func TestProxyPreservesRepresentationHeadersWithoutTransformation(t *testing.T) 
 				"Content-MD5":      "transparent-md5",
 				"Digest":           "sha-256=transparent-digest",
 				"Content-Digest":   "sha-256=:transparent-content-digest:",
+				"Last-Modified":    "Wed, 21 Oct 2015 07:28:00 GMT",
 				"X-Gateway-Trace":  "trace-value",
 			}
 			for name, want := range wantHeaders {
@@ -488,6 +490,7 @@ data: [DONE]
 		response.Header().Set("Content-MD5", "upstream-md5")
 		response.Header().Set("Digest", "sha-256=upstream-digest")
 		response.Header().Set("Content-Digest", "sha-256=:upstream-content-digest:")
+		response.Header().Set("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
 		response.WriteHeader(http.StatusBadGateway)
 		_, _ = io.WriteString(response, stream)
 	}))
@@ -543,7 +546,7 @@ data: [DONE]
 	if response.Header.Get("X-RateLimit-Remaining") != "17" {
 		t.Fatalf("rate-limit header was not preserved")
 	}
-	for _, name := range []string{"Content-Encoding", "Content-Range", "Accept-Ranges", "ETag", "Content-MD5", "Digest", "Content-Digest"} {
+	for _, name := range []string{"Content-Encoding", "Content-Range", "Accept-Ranges", "ETag", "Content-MD5", "Digest", "Content-Digest", "Last-Modified"} {
 		if got := response.Header.Get(name); got != "" {
 			t.Fatalf("transformed %s = %q, want absent", name, got)
 		}
@@ -980,6 +983,7 @@ func TestProxyPreservesCompressedTransparentChatSSE(t *testing.T) {
 		response.Header().Set("Content-MD5", "upstream-md5")
 		response.Header().Set("Digest", "sha-256=upstream-digest")
 		response.Header().Set("Content-Digest", "sha-256=:upstream-content-digest:")
+		response.Header().Set("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
 		response.Header().Set("X-RateLimit-Remaining", "17")
 		_, _ = response.Write(wantBody)
 	}))
@@ -1011,7 +1015,7 @@ func TestProxyPreservesCompressedTransparentChatSSE(t *testing.T) {
 	if response.Header.Get("Content-Length") != strconv.Itoa(len(wantBody)) {
 		t.Fatalf("Content-Length = %q, want %d", response.Header.Get("Content-Length"), len(wantBody))
 	}
-	for _, name := range []string{"Content-Range", "Accept-Ranges", "ETag", "Content-MD5", "Digest", "Content-Digest", "X-RateLimit-Remaining"} {
+	for _, name := range []string{"Content-Range", "Accept-Ranges", "ETag", "Content-MD5", "Digest", "Content-Digest", "Last-Modified", "X-RateLimit-Remaining"} {
 		if got := response.Header.Get(name); got == "" {
 			t.Fatalf("transparent %s was not preserved", name)
 		}

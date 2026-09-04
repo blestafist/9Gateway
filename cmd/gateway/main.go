@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,22 +46,48 @@ func main() {
 		}
 	}()
 
+	gatewayHandler := httpserver.NewHandlerWithCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, completionLogger)
+	var activeRequests sync.WaitGroup
+	// Keep the counter non-zero until shutdown has stopped accepting requests;
+	// this makes a handler starting concurrently with Shutdown safe to Add.
+	activeRequests.Add(1)
+	trackedHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		activeRequests.Add(1)
+		defer activeRequests.Done()
+		gatewayHandler.ServeHTTP(response, request)
+	})
 	server := &http.Server{
 		Addr:    cfg.ListenAddr,
-		Handler: httpserver.NewHandlerWithCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, completionLogger),
+		Handler: trackedHandler,
 	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-shutdownContext.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdown); err != nil {
-			log.Printf("HTTP server shutdown: %v", err)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe() }()
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server: %v", err)
 		}
-	}()
-
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("HTTP server: %v", err)
+	case <-shutdownContext.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
+		shutdownErr := server.Shutdown(shutdown)
+		cancel()
+		if shutdownErr != nil {
+			log.Printf("HTTP server shutdown: %v", shutdownErr)
+			// Shutdown stops accepting work but may leave handlers running when
+			// its deadline expires. Force-close those handlers before allowing
+			// owned resources, including the completion logger, to exit.
+			if err := server.Close(); err != nil {
+				log.Printf("HTTP server close: %v", err)
+			}
+		}
+		activeRequests.Done()
+		// The force-close above cancels handlers that outlive graceful shutdown;
+		// await their completion before the deferred logger and database cleanup.
+		activeRequests.Wait()
+		if err := <-serveErr; err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server: %v", err)
+		}
 	}
 }

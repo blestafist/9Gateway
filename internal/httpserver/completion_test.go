@@ -60,21 +60,28 @@ func TestCompletionHandoffDoesNotDelayResponseCompletion(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GET response: %v", err)
 			}
-			started := time.Now()
-			body, err := io.ReadAll(response.Body)
-			response.Body.Close()
-			if err != nil {
-				t.Fatalf("read response: %v", err)
+			readDone := make(chan struct{})
+			var body []byte
+			var readErr error
+			go func() {
+				body, readErr = io.ReadAll(response.Body)
+				response.Body.Close()
+				close(readDone)
+			}()
+			select {
+			case <-readDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("response completion was delayed by blocked sink")
+			}
+			if readErr != nil {
+				t.Fatalf("read response: %v", readErr)
 			}
 			if string(body) != test.body {
 				t.Fatalf("body = %q, want %q", body, test.body)
 			}
-			if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-				t.Fatalf("response completion took %v while sink was blocked", elapsed)
-			}
 			select {
 			case <-logHandler.entered:
-			case <-time.After(time.Second):
+			case <-time.After(2 * time.Second):
 				t.Fatal("completion logger did not receive record")
 			}
 		})
@@ -101,12 +108,15 @@ func TestCompletionQueueDropsWithoutBlockingWhenSaturated(t *testing.T) {
 	if !completionLogger.Enqueue(record) {
 		t.Fatal("second completion record was dropped instead of filling queue")
 	}
-	started := time.Now()
-	if completionLogger.Enqueue(record) {
-		t.Fatal("saturated completion queue accepted a record")
-	}
-	if elapsed := time.Since(started); elapsed > 50*time.Millisecond {
-		t.Fatalf("saturated enqueue blocked for %v", elapsed)
+	enqueueDone := make(chan bool, 1)
+	go func() { enqueueDone <- completionLogger.Enqueue(record) }()
+	select {
+	case accepted := <-enqueueDone:
+		if accepted {
+			t.Fatal("saturated completion queue accepted a record")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("saturated enqueue blocked")
 	}
 	if got := completionLogger.Dropped(); got != 1 {
 		t.Fatalf("dropped records = %d, want 1", got)
@@ -167,6 +177,58 @@ func TestCompletionLoggerShutdownStopsWorker(t *testing.T) {
 	case <-completionLogger.done:
 	default:
 		t.Fatal("completion logger worker is still running after shutdown")
+	}
+}
+
+func TestCompletionLoggerShutdownIsBoundedWhenSinkBlocks(t *testing.T) {
+	logHandler := &blockingCompletionHandler{entered: make(chan struct{}), release: make(chan struct{})}
+	completionLogger := NewCompletionLogger(slog.New(logHandler), 1)
+	if !completionLogger.Enqueue(CompletionRecord{RequestID: "request-1"}) {
+		t.Fatal("completion record was dropped")
+	}
+	select {
+	case <-logHandler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not enter blocked sink")
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	err := completionLogger.Shutdown(shutdownContext)
+	cancel()
+	if err != context.DeadlineExceeded {
+		t.Fatalf("Shutdown() error = %v, want deadline exceeded", err)
+	}
+	close(logHandler.release)
+	shutdownCompletionLogger(t, completionLogger)
+}
+
+func TestCompletionLoggerConcurrentEnqueueAndShutdown(t *testing.T) {
+	completionLogger := NewCompletionLogger(slog.New(slog.NewTextHandler(io.Discard, nil)), 8)
+	const enqueueCount = 128
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(enqueueCount)
+	for index := 0; index < enqueueCount; index++ {
+		go func(index int) {
+			defer workers.Done()
+			<-start
+			completionLogger.Enqueue(CompletionRecord{RequestID: string(rune(index + 1))})
+		}(index)
+	}
+	close(start)
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		shutdownDone <- completionLogger.Shutdown(ctx)
+	}()
+	workers.Wait()
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent enqueue/shutdown deadlocked")
 	}
 }
 

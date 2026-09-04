@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,6 +108,35 @@ func TestOpenStartupFailureIsClean(t *testing.T) {
 	}
 	if database != nil {
 		t.Fatal("Open() returned a database on startup failure")
+	}
+}
+
+func TestOpenClosesDatabaseWhenPingFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	database, err := Open(ctx, ":memory:")
+	if err == nil {
+		if database != nil {
+			database.Close()
+		}
+		t.Fatal("Open() unexpectedly succeeded with a canceled context")
+	}
+	if database != nil {
+		t.Fatal("Open() returned a database after ping failure")
+	}
+	if !strings.Contains(err.Error(), "ping") {
+		t.Fatalf("Open() error = %v, want ping context", err)
+	}
+}
+
+func TestOpenRejectsExistingUnwritablePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	if err := os.WriteFile(path, nil, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(context.Background(), path); err == nil || !strings.Contains(err.Error(), "path is not writable") {
+		t.Fatalf("Open() error = %v, want existing unwritable path error", err)
 	}
 }
 

@@ -26,7 +26,10 @@ type requestIDContextKey struct{}
 
 // NewHandler returns the gateway's HTTP handler using the provided upstream client.
 func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string) http.Handler {
-	return NewHandlerWithCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, NewCompletionLogger(slog.Default(), 0))
+	// The convenience API does not own a completion worker. Applications that
+	// want asynchronous completion logging should construct and own one with
+	// NewCompletionLogger and pass it to NewHandlerWithCompletionLogger.
+	return NewHandlerWithCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, nil)
 }
 
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
@@ -440,6 +443,7 @@ var transformedRepresentationHeaders = []string{
 	"Content-MD5",
 	"Digest",
 	"Content-Digest",
+	"Last-Modified",
 }
 
 func copyTransformedResponseHeaders(destination, source http.Header) {
@@ -480,7 +484,9 @@ func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
 
 func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
 	if completionLogger == nil {
-		completionLogger = NewCompletionLogger(slog.Default(), 0)
+		// Preserve the legacy constructor's completion logging without creating
+		// a worker whose lifetime no caller can manage.
+		return newHandler(slog.Default(), next)
 	}
 	return withRequestID(withCompletionLogger(completionLogger, next))
 }
@@ -520,9 +526,6 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
-	if completionLogger == nil {
-		completionLogger = NewCompletionLogger(slog.Default(), 0)
-	}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		startedAt := time.Now()
 		writer := &completionResponseWriter{ResponseWriter: response}
@@ -530,13 +533,15 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 
 		// Copy only safe scalar values into the record before handing it to the
 		// worker. No request object or headers are retained by the logger.
-		completionLogger.Enqueue(CompletionRecord{
-			RequestID: requestIDFromContext(request.Context()),
-			Method:    request.Method,
-			Path:      request.URL.Path,
-			Status:    writer.statusCode(),
-			Duration:  time.Since(startedAt),
-		})
+		if completionLogger != nil {
+			completionLogger.Enqueue(CompletionRecord{
+				RequestID: requestIDFromContext(request.Context()),
+				Method:    request.Method,
+				Path:      request.URL.Path,
+				Status:    writer.statusCode(),
+				Duration:  time.Since(startedAt),
+			})
+		}
 	})
 }
 

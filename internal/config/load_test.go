@@ -40,7 +40,9 @@ func TestLoadMalformedYAML(t *testing.T) {
 }
 
 func TestLoadMissingUpstreamURL(t *testing.T) {
-	path := writeConfig(t, "listen_addr: :8080\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: pepper\nadmin_credential: admin\n")
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	path := writeConfig(t, "listen_addr: :8080\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n")
 
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "upstream base URL is required") {
@@ -49,7 +51,9 @@ func TestLoadMissingUpstreamURL(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
-	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: pepper\nadmin_credential: admin\nunknown: value\n")
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\nunknown: value\n")
 
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "decode config YAML") {
@@ -59,7 +63,9 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 
 func TestLoadResolvesUpstreamAPIKeyFromEnvironment(t *testing.T) {
 	t.Setenv("TEST_UPSTREAM_API_KEY", "secret-from-environment")
-	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: ${TEST_UPSTREAM_API_KEY}\nsqlite_path: ':memory:'\nauth_pepper: pepper\nadmin_credential: admin\n")
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: ${TEST_UPSTREAM_API_KEY}\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n")
 
 	got, err := Load(path)
 	if err != nil {
@@ -72,7 +78,9 @@ func TestLoadResolvesUpstreamAPIKeyFromEnvironment(t *testing.T) {
 
 func TestLoadFailsWhenUpstreamAPIKeyEnvironmentVariableIsMissing(t *testing.T) {
 	os.Unsetenv("TEST_MISSING_UPSTREAM_API_KEY")
-	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: ${TEST_MISSING_UPSTREAM_API_KEY}\nsqlite_path: ':memory:'\nauth_pepper: pepper\nadmin_credential: admin\n")
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: ${TEST_MISSING_UPSTREAM_API_KEY}\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n")
 
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "upstream_api_key") || !strings.Contains(err.Error(), "environment variable \"TEST_MISSING_UPSTREAM_API_KEY\" is not set") {
@@ -87,10 +95,12 @@ func TestLoadSecretEnvironmentReferences(t *testing.T) {
 		setup func(*testing.T)
 		field string
 	}{
-		{name: "missing pepper", yaml: "auth_pepper: ${MISSING_PEPPER}\nadmin_credential: admin", field: "auth_pepper"},
-		{name: "empty pepper", yaml: "auth_pepper: ${EMPTY_PEPPER}\nadmin_credential: admin", setup: func(t *testing.T) { t.Setenv("EMPTY_PEPPER", "") }, field: "auth pepper"},
-		{name: "malformed admin reference", yaml: "auth_pepper: pepper\nadmin_credential: ${ADMIN", setup: func(t *testing.T) {}, field: "admin_credential"},
-		{name: "malformed upstream reference", yaml: "upstream_api_key: prefix${UPSTREAM}", setup: func(t *testing.T) {}, field: "upstream_api_key"},
+		{name: "missing pepper", yaml: "auth_pepper: ${MISSING_PEPPER}\nadmin_credential: ${VALID_ADMIN}", setup: func(t *testing.T) { t.Setenv("VALID_ADMIN", "admin") }, field: "auth_pepper"},
+		{name: "empty pepper", yaml: "auth_pepper: ${EMPTY_PEPPER}\nadmin_credential: ${VALID_ADMIN}", setup: func(t *testing.T) { t.Setenv("EMPTY_PEPPER", ""); t.Setenv("VALID_ADMIN", "admin") }, field: "auth pepper"},
+		{name: "literal pepper rejected", yaml: "auth_pepper: pepper\nadmin_credential: ${VALID_ADMIN}", setup: func(t *testing.T) { t.Setenv("VALID_ADMIN", "admin") }, field: "auth_pepper"},
+		{name: "literal admin rejected", yaml: "auth_pepper: ${VALID_PEPPER}\nadmin_credential: admin", setup: func(t *testing.T) { t.Setenv("VALID_PEPPER", "pepper") }, field: "admin_credential"},
+		{name: "malformed admin reference", yaml: "auth_pepper: ${VALID_PEPPER}\nadmin_credential: ${ADMIN", setup: func(t *testing.T) { t.Setenv("VALID_PEPPER", "pepper") }, field: "admin_credential"},
+		{name: "malformed upstream reference", yaml: "upstream_api_key: prefix${UPSTREAM}", setup: func(t *testing.T) { t.Setenv("VALID_PEPPER", "pepper"); t.Setenv("VALID_ADMIN", "admin") }, field: "upstream_api_key"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,6 +108,9 @@ func TestLoadSecretEnvironmentReferences(t *testing.T) {
 				tt.setup(t)
 			}
 			contents := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: upstream\nsqlite_path: ':memory:'\n" + tt.yaml + "\n"
+			if tt.name == "malformed upstream reference" {
+				contents += "auth_pepper: ${VALID_PEPPER}\nadmin_credential: ${VALID_ADMIN}\n"
+			}
 			_, err := Load(writeConfig(t, contents))
 			if err == nil || !strings.Contains(err.Error(), tt.field) {
 				t.Fatalf("Load() error = %v, want field %q", err, tt.field)
