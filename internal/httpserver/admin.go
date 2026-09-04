@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pestit/9gateway/internal/auth"
@@ -31,6 +32,10 @@ type apiKeyInserter interface {
 	Insert(context.Context, storage.APIKeyRecord) error
 }
 
+type apiKeyLister interface {
+	List(context.Context) ([]storage.APIKeyRecord, error)
+}
+
 type gatewayKeyGenerator interface {
 	Generate([]byte) (auth.GeneratedGatewayKey, error)
 }
@@ -39,14 +44,50 @@ type adminKeyService struct {
 	repository apiKeyInserter
 	pepper     []byte
 	generator  gatewayKeyGenerator
+	auth       *auth.Authenticator
+	refreshMu  sync.Mutex
+	startupErr error
 }
 
 func newAdminKeyService(repository apiKeyInserter, pepper []byte) *adminKeyService {
-	return &adminKeyService{
+	authenticator, _ := auth.NewAuthenticator(pepper, nil)
+	service := &adminKeyService{
 		repository: repository,
 		pepper:     append([]byte(nil), pepper...),
 		generator:  auth.NewGatewayKeyGenerator(),
+		auth:       authenticator,
 	}
+	if err := service.loadSnapshot(context.Background()); err != nil {
+		service.startupErr = err
+	}
+	return service
+}
+
+func (service *adminKeyService) loadSnapshot(ctx context.Context) error {
+	lister, ok := service.repository.(apiKeyLister)
+	if !ok || service.auth == nil {
+		return errAdminKeyCreation
+	}
+	records, err := lister.List(ctx)
+	if err != nil {
+		return errAdminKeyCreation
+	}
+	authRecords := make([]auth.Record, 0, len(records))
+	for _, record := range records {
+		authRecords = append(authRecords, auth.Record{
+			ID:            record.ID,
+			Name:          record.Name,
+			DisplayPrefix: record.DisplayPrefix,
+			Digest:        append([]byte(nil), record.Digest...),
+			Enabled:       record.Enabled,
+			ExpiresAt:     record.ExpiresAt,
+			PolicyJSON:    []byte(record.PolicyJSON),
+		})
+	}
+	if err := service.auth.Load(authRecords); err != nil {
+		return errAdminKeyCreation
+	}
+	return nil
 }
 
 type adminKeyRequest struct {
@@ -68,7 +109,7 @@ type createdAdminKey struct {
 // unlikely random identity collision without ever returning a colliding raw
 // credential. All errors intentionally lose repository and randomness detail.
 func (service *adminKeyService) create(ctx context.Context, name string, expiresAt *time.Time) (createdAdminKey, error) {
-	if service == nil || service.repository == nil || service.generator == nil || len(service.pepper) == 0 {
+	if service == nil || service.startupErr != nil || service.repository == nil || service.generator == nil || len(service.pepper) == 0 {
 		return createdAdminKey{}, errAdminKeyCreation
 	}
 	if strings.TrimSpace(name) == "" || len(name) > 256 {
@@ -81,9 +122,18 @@ func (service *adminKeyService) create(ctx context.Context, name string, expires
 		}
 		expiresAt = &expires
 	}
+	service.refreshMu.Lock()
+	defer service.refreshMu.Unlock()
 
 	for attempt := 0; attempt < 3; attempt++ {
 		generated, err := service.generator.Generate(service.pepper)
+		if err != nil {
+			return createdAdminKey{}, errAdminKeyCreation
+		}
+		// Derive the indexed identity from the raw value rather than trusting a
+		// generator implementation's duplicate metadata. This also ensures every
+		// newly published record uses the exact parser-compatible prefix.
+		prefix, err := auth.DisplayPrefix(generated.RawKey)
 		if err != nil {
 			return createdAdminKey{}, errAdminKeyCreation
 		}
@@ -95,7 +145,7 @@ func (service *adminKeyService) create(ctx context.Context, name string, expires
 		record := storage.APIKeyRecord{
 			ID:            id,
 			Name:          name,
-			DisplayPrefix: generated.DisplayPrefix,
+			DisplayPrefix: prefix,
 			Digest:        generated.Digest,
 			Enabled:       true,
 			ExpiresAt:     expiresAt,
@@ -109,10 +159,15 @@ func (service *adminKeyService) create(ctx context.Context, name string, expires
 			}
 			return createdAdminKey{}, errAdminKeyCreation
 		}
+		// The durable mutation precedes publication. Build and validate a whole
+		// replacement; if loading fails, the old snapshot remains published.
+		if err := service.loadSnapshot(ctx); err != nil {
+			return createdAdminKey{}, errAdminKeyCreation
+		}
 		return createdAdminKey{
 			ID:        id,
 			Name:      name,
-			Prefix:    generated.DisplayPrefix,
+			Prefix:    prefix,
 			Enabled:   true,
 			ExpiresAt: expiresAt,
 			CreatedAt: now,

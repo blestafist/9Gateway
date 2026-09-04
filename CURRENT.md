@@ -2,13 +2,11 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T069`.
+Done: `T001`-`T070`.
 
-Current: `T070` - load an immutable authentication snapshot.
+Current: `T071` - render OpenAI-style gateway errors.
 
-Next: `T071` - render OpenAI-style gateway errors.
-
-Queued: `T071`-`T080` in dependency order in `TASKS.md`.
+Queued: `T072`-`T080` in dependency order in `TASKS.md`.
 
 Known issues: none for the current milestone.
 
