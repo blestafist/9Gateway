@@ -88,6 +88,53 @@ func TestCompletionHandoffDoesNotDelayResponseCompletion(t *testing.T) {
 	}
 }
 
+func TestNewHandlerDoesNotSynchronouslyLogCompletion(t *testing.T) {
+	logHandler := &blockingCompletionHandler{entered: make(chan struct{}), release: make(chan struct{})}
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(logHandler))
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+		close(logHandler.release)
+	})
+
+	for _, test := range []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{name: "ordinary response", contentType: "application/json", body: `{"ok":true}`},
+		{name: "SSE EOF", contentType: "text/event-stream", body: "data: final\n\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", test.contentType)
+				_, _ = io.WriteString(response, test.body)
+			}))
+			t.Cleanup(upstream.Close)
+
+			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			t.Cleanup(gateway.Close)
+			response, err := http.Get(gateway.URL + "/v1/response")
+			if err != nil {
+				t.Fatalf("GET response: %v", err)
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+			if string(body) != test.body {
+				t.Fatalf("body = %q, want %q", body, test.body)
+			}
+			select {
+			case <-logHandler.entered:
+				t.Fatal("convenience handler synchronously logged completion")
+			default:
+			}
+		})
+	}
+}
+
 func TestCompletionQueueDropsWithoutBlockingWhenSaturated(t *testing.T) {
 	logHandler := &blockingCompletionHandler{entered: make(chan struct{}), release: make(chan struct{})}
 	completionLogger := NewCompletionLogger(slog.New(logHandler), 1)

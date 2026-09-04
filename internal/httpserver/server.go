@@ -484,9 +484,10 @@ func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
 
 func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
 	if completionLogger == nil {
-		// Preserve the legacy constructor's completion logging without creating
-		// a worker whose lifetime no caller can manage.
-		return newHandler(slog.Default(), next)
+		// The convenience constructor does not own a completion logger. In
+		// particular, do not fall back to synchronous slog logging: a blocked
+		// handler must never delay normal or streaming response completion.
+		return withRequestID(next)
 	}
 	return withRequestID(withCompletionLogger(completionLogger, next))
 }

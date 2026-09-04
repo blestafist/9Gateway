@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,37 @@ func TestOpenClosesDatabaseWhenPingFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ping") {
 		t.Fatalf("Open() error = %v, want ping context", err)
+	}
+}
+
+func TestOpenClosesDatabaseAfterOpenedResourceFailsStartup(t *testing.T) {
+	previousConfigureAndPing := configureAndPingFunc
+	t.Cleanup(func() { configureAndPingFunc = previousConfigureAndPing })
+
+	var opened *DB
+	configureAndPingFunc = func(database *DB, ctx context.Context, inMemory bool) error {
+		opened = database
+		if err := database.PingContext(ctx); err != nil {
+			t.Fatalf("PingContext() error = %v", err)
+		}
+		return errors.New("forced startup failure")
+	}
+
+	database, err := Open(context.Background(), ":memory:")
+	if err == nil {
+		if database != nil {
+			database.Close()
+		}
+		t.Fatal("Open() unexpectedly succeeded")
+	}
+	if database != nil {
+		t.Fatal("Open() returned a database after startup failure")
+	}
+	if opened == nil {
+		t.Fatal("startup seam did not receive opened database")
+	}
+	if err := opened.Ping(); err == nil {
+		t.Fatal("opened database remained usable after startup cleanup")
 	}
 }
 

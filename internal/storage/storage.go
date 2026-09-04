@@ -39,6 +39,13 @@ type DB struct {
 
 var memoryDatabaseID atomic.Uint64
 
+// configureAndPingFunc is package-private so startup cleanup can be tested
+// after a real connection has been opened without changing the production
+// startup path.
+var configureAndPingFunc = func(database *DB, ctx context.Context, inMemory bool) error {
+	return database.configureAndPing(ctx, inMemory)
+}
+
 // Open validates, opens, configures, and pings the SQLite database at path.
 // Parent directories are intentionally never created. The returned handle is
 // ready for migrations and must be closed by its owner.
@@ -66,7 +73,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	}
 
 	result := &DB{DB: database}
-	if err := result.configureAndPing(ctx, inMemory); err != nil {
+	if err := configureAndPingFunc(result, ctx, inMemory); err != nil {
 		_ = result.Close()
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
