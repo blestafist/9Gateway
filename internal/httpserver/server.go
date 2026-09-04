@@ -32,6 +32,22 @@ func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey str
 	return NewHandlerWithCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, nil)
 }
 
+// NewHandlerWithAdmin adds the bootstrap administration endpoint while
+// retaining the transparent gateway routes. The repository is intentionally
+// accepted through its domain API rather than a database handle.
+func NewHandlerWithAdmin(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyInserter) http.Handler {
+	return NewHandlerWithAdminAndCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, nil)
+}
+
+// NewHandlerWithAdminAndCompletionLogger builds a handler with admin key
+// creation and the caller-owned completion logger.
+func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyInserter, completionLogger *CompletionLogger) http.Handler {
+	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
+	admin := &adminHandler{credential: adminCredential, service: newAdminKeyService(repository, []byte(authPepper))}
+	router := routeWithAdmin(proxy, admin)
+	return newHandlerWithCompletionLogger(completionLogger, router)
+}
+
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
 // completion logger. The process entry point should shut that logger down.
 func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, completionLogger *CompletionLogger) http.Handler {
@@ -41,10 +57,16 @@ func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL
 }
 
 func route(proxy http.Handler) http.Handler {
+	return routeWithAdmin(proxy, nil)
+}
+
+func routeWithAdmin(proxy http.Handler, admin http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/health":
 			health(response, request)
+		case admin != nil && strings.HasPrefix(request.URL.Path, "/admin/"):
+			admin.ServeHTTP(response, request)
 		case strings.HasPrefix(request.URL.Path, "/v1/"):
 			proxy.ServeHTTP(response, request)
 		default:

@@ -2,13 +2,13 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T068`.
+Done: `T001`-`T069`.
 
-Current: `T069` - add admin-authenticated key creation.
+Current: `T070` - load an immutable authentication snapshot.
 
-Next: `T070` - load an immutable authentication snapshot.
+Next: `T071` - render OpenAI-style gateway errors.
 
-Queued: `T070`-`T080` in dependency order in `TASKS.md`.
+Queued: `T071`-`T080` in dependency order in `TASKS.md`.
 
 Known issues: none for the current milestone.
 

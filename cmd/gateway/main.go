@@ -46,7 +46,7 @@ func main() {
 		}
 	}()
 
-	gatewayHandler := httpserver.NewHandlerWithCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, completionLogger)
+	gatewayHandler := httpserver.NewHandlerWithAdminAndCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), completionLogger)
 	var activeRequests sync.WaitGroup
 	// Keep the counter non-zero until shutdown has stopped accepting requests;
 	// this makes a handler starting concurrently with Shutdown safe to Add.
