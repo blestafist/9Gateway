@@ -26,9 +26,19 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("decode config YAML: %w", err)
 	}
-	config.UpstreamAPIKey, err = resolveEnvironmentReference(config.UpstreamAPIKey)
-	if err != nil {
-		return Config{}, err
+	secretFields := []*struct {
+		name  string
+		value *string
+	}{
+		{name: "upstream_api_key", value: &config.UpstreamAPIKey},
+		{name: "auth_pepper", value: &config.AuthPepper},
+		{name: "admin_credential", value: &config.AdminCredential},
+	}
+	for _, field := range secretFields {
+		*field.value, err = resolveEnvironmentReference(field.name, *field.value)
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, fmt.Errorf("validate config: %w", err)
@@ -37,22 +47,22 @@ func Load(path string) (Config, error) {
 	return config, nil
 }
 
-func resolveEnvironmentReference(value string) (string, error) {
-	if !strings.HasPrefix(value, "${") {
+func resolveEnvironmentReference(field, value string) (string, error) {
+	if !strings.Contains(value, "${") {
 		return value, nil
 	}
-	if !strings.HasSuffix(value, "}") {
-		return "", fmt.Errorf("invalid upstream API key environment reference")
+	if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
+		return "", fmt.Errorf("configuration field %q has an invalid environment reference", field)
 	}
 
 	name := strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}")
 	if !validEnvironmentName(name) {
-		return "", fmt.Errorf("invalid upstream API key environment reference %q", value)
+		return "", fmt.Errorf("configuration field %q has an invalid environment reference", field)
 	}
 
 	resolved, ok := os.LookupEnv(name)
 	if !ok {
-		return "", fmt.Errorf("upstream API key environment variable %q is not set", name)
+		return "", fmt.Errorf("configuration field %q environment variable %q is not set", field, name)
 	}
 	return resolved, nil
 }

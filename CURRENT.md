@@ -2,13 +2,13 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T063`.
+Done: `T001`-`T064`.
 
-Current: `T064` - add storage and credential configuration.
+Current: `T065` - open and configure SQLite.
 
-Next: `T065` - open and configure SQLite.
+Next: `T066` - add embedded schema migrations.
 
-Queued: `T064`-`T080` in dependency order in `TASKS.md`.
+Queued: `T065`-`T080` in dependency order in `TASKS.md`.
 
 Known issues: none for the current milestone.
 
