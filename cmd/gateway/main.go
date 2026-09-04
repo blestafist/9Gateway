@@ -13,6 +13,7 @@ import (
 
 	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/httpserver"
+	"github.com/pestit/9gateway/internal/storage"
 	"github.com/pestit/9gateway/internal/transport"
 )
 
@@ -24,6 +25,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	database, err := storage.Open(context.Background(), cfg.SQLitePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			log.Printf("SQLite shutdown: %v", err)
+		}
+	}()
 
 	upstreamClient := transport.NewClient()
 	completionLogger := httpserver.NewCompletionLogger(slog.Default(), 0)
@@ -51,6 +61,6 @@ func main() {
 	}()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		log.Printf("HTTP server: %v", err)
 	}
 }
