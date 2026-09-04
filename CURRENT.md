@@ -2,19 +2,19 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T065`.
+Done: `T001`-`T066`.
 
-Current: `T066` - add embedded schema migrations.
+Current: `T067` - define API key records and repository.
 
-Next: `T067` - define API key records and repository.
+Next: `T068` - generate and fingerprint gateway keys.
 
-Queued: `T066`-`T080` in dependency order in `TASKS.md`.
+Queued: `T068`-`T080` in dependency order in `TASKS.md`.
 
 Known issues: none for the current milestone.
 
 Important: transparent SSE remains byte-preserving and independent from the
 bounded generic parser. T061-T063 close narrow transport and observability
-risks found by the milestone audit. T065-T080 then add SQLite-backed gateway keys,
+risks found by the milestone audit. T065-T080 add SQLite-backed gateway keys,
 minimal admin bootstrap, hot-path authentication, model policy, generic request
 windows, and per-key concurrency. Token accounting, budgets, request-history
 persistence, CLI, tool-call execution/validation, and Web UI remain out of scope.

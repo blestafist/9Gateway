@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,12 +50,123 @@ func TestOpenFileDatabaseConfiguresSQLiteAndReopens(t *testing.T) {
 	}
 	defer reopened.Close()
 	assertPragma(t, reopened.DB, "journal_mode", "wal")
+	assertSchemaVersion(t, reopened.DB, CurrentSchemaVersion)
 	var count int
 	if err := reopened.QueryRowContext(ctx, "SELECT count(*) FROM child").Scan(&count); err != nil {
 		t.Fatalf("query after reopen: %v", err)
 	}
 	if count != 0 {
 		t.Fatalf("reopened child row count = %d, want 0", count)
+	}
+}
+
+func TestOpenCreatesExpectedAPIKeySchema(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer database.Close()
+
+	assertSchemaVersion(t, database.DB, CurrentSchemaVersion)
+	var tableSQL string
+	if err := database.QueryRow(`SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'api_keys'`).Scan(&tableSQL); err != nil {
+		t.Fatalf("inspect api_keys table: %v", err)
+	}
+	for _, column := range []string{"id", "name", "prefix", "key_hash", "enabled", "expires_at", "created_at", "updated_at", "policy_json"} {
+		var found int
+		if err := database.QueryRow(`SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = ?`, column).Scan(&found); err != nil {
+			t.Fatalf("inspect %s column: %v", column, err)
+		}
+		if found != 1 {
+			t.Errorf("column %q missing from api_keys", column)
+		}
+	}
+	for _, forbidden := range []string{"raw_key", "gateway_key", "pepper", "auth_pepper", "authentication_pepper"} {
+		if strings.Contains(strings.ToLower(tableSQL), forbidden) {
+			t.Errorf("forbidden credential column %q found in table SQL %q", forbidden, tableSQL)
+		}
+	}
+	for _, index := range []string{"idx_api_keys_prefix", "idx_api_keys_active"} {
+		var found int
+		if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?`, index).Scan(&found); err != nil {
+			t.Fatalf("inspect %s index: %v", index, err)
+		}
+		if found != 1 {
+			t.Errorf("index %q missing", index)
+		}
+	}
+	if _, err := database.Exec(`INSERT INTO api_keys (id, name, prefix, key_hash, enabled, created_at, updated_at, policy_json) VALUES ('id-1', 'name', 'prefix', zeroblob(32), 1, 1, 1, '{}')`); err != nil {
+		t.Fatalf("insert valid api key: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO api_keys (id, name, prefix, key_hash, enabled, created_at, updated_at, policy_json) VALUES ('id-2', 'name', 'prefix', zeroblob(32), 1, 1, 1, '{}')`); err == nil {
+		t.Fatal("duplicate prefix unexpectedly succeeded")
+	}
+	if _, err := database.Exec(`INSERT INTO api_keys (id, name, prefix, key_hash, enabled, created_at, updated_at, policy_json) VALUES ('id-3', 'name', 'other',  zeroblob(31), 1, 1, 1, '{}')`); err == nil {
+		t.Fatal("short key hash unexpectedly succeeded")
+	}
+	if _, err := database.Exec(`INSERT INTO api_keys (id, name, prefix, key_hash, enabled, created_at, updated_at, policy_json) VALUES ('id-4', 'name', 'other', zeroblob(32), 2, 1, 1, '{}')`); err == nil {
+		t.Fatal("invalid enabled state unexpectedly succeeded")
+	}
+	if _, err := database.Exec(`INSERT INTO api_keys (id, name, prefix, key_hash, enabled, created_at, updated_at, policy_json) VALUES ('id-5', 'name', 'other', randomblob(32), 1, 1, 1, '{}')`); err != nil {
+		t.Fatalf("insert second valid api key: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO api_keys (id, name, prefix, key_hash, enabled, created_at, updated_at, policy_json) VALUES ('id-6', 'name', 'third', zeroblob(32), 1, 1, 1, '{}')`); err == nil {
+		t.Fatal("duplicate key hash unexpectedly succeeded")
+	}
+}
+
+func TestMigrationsAreIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	ctx := context.Background()
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	defer reopened.Close()
+	assertSchemaVersion(t, reopened.DB, CurrentSchemaVersion)
+}
+
+func TestFailedMigrationRollsBack(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	migrations := []migration{{version: 1, name: "001_test.sql", sql: "CREATE TABLE should_rollback (id INTEGER); INSERT INTO missing_table VALUES (1);"}}
+	if err := runMigrations(context.Background(), database, migrations); err == nil {
+		t.Fatal("failed migration unexpectedly succeeded")
+	}
+	var tables int
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'should_rollback'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatal("failed migration left its table behind")
+	}
+	assertSchemaVersion(t, database, 0)
+}
+
+func TestMigrationsRejectFutureSchemaVersion(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(fmt.Sprintf("PRAGMA user_version = %d", CurrentSchemaVersion+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(context.Background(), database, []migration{{version: 1, name: "001_test.sql", sql: "SELECT 1"}}); err == nil || !strings.Contains(err.Error(), "newer than binary") {
+		t.Fatalf("future schema error = %v", err)
 	}
 }
 
@@ -180,5 +292,16 @@ func assertPragma(t *testing.T, database *sql.DB, pragma, want string) {
 	}
 	if !strings.EqualFold(got, want) {
 		t.Fatalf("PRAGMA %s = %q, want %q", pragma, got, want)
+	}
+}
+
+func assertSchemaVersion(t *testing.T, database *sql.DB, want int) {
+	t.Helper()
+	var got int
+	if err := database.QueryRow("PRAGMA user_version").Scan(&got); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if got != want {
+		t.Fatalf("schema version = %d, want %d", got, want)
 	}
 }

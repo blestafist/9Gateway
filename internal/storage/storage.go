@@ -9,11 +9,15 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,7 +29,22 @@ const (
 	busyTimeoutMilliseconds = 5000
 	fileMaxOpenConnections  = 4
 	fileMaxIdleConnections  = 4
+
+	// CurrentSchemaVersion is the newest schema understood by this binary.
+	CurrentSchemaVersion = 1
 )
+
+// migrationFiles is embedded in the binary so startup does not depend on an
+// external migration executable or a checkout of the source tree.
+//
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+type migration struct {
+	version int
+	name    string
+	sql     string
+}
 
 // DB is the gateway-owned SQLite handle. Its embedded sql.DB keeps SQL access
 // available to storage migrations and repositories while Close remains safe to
@@ -77,7 +96,100 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		_ = result.Close()
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	if err := migrate(ctx, result.DB); err != nil {
+		_ = result.Close()
+		return nil, fmt.Errorf("open sqlite database: %w", err)
+	}
 	return result, nil
+}
+
+func migrate(ctx context.Context, database *sql.DB) error {
+	migrations, err := embeddedMigrations()
+	if err != nil {
+		return err
+	}
+	return runMigrations(ctx, database, migrations)
+}
+
+func embeddedMigrations() ([]migration, error) {
+	entries, err := fs.Glob(migrationFiles, "migrations/*.sql")
+	if err != nil {
+		return nil, fmt.Errorf("list embedded migrations: %w", err)
+	}
+	sort.Strings(entries)
+	migrations := make([]migration, 0, len(entries))
+	for index, name := range entries {
+		base := filepath.Base(name)
+		separator := strings.IndexByte(base, '_')
+		if separator <= 0 {
+			return nil, fmt.Errorf("invalid embedded migration name %q", base)
+		}
+		version, err := strconv.Atoi(base[:separator])
+		if err != nil || version != index+1 {
+			return nil, fmt.Errorf("embedded migration %q has version %q, want %d", base, base[:separator], index+1)
+		}
+		contents, err := fs.ReadFile(migrationFiles, name)
+		if err != nil {
+			return nil, fmt.Errorf("read embedded migration %q: %w", base, err)
+		}
+		migrations = append(migrations, migration{version: version, name: base, sql: string(contents)})
+	}
+	if len(migrations) != CurrentSchemaVersion {
+		return nil, fmt.Errorf("embedded migration count is %d, want schema version %d", len(migrations), CurrentSchemaVersion)
+	}
+	return migrations, nil
+}
+
+// runMigrations applies all pending migrations in one transaction. Keeping
+// the version marker in that transaction means a failed migration cannot
+// leave either a partially-created schema or a falsely advanced version.
+func runMigrations(ctx context.Context, database *sql.DB, migrations []migration) error {
+	var current int
+	if err := database.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if current < 0 {
+		return fmt.Errorf("invalid schema version %d", current)
+	}
+	if current > CurrentSchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than binary version %d", current, CurrentSchemaVersion)
+	}
+	if current > len(migrations) {
+		return fmt.Errorf("database schema version %d has no embedded migration", current)
+	}
+	for index, migration := range migrations {
+		want := index + 1
+		if migration.version != want {
+			return fmt.Errorf("migration sequence has version %d at position %d, want %d", migration.version, index, want)
+		}
+	}
+	if current == len(migrations) {
+		return nil
+	}
+
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin schema migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, migration := range migrations[current:] {
+		if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
+			return fmt.Errorf("apply migration %s: %w", migration.name, err)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", migration.version)); err != nil {
+			return fmt.Errorf("record schema version %d: %w", migration.version, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema migrations: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 func (database *DB) configureAndPing(ctx context.Context, inMemory bool) error {
