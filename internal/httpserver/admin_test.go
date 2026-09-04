@@ -187,18 +187,107 @@ func TestAdminKeyServiceStartupSnapshotFailureIsFallible(t *testing.T) {
 	}
 }
 
+func TestNewHandlerWithAdminPropagatesStartupSnapshotFailure(t *testing.T) {
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), "http://127.0.0.1:1", "upstream-secret", "admin-secret", "pepper", &testAdminRepository{listErr: errors.New("database unavailable")})
+	if err == nil || handler != nil || !errors.Is(err, errAdminKeyCreation) {
+		t.Fatalf("exported handler construction = %v, %v; want startup failure", handler, err)
+	}
+}
+
 func TestAdminKeyServicePreparesBeforeInsert(t *testing.T) {
+	pepper := []byte("pepper")
+	old := generatedForAdmin(t, pepper)
 	repository := &testAdminRepository{}
 	service, err := newAdminKeyService(repository, []byte("pepper"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository.records = []storage.APIKeyRecord{{ID: "bad", DisplayPrefix: "not-a-gateway-prefix", Digest: make([]byte, storage.HMACDigestSize), Enabled: true}}
+	if err := service.auth.Load([]auth.Record{{ID: "old", Name: "old", DisplayPrefix: old.DisplayPrefix, Digest: old.Digest, Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	repository.records = []storage.APIKeyRecord{
+		{ID: "old", Name: "old", DisplayPrefix: old.DisplayPrefix, Digest: old.Digest, Enabled: true},
+		{ID: "bad", DisplayPrefix: "not-a-gateway-prefix", Digest: make([]byte, storage.HMACDigestSize), Enabled: true},
+	}
 	if _, err := service.create(context.Background(), "not-persisted", nil); !errors.Is(err, errAdminKeyCreation) {
 		t.Fatalf("create error = %v, want safe creation error", err)
 	}
-	if repository.insertCalls != 0 || len(repository.records) != 1 {
+	if repository.insertCalls != 0 || len(repository.records) != 2 {
 		t.Fatalf("repository after failed preparation: insert calls %d, records %d", repository.insertCalls, len(repository.records))
+	}
+	if _, err := service.auth.Authenticate(old.RawKey); err != nil {
+		t.Fatalf("published snapshot changed after failed preparation: %v", err)
+	}
+}
+
+func TestAdminKeyServiceNonConflictInsertFailureDoesNotPublish(t *testing.T) {
+	pepper := []byte("pepper")
+	old := generatedForAdmin(t, pepper)
+	repository := &testAdminRepository{insertErr: errors.New("disk full")}
+	service, err := newAdminKeyService(repository, pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.auth.Load([]auth.Record{{ID: "old", Name: "old", DisplayPrefix: old.DisplayPrefix, Digest: old.Digest, Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	service.generator = &fixedGenerator{key: generatedForAdmin(t, pepper)}
+	if _, err := service.create(context.Background(), "failed", nil); !errors.Is(err, errAdminKeyCreation) {
+		t.Fatalf("insert failure = %v, want safe creation failure", err)
+	}
+	if repository.insertCalls != 1 {
+		t.Fatalf("insert calls = %d, want 1", repository.insertCalls)
+	}
+	if _, err := service.auth.Authenticate(old.RawKey); err != nil {
+		t.Fatalf("old key stopped authenticating after failed insert: %v", err)
+	}
+	if _, err := service.auth.Authenticate(service.generator.(*fixedGenerator).key.RawKey); !errors.Is(err, auth.ErrInvalidCredential) {
+		t.Fatalf("failed insert key authenticated: %v", err)
+	}
+}
+
+func TestAdminKeyServicePublishesWhenContextCanceledAfterDurableInsert(t *testing.T) {
+	pepper := []byte("pepper")
+	repository := &testAdminRepository{
+		blockAfterInsert:  true,
+		insertCommitted:   make(chan struct{}),
+		allowInsertReturn: make(chan struct{}),
+	}
+	service, err := newAdminKeyService(repository, pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := generatedForAdmin(t, pepper)
+	service.generator = &fixedGenerator{key: generated}
+	result := make(chan struct {
+		created createdAdminKey
+		err     error
+	}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		created, err := service.create(ctx, "canceled-after-insert", nil)
+		result <- struct {
+			created createdAdminKey
+			err     error
+		}{created, err}
+	}()
+	select {
+	case <-repository.insertCommitted:
+		cancel()
+		close(repository.allowInsertReturn)
+	case <-time.After(time.Second):
+		t.Fatal("insert did not become durable")
+	}
+	select {
+	case got := <-result:
+		if got.err != nil || got.created.RawKey != generated.RawKey {
+			t.Fatalf("creation after cancellation = %#v, %v", got.created, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("creation did not return")
+	}
+	if _, err := service.auth.Authenticate(generated.RawKey); err != nil {
+		t.Fatalf("durably inserted key was not published after cancellation: %v", err)
 	}
 }
 
@@ -307,9 +396,22 @@ func (generator *fixedGenerator) Generate([]byte) (auth.GeneratedGatewayKey, err
 }
 
 type testAdminRepository struct {
-	records     []storage.APIKeyRecord
-	listErr     error
-	insertCalls int
+	records           []storage.APIKeyRecord
+	listErr           error
+	insertErr         error
+	insertCalls       int
+	blockAfterInsert  bool
+	insertCommitted   chan struct{}
+	allowInsertReturn chan struct{}
+}
+
+func generatedForAdmin(t *testing.T, pepper []byte) auth.GeneratedGatewayKey {
+	t.Helper()
+	generated, err := auth.GenerateGatewayKey(pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return generated
 }
 
 func (repository *testAdminRepository) List(ctx context.Context) ([]storage.APIKeyRecord, error) {
@@ -325,6 +427,13 @@ func (repository *testAdminRepository) List(ctx context.Context) ([]storage.APIK
 func (repository *testAdminRepository) Insert(_ context.Context, record storage.APIKeyRecord) error {
 	repository.insertCalls++
 	repository.records = append(repository.records, record)
+	if repository.blockAfterInsert {
+		close(repository.insertCommitted)
+		<-repository.allowInsertReturn
+	}
+	if repository.insertErr != nil {
+		return repository.insertErr
+	}
 	return nil
 }
 

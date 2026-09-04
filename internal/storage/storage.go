@@ -58,6 +58,14 @@ type DB struct {
 
 var memoryDatabaseID atomic.Uint64
 
+// fileStartupGate serializes the file-database startup sequence inside this
+// process. SQLite still arbitrates startup across processes, but keeping WAL
+// setup and migration together prevents two local Open calls from racing a
+// persistent journal-mode change with BEGIN IMMEDIATE. Acquisition is
+// context-aware so a canceled startup cannot wait indefinitely behind another
+// opener.
+var fileStartupGate = make(chan struct{}, 1)
+
 // configureAndPingFunc is package-private so startup cleanup can be tested
 // after a real connection has been opened without changing the production
 // startup path.
@@ -92,6 +100,15 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	}
 
 	result := &DB{DB: database}
+	if !inMemory {
+		select {
+		case fileStartupGate <- struct{}{}:
+			defer func() { <-fileStartupGate }()
+		case <-ctx.Done():
+			_ = result.Close()
+			return nil, fmt.Errorf("open sqlite database: acquire startup lock: %w", ctx.Err())
+		}
+	}
 	if err := configureAndPingFunc(result, ctx, inMemory); err != nil {
 		_ = result.Close()
 		return nil, fmt.Errorf("open sqlite database: %w", err)
@@ -200,15 +217,20 @@ func (database *DB) configureAndPing(ctx context.Context, inMemory bool) error {
 	if err := database.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping: %w", err)
 	}
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open configuration connection: %w", err)
+	}
+	defer connection.Close()
 
 	var foreignKeys, busyTimeout int
-	if err := database.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+	if err := connection.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
 		return fmt.Errorf("read foreign key setting: %w", err)
 	}
 	if foreignKeys != 1 {
 		return fmt.Errorf("foreign keys are not enabled")
 	}
-	if err := database.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+	if err := connection.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
 		return fmt.Errorf("read busy timeout setting: %w", err)
 	}
 	if busyTimeout != busyTimeoutMilliseconds {
@@ -216,12 +238,21 @@ func (database *DB) configureAndPing(ctx context.Context, inMemory bool) error {
 	}
 
 	var journalMode string
-	if err := database.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+	if err := connection.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
 		return fmt.Errorf("read journal mode: %w", err)
 	}
 	wantJournalMode := "wal"
 	if inMemory {
 		wantJournalMode = "memory"
+	} else if !strings.EqualFold(journalMode, wantJournalMode) {
+		// journal_mode is persistent database state, unlike the connection-local
+		// foreign_keys and busy_timeout settings supplied by the DSN. Set it on
+		// one controlled startup connection, not in every pooled connection's
+		// DSN. SQLite's busy timeout handles another process completing its own
+		// startup/migration while this statement waits.
+		if err := connection.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+			return fmt.Errorf("configure journal mode: %w", err)
+		}
 	}
 	if !strings.EqualFold(journalMode, wantJournalMode) {
 		return fmt.Errorf("journal mode is %q, want %q", journalMode, wantJournalMode)
@@ -251,7 +282,7 @@ func dataSource(path string, inMemory bool) string {
 		id := memoryDatabaseID.Add(1)
 		return fmt.Sprintf("file:gateway-memory-%d?mode=memory&cache=shared&%s", id, query)
 	}
-	databaseURL := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=journal_mode(WAL)&" + query}
+	databaseURL := url.URL{Scheme: "file", Path: path, RawQuery: query}
 	return databaseURL.String()
 }
 

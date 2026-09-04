@@ -139,9 +139,10 @@ func TestConcurrentFileOpensMigrateAtomically(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := make(chan struct{})
-	results := make(chan *DB, 2)
-	errors := make(chan error, 2)
-	for range 2 {
+	const openers = 8
+	results := make(chan *DB, openers)
+	errors := make(chan error, openers)
+	for range openers {
 		go func() {
 			<-start
 			database, err := Open(ctx, path)
@@ -154,7 +155,7 @@ func TestConcurrentFileOpensMigrateAtomically(t *testing.T) {
 	}
 	close(start)
 	var databases []*DB
-	for range 2 {
+	for range openers {
 		select {
 		case database := <-results:
 			databases = append(databases, database)
@@ -179,6 +180,44 @@ func TestConcurrentFileOpensMigrateAtomically(t *testing.T) {
 	}
 	if tableCount != 1 {
 		t.Fatalf("api_keys table count = %d, want 1", tableCount)
+	}
+}
+
+func TestFilePooledConnectionsRetainConnectionLocalSQLiteSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pooled-settings.db")
+	database, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	if strings.Contains(dataSource(path, false), "journal_mode") {
+		t.Fatalf("file DSN configures persistent journal mode: %q", dataSource(path, false))
+	}
+	ctx := context.Background()
+	connections := make([]*sql.Conn, 0, fileMaxOpenConnections-1)
+	for range fileMaxOpenConnections - 1 {
+		connection, err := database.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, connection)
+	}
+	defer func() {
+		for _, connection := range connections {
+			connection.Close()
+		}
+	}()
+
+	var foreignKeys, busyTimeout int
+	if err := database.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 1 || busyTimeout != busyTimeoutMilliseconds {
+		t.Fatalf("pooled connection settings = foreign_keys %d, busy_timeout %d", foreignKeys, busyTimeout)
 	}
 }
 
