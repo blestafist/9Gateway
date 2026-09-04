@@ -144,8 +144,32 @@ func embeddedMigrations() ([]migration, error) {
 // the version marker in that transaction means a failed migration cannot
 // leave either a partially-created schema or a falsely advanced version.
 func runMigrations(ctx context.Context, database *sql.DB, migrations []migration) error {
+	for index, migration := range migrations {
+		want := index + 1
+		if migration.version != want {
+			return fmt.Errorf("migration sequence has version %d at position %d, want %d", migration.version, index, want)
+		}
+	}
+	// BEGIN IMMEDIATE obtains SQLite's write reservation before reading the
+	// version. A deferred transaction would leave a race between two fresh
+	// opens, both of which could read version zero and then attempt CREATE TABLE.
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open schema migration connection: %w", err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin schema migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = connection.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
 	var current int
-	if err := database.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
+	if err := connection.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
 	if current < 0 {
@@ -157,35 +181,15 @@ func runMigrations(ctx context.Context, database *sql.DB, migrations []migration
 	if current > len(migrations) {
 		return fmt.Errorf("database schema version %d has no embedded migration", current)
 	}
-	for index, migration := range migrations {
-		want := index + 1
-		if migration.version != want {
-			return fmt.Errorf("migration sequence has version %d at position %d, want %d", migration.version, index, want)
-		}
-	}
-	if current == len(migrations) {
-		return nil
-	}
-
-	tx, err := database.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin schema migration: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
 	for _, migration := range migrations[current:] {
-		if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
+		if _, err := connection.ExecContext(ctx, migration.sql); err != nil {
 			return fmt.Errorf("apply migration %s: %w", migration.name, err)
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", migration.version)); err != nil {
+		if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", migration.version)); err != nil {
 			return fmt.Errorf("record schema version %d: %w", migration.version, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit schema migrations: %w", err)
 	}
 	committed = true

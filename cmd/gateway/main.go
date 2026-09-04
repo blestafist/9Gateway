@@ -19,16 +19,23 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Print(err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	configPath := flag.String("config", "", "path to the gateway YAML configuration")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	database, err := storage.Open(context.Background(), cfg.SQLitePath)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer func() {
 		if err := database.Close(); err != nil {
@@ -46,7 +53,10 @@ func main() {
 		}
 	}()
 
-	gatewayHandler := httpserver.NewHandlerWithAdminAndCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), completionLogger)
+	gatewayHandler, err := httpserver.NewHandlerWithAdminAndCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), completionLogger)
+	if err != nil {
+		return err
+	}
 	var activeRequests sync.WaitGroup
 	// Keep the counter non-zero until shutdown has stopped accepting requests;
 	// this makes a handler starting concurrently with Shutdown safe to Add.
@@ -90,4 +100,5 @@ func main() {
 			log.Printf("HTTP server: %v", err)
 		}
 	}
+	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenFileDatabaseConfiguresSQLiteAndReopens(t *testing.T) {
@@ -131,6 +132,54 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	}
 	defer reopened.Close()
 	assertSchemaVersion(t, reopened.DB, CurrentSchemaVersion)
+}
+
+func TestConcurrentFileOpensMigrateAtomically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent.db")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	results := make(chan *DB, 2)
+	errors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			database, err := Open(ctx, path)
+			if err != nil {
+				errors <- err
+				return
+			}
+			results <- database
+		}()
+	}
+	close(start)
+	var databases []*DB
+	for range 2 {
+		select {
+		case database := <-results:
+			databases = append(databases, database)
+		case err := <-errors:
+			t.Fatalf("concurrent Open() error = %v", err)
+		case <-ctx.Done():
+			t.Fatalf("concurrent Open() timed out: %v", ctx.Err())
+		}
+	}
+	for _, database := range databases {
+		assertSchemaVersion(t, database.DB, CurrentSchemaVersion)
+		database.Close()
+	}
+	var tableCount int
+	database, err := sql.Open("sqlite", dataSource(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.QueryRow("SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'api_keys'").Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 1 {
+		t.Fatalf("api_keys table count = %d, want 1", tableCount)
+	}
 }
 
 func TestFailedMigrationRollsBack(t *testing.T) {

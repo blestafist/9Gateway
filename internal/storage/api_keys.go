@@ -295,7 +295,7 @@ func (repository *APIKeyRepository) SetEnabled(ctx context.Context, id string, e
 		return ErrRepositoryUnavailable
 	}
 	result, err := repository.database.ExecContext(ctx,
-		"UPDATE api_keys SET enabled = ?, updated_at = ? WHERE id = ?",
+		"UPDATE api_keys SET enabled = ?, updated_at = max(updated_at, created_at, ?) WHERE id = ?",
 		boolInt(enabled), time.Now().UTC().Truncate(time.Second).Unix(), id)
 	if err != nil {
 		return errors.New("update api key: database write failed")

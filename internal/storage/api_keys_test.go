@@ -99,6 +99,35 @@ func TestAPIKeyRepositoryListUpdateConflictsAndNotFound(t *testing.T) {
 	}
 }
 
+func TestAPIKeyRepositorySetEnabledPreservesFutureTimestampInvariant(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	future := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	record := APIKeyRecord{ID: "future", Name: "future", DisplayPrefix: "prefix-future", Digest: bytesOf(9), Enabled: true, CreatedAt: future, UpdatedAt: future}
+	if err := repository.Insert(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SetEnabled(ctx, record.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repository.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpdatedAt.Before(got.CreatedAt) || got.UpdatedAt.Before(future) || got.Enabled {
+		t.Fatalf("toggled record = %#v", got)
+	}
+	listed, err := repository.List(ctx)
+	if err != nil || len(listed) != 1 || listed[0].UpdatedAt.Before(listed[0].CreatedAt) {
+		t.Fatalf("listed records = %#v, error %v", listed, err)
+	}
+}
+
 func TestAPIKeyRepositoryReopensAndValidatesRecords(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "keys.db")

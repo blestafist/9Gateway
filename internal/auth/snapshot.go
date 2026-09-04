@@ -106,12 +106,36 @@ func (authenticator *Authenticator) Load(records []Record) error {
 	if authenticator == nil || len(authenticator.pepper) == 0 {
 		return ErrInvalidPepper
 	}
-	next, err := buildSnapshot(records)
+	next, err := authenticator.Prepare(records)
 	if err != nil {
 		return err
 	}
-	authenticator.state.Store(next)
+	authenticator.Publish(next)
 	return nil
+}
+
+// Prepare validates and builds a complete immutable snapshot without changing
+// the currently published state. The returned snapshot is safe to publish
+// atomically after a related durable mutation succeeds.
+func (authenticator *Authenticator) Prepare(records []Record) (*Snapshot, error) {
+	if authenticator == nil || len(authenticator.pepper) == 0 {
+		return nil, ErrInvalidPepper
+	}
+	next, err := buildSnapshot(records)
+	if err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// Publish atomically replaces the complete authentication snapshot. A
+// snapshot can only be obtained from Prepare or Snapshot, and its internals
+// are private, so publication itself cannot fail.
+func (authenticator *Authenticator) Publish(snapshot *Snapshot) {
+	if authenticator == nil || snapshot == nil {
+		return
+	}
+	authenticator.state.Store(snapshot)
 }
 
 // Replace is the mutation-oriented spelling of Load.

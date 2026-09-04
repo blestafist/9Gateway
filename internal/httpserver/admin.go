@@ -36,21 +36,31 @@ type apiKeyLister interface {
 	List(context.Context) ([]storage.APIKeyRecord, error)
 }
 
+type apiKeyRepository interface {
+	apiKeyInserter
+	apiKeyLister
+}
+
 type gatewayKeyGenerator interface {
 	Generate([]byte) (auth.GeneratedGatewayKey, error)
 }
 
 type adminKeyService struct {
-	repository apiKeyInserter
+	repository apiKeyRepository
 	pepper     []byte
 	generator  gatewayKeyGenerator
 	auth       *auth.Authenticator
 	refreshMu  sync.Mutex
-	startupErr error
 }
 
-func newAdminKeyService(repository apiKeyInserter, pepper []byte) *adminKeyService {
-	authenticator, _ := auth.NewAuthenticator(pepper, nil)
+func newAdminKeyService(repository apiKeyRepository, pepper []byte) (*adminKeyService, error) {
+	if repository == nil {
+		return nil, errAdminKeyCreation
+	}
+	authenticator, err := auth.NewAuthenticator(pepper, nil)
+	if err != nil {
+		return nil, errAdminKeyCreation
+	}
 	service := &adminKeyService{
 		repository: repository,
 		pepper:     append([]byte(nil), pepper...),
@@ -58,23 +68,29 @@ func newAdminKeyService(repository apiKeyInserter, pepper []byte) *adminKeyServi
 		auth:       authenticator,
 	}
 	if err := service.loadSnapshot(context.Background()); err != nil {
-		service.startupErr = err
+		return nil, err
 	}
-	return service
+	return service, nil
 }
 
 func (service *adminKeyService) loadSnapshot(ctx context.Context) error {
-	lister, ok := service.repository.(apiKeyLister)
-	if !ok || service.auth == nil {
+	if service.repository == nil || service.auth == nil {
 		return errAdminKeyCreation
 	}
-	records, err := lister.List(ctx)
+	records, err := service.repository.List(ctx)
 	if err != nil {
 		return errAdminKeyCreation
 	}
-	authRecords := make([]auth.Record, 0, len(records))
+	if err := service.auth.Load(authRecords(records)); err != nil {
+		return errAdminKeyCreation
+	}
+	return nil
+}
+
+func authRecords(records []storage.APIKeyRecord) []auth.Record {
+	result := make([]auth.Record, 0, len(records))
 	for _, record := range records {
-		authRecords = append(authRecords, auth.Record{
+		result = append(result, auth.Record{
 			ID:            record.ID,
 			Name:          record.Name,
 			DisplayPrefix: record.DisplayPrefix,
@@ -84,10 +100,7 @@ func (service *adminKeyService) loadSnapshot(ctx context.Context) error {
 			PolicyJSON:    []byte(record.PolicyJSON),
 		})
 	}
-	if err := service.auth.Load(authRecords); err != nil {
-		return errAdminKeyCreation
-	}
-	return nil
+	return result
 }
 
 type adminKeyRequest struct {
@@ -109,7 +122,7 @@ type createdAdminKey struct {
 // unlikely random identity collision without ever returning a colliding raw
 // credential. All errors intentionally lose repository and randomness detail.
 func (service *adminKeyService) create(ctx context.Context, name string, expiresAt *time.Time) (createdAdminKey, error) {
-	if service == nil || service.startupErr != nil || service.repository == nil || service.generator == nil || len(service.pepper) == 0 {
+	if service == nil || service.repository == nil || service.generator == nil || len(service.pepper) == 0 || service.auth == nil {
 		return createdAdminKey{}, errAdminKeyCreation
 	}
 	if strings.TrimSpace(name) == "" || len(name) > 256 {
@@ -153,17 +166,25 @@ func (service *adminKeyService) create(ctx context.Context, name string, expires
 			UpdatedAt:     now,
 			PolicyJSON:    `{}`,
 		}
+		// Prepare the complete replacement before insertion. After insertion,
+		// publication is an infallible atomic store and does not depend on the
+		// request context or another SQL operation.
+		records, err := service.repository.List(ctx)
+		if err != nil {
+			return createdAdminKey{}, errAdminKeyCreation
+		}
+		records = append(records, record)
+		prepared, err := service.auth.Prepare(authRecords(records))
+		if err != nil {
+			return createdAdminKey{}, errAdminKeyCreation
+		}
 		if err := service.repository.Insert(ctx, record); err != nil {
 			if errors.Is(err, storage.ErrConflict) {
 				continue
 			}
 			return createdAdminKey{}, errAdminKeyCreation
 		}
-		// The durable mutation precedes publication. Build and validate a whole
-		// replacement; if loading fails, the old snapshot remains published.
-		if err := service.loadSnapshot(ctx); err != nil {
-			return createdAdminKey{}, errAdminKeyCreation
-		}
+		service.auth.Publish(prepared)
 		return createdAdminKey{
 			ID:        id,
 			Name:      name,

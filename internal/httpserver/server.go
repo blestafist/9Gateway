@@ -35,17 +35,21 @@ func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey str
 // NewHandlerWithAdmin adds the bootstrap administration endpoint while
 // retaining the transparent gateway routes. The repository is intentionally
 // accepted through its domain API rather than a database handle.
-func NewHandlerWithAdmin(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyInserter) http.Handler {
+func NewHandlerWithAdmin(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository) (http.Handler, error) {
 	return NewHandlerWithAdminAndCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, nil)
 }
 
 // NewHandlerWithAdminAndCompletionLogger builds a handler with admin key
 // creation and the caller-owned completion logger.
-func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyInserter, completionLogger *CompletionLogger) http.Handler {
+func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, completionLogger *CompletionLogger) (http.Handler, error) {
 	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
-	admin := &adminHandler{credential: adminCredential, service: newAdminKeyService(repository, []byte(authPepper))}
+	service, err := newAdminKeyService(repository, []byte(authPepper))
+	if err != nil {
+		return nil, err
+	}
+	admin := &adminHandler{credential: adminCredential, service: service}
 	router := routeWithAdmin(proxy, admin)
-	return newHandlerWithCompletionLogger(completionLogger, router)
+	return newHandlerWithCompletionLogger(completionLogger, router), nil
 }
 
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
