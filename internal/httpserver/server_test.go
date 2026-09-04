@@ -413,6 +413,61 @@ func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesRepresentationHeadersWithoutTransformation(t *testing.T) {
+	for _, contentType := range []string{"application/json", "application/octet-stream", "text/event-stream"} {
+		t.Run(contentType, func(t *testing.T) {
+			body := []byte("transparent body")
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", contentType)
+				response.Header().Set("Content-Encoding", "identity")
+				response.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				response.Header().Set("Content-Range", "bytes 0-15/16")
+				response.Header().Set("Accept-Ranges", "bytes")
+				response.Header().Set("ETag", `"transparent-validator"`)
+				response.Header().Set("Content-MD5", "transparent-md5")
+				response.Header().Set("Digest", "sha-256=transparent-digest")
+				response.Header().Set("Content-Digest", "sha-256=:transparent-content-digest:")
+				response.Header().Set("X-Gateway-Trace", "trace-value")
+				_, _ = response.Write(body)
+			}))
+			t.Cleanup(upstream.Close)
+			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			t.Cleanup(gateway.Close)
+
+			client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+			response, err := client.Get(gateway.URL + "/v1/transparent")
+			if err != nil {
+				t.Fatalf("GET transparent response: %v", err)
+			}
+			gotBody, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read transparent response: %v", readErr)
+			}
+			if !bytes.Equal(gotBody, body) {
+				t.Fatalf("body = %q, want %q", gotBody, body)
+			}
+			wantHeaders := map[string]string{
+				"Content-Type":     contentType,
+				"Content-Encoding": "identity",
+				"Content-Length":   strconv.Itoa(len(body)),
+				"Content-Range":    "bytes 0-15/16",
+				"Accept-Ranges":    "bytes",
+				"ETag":             `"transparent-validator"`,
+				"Content-MD5":      "transparent-md5",
+				"Digest":           "sha-256=transparent-digest",
+				"Content-Digest":   "sha-256=:transparent-content-digest:",
+				"X-Gateway-Trace":  "trace-value",
+			}
+			for name, want := range wantHeaders {
+				if got := response.Header.Get(name); got != want {
+					t.Fatalf("%s = %q, want %q", name, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestProxyConvertsExplicitNonStreamChatSSEToJSON(t *testing.T) {
 	const stream = `data: {"id":"chatcmpl-bifrost","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}
 
@@ -424,7 +479,15 @@ data: [DONE]
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "text/event-stream")
 		response.Header().Set("X-Upstream-Trace", "trace-value")
+		response.Header().Set("X-RateLimit-Remaining", "17")
 		response.Header().Set("Content-Length", strconv.Itoa(len(stream)))
+		response.Header().Set("Content-Encoding", "identity")
+		response.Header().Set("Content-Range", "bytes 0-10/11")
+		response.Header().Set("Accept-Ranges", "bytes")
+		response.Header().Set("ETag", `"upstream-validator"`)
+		response.Header().Set("Content-MD5", "upstream-md5")
+		response.Header().Set("Digest", "sha-256=upstream-digest")
+		response.Header().Set("Content-Digest", "sha-256=:upstream-content-digest:")
 		response.WriteHeader(http.StatusBadGateway)
 		_, _ = io.WriteString(response, stream)
 	}))
@@ -476,6 +539,14 @@ data: [DONE]
 	}
 	if response.Header.Get("X-Upstream-Trace") != "trace-value" {
 		t.Fatalf("safe upstream header was not preserved")
+	}
+	if response.Header.Get("X-RateLimit-Remaining") != "17" {
+		t.Fatalf("rate-limit header was not preserved")
+	}
+	for _, name := range []string{"Content-Encoding", "Content-Range", "Accept-Ranges", "ETag", "Content-MD5", "Digest", "Content-Digest"} {
+		if got := response.Header.Get(name); got != "" {
+			t.Fatalf("transformed %s = %q, want absent", name, got)
+		}
 	}
 }
 
@@ -833,6 +904,13 @@ func TestProxyPreservesCompressedTransparentChatSSE(t *testing.T) {
 		response.Header().Set("Content-Type", "text/event-stream")
 		response.Header().Set("Content-Encoding", "gzip")
 		response.Header().Set("Content-Length", strconv.Itoa(len(wantBody)))
+		response.Header().Set("Content-Range", "bytes 0-10/11")
+		response.Header().Set("Accept-Ranges", "bytes")
+		response.Header().Set("ETag", `"upstream-validator"`)
+		response.Header().Set("Content-MD5", "upstream-md5")
+		response.Header().Set("Digest", "sha-256=upstream-digest")
+		response.Header().Set("Content-Digest", "sha-256=:upstream-content-digest:")
+		response.Header().Set("X-RateLimit-Remaining", "17")
 		_, _ = response.Write(wantBody)
 	}))
 	t.Cleanup(upstream.Close)
@@ -862,6 +940,11 @@ func TestProxyPreservesCompressedTransparentChatSSE(t *testing.T) {
 	}
 	if response.Header.Get("Content-Length") != strconv.Itoa(len(wantBody)) {
 		t.Fatalf("Content-Length = %q, want %d", response.Header.Get("Content-Length"), len(wantBody))
+	}
+	for _, name := range []string{"Content-Range", "Accept-Ranges", "ETag", "Content-MD5", "Digest", "Content-Digest", "X-RateLimit-Remaining"} {
+		if got := response.Header.Get(name); got == "" {
+			t.Fatalf("transparent %s was not preserved", name)
+		}
 	}
 	if !bytes.Equal(body, wantBody) {
 		t.Fatalf("transparent body changed: got %x, want %x", body, wantBody)

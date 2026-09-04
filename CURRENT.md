@@ -2,15 +2,15 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T060`.
+Done: `T001`-`T061`.
 
-Current: `T061` - sanitize transformed response headers.
+Current: `T062` - do not wait for EOF after unencoded DONE.
 
-Next: `T062` - do not wait for EOF after unencoded DONE.
+Next: `T063` - decouple completion logging from response close.
 
 Queued: `T063`-`T080` in dependency order in `TASKS.md`.
 
-Known issues: T061-T063 capture the bounded transport/observability audit findings.
+Known issues: T062-T063 capture the bounded transport/observability audit findings.
 
 Important: transparent SSE remains byte-preserving and independent from the
 bounded generic parser. T061-T063 first close narrow compatibility/observability

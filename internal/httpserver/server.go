@@ -195,11 +195,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
 			return
 		}
-		copyResponseHeaders(response.Header(), upstreamResponse.Header)
-		response.Header().Del("Content-Type")
-		response.Header().Del("Content-Length")
-		response.Header().Del("Content-Encoding")
-		response.Header().Del("Content-Range")
+		copyTransformedResponseHeaders(response.Header(), upstreamResponse.Header)
 		response.Header().Set("Content-Type", "application/json")
 		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		response.WriteHeader(upstreamResponse.StatusCode)
@@ -405,6 +401,28 @@ func copyResponseHeaders(destination, source http.Header) {
 		"authorization":       {},
 		"proxy-authorization": {},
 	})
+}
+
+// These headers describe the upstream representation, which is discarded when
+// an SSE response is replaced with generated JSON. Other end-to-end headers
+// remain safe to forward through the conversion.
+var transformedRepresentationHeaders = []string{
+	"Content-Type",
+	"Content-Encoding",
+	"Content-Length",
+	"Content-Range",
+	"Accept-Ranges",
+	"ETag",
+	"Content-MD5",
+	"Digest",
+	"Content-Digest",
+}
+
+func copyTransformedResponseHeaders(destination, source http.Header) {
+	copyResponseHeaders(destination, source)
+	for _, name := range transformedRepresentationHeaders {
+		destination.Del(name)
+	}
 }
 
 func copyHeaders(destination, source http.Header, deniedHeaders map[string]struct{}) {
