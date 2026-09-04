@@ -26,8 +26,19 @@ type requestIDContextKey struct{}
 
 // NewHandler returns the gateway's HTTP handler using the provided upstream client.
 func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string) http.Handler {
+	return NewHandlerWithCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, NewCompletionLogger(slog.Default(), 0))
+}
+
+// NewHandlerWithCompletionLogger builds a handler using the caller-owned
+// completion logger. The process entry point should shut that logger down.
+func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, completionLogger *CompletionLogger) http.Handler {
 	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
-	router := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	router := route(proxy)
+	return newHandlerWithCompletionLogger(completionLogger, router)
+}
+
+func route(proxy http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/health":
 			health(response, request)
@@ -37,7 +48,6 @@ func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey str
 			http.NotFound(response, request)
 		}
 	})
-	return newHandler(slog.Default(), router)
 }
 
 type proxyHandler struct {
@@ -468,6 +478,13 @@ func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
 	return withRequestID(withCompletionLog(logger, next))
 }
 
+func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
+	if completionLogger == nil {
+		completionLogger = NewCompletionLogger(slog.Default(), 0)
+	}
+	return withRequestID(withCompletionLogger(completionLogger, next))
+}
+
 func health(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusOK)
 }
@@ -499,6 +516,27 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 			"status", writer.statusCode(),
 			"duration", time.Since(startedAt),
 		)
+	})
+}
+
+func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
+	if completionLogger == nil {
+		completionLogger = NewCompletionLogger(slog.Default(), 0)
+	}
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		startedAt := time.Now()
+		writer := &completionResponseWriter{ResponseWriter: response}
+		next.ServeHTTP(writer, request)
+
+		// Copy only safe scalar values into the record before handing it to the
+		// worker. No request object or headers are retained by the logger.
+		completionLogger.Enqueue(CompletionRecord{
+			RequestID: requestIDFromContext(request.Context()),
+			Method:    request.Method,
+			Path:      request.URL.Path,
+			Status:    writer.statusCode(),
+			Duration:  time.Since(startedAt),
+		})
 	})
 }
 
