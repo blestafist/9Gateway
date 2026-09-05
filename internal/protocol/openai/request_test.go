@@ -47,10 +47,12 @@ func TestRequestMetadataTokenStates(t *testing.T) {
 			metadata := RequestMetadata{
 				MaxTokens:           test.value,
 				MaxCompletionTokens: test.value,
+				MaxOutputTokens:     test.value,
 			}
 
 			assertIntPointer(t, "MaxTokens", metadata.MaxTokens, test.want)
 			assertIntPointer(t, "MaxCompletionTokens", metadata.MaxCompletionTokens, test.want)
+			assertIntPointer(t, "MaxOutputTokens", metadata.MaxOutputTokens, test.want)
 		})
 	}
 }
@@ -73,12 +75,13 @@ func TestParseRequestMetadata(t *testing.T) {
 	}{
 		{
 			name:  "all inspected fields",
-			input: `{"model":"gpt-test","stream":true,"max_tokens":128,"max_completion_tokens":256}`,
+			input: `{"model":"gpt-test","stream":true,"max_tokens":128,"max_completion_tokens":256,"max_output_tokens":512}`,
 			want: RequestMetadata{
 				Model:               "gpt-test",
 				Stream:              boolPointer(true),
 				MaxTokens:           intPointer(128),
 				MaxCompletionTokens: intPointer(256),
+				MaxOutputTokens:     intPointer(512),
 			},
 		},
 		{
@@ -155,6 +158,17 @@ func TestParseRequestMetadata(t *testing.T) {
 			wantErrFor: "max_completion_tokens",
 		},
 		{
+			name:  "max output tokens zero",
+			input: `{"max_output_tokens":0}`,
+			want:  RequestMetadata{MaxOutputTokens: intPointer(0)},
+		},
+		{
+			name:       "responses max output tokens wrong type",
+			input:      `{"max_output_tokens":false}`,
+			wantErr:    ErrInvalidMetadataField,
+			wantErrFor: "max_output_tokens",
+		},
+		{
 			name:       "known null is not absent",
 			input:      `{"stream":null}`,
 			wantErr:    ErrInvalidMetadataField,
@@ -200,6 +214,7 @@ func assertRequestMetadata(t *testing.T, got, want RequestMetadata) {
 	assertBoolPointer(t, "Stream", got.Stream, want.Stream)
 	assertIntPointer(t, "MaxTokens", got.MaxTokens, want.MaxTokens)
 	assertIntPointer(t, "MaxCompletionTokens", got.MaxCompletionTokens, want.MaxCompletionTokens)
+	assertIntPointer(t, "MaxOutputTokens", got.MaxOutputTokens, want.MaxOutputTokens)
 }
 
 func assertBoolPointer(t *testing.T, name string, got, want *bool) {

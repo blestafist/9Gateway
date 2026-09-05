@@ -25,6 +25,7 @@ type RequestMetadata struct {
 	Stream              *bool  `json:"stream,omitempty"`
 	MaxTokens           *int   `json:"max_tokens,omitempty"`
 	MaxCompletionTokens *int   `json:"max_completion_tokens,omitempty"`
+	MaxOutputTokens     *int   `json:"max_output_tokens,omitempty"`
 }
 
 // ParseRequestMetadata extracts the small set of request fields observed by
@@ -55,6 +56,9 @@ func ParseRequestMetadata(data []byte) (RequestMetadata, error) {
 	if err := decodeMetadataField(fields.MaxCompletionTokens, "max_completion_tokens", &metadata.MaxCompletionTokens); err != nil {
 		return RequestMetadata{}, err
 	}
+	if err := decodeMetadataField(fields.MaxOutputTokens, "max_output_tokens", &metadata.MaxOutputTokens); err != nil {
+		return RequestMetadata{}, err
+	}
 
 	return metadata, nil
 }
@@ -67,6 +71,7 @@ type requestMetadataJSON struct {
 	Stream              json.RawMessage `json:"stream"`
 	MaxTokens           json.RawMessage `json:"max_tokens"`
 	MaxCompletionTokens json.RawMessage `json:"max_completion_tokens"`
+	MaxOutputTokens     json.RawMessage `json:"max_output_tokens"`
 }
 
 func decodeMetadataField(raw json.RawMessage, name string, destination any) error {

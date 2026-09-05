@@ -2,9 +2,9 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T085`.
+Done: `T001`-`T086`.
 
-Current: `T086` - build conservative reservation plans.
+Current: `T087` - add token windows to key policy.
 
 Queued: `T087`-`T100` in dependency order from `TASKS.md`.
 
