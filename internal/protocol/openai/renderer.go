@@ -77,9 +77,9 @@ type chatCompletionMessage struct {
 }
 
 type chatCompletionUsage struct {
-	PromptTokens     *int `json:"prompt_tokens,omitempty"`
-	CompletionTokens *int `json:"completion_tokens,omitempty"`
-	TotalTokens      *int `json:"total_tokens,omitempty"`
+	PromptTokens     *int64 `json:"prompt_tokens,omitempty"`
+	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
+	TotalTokens      *int64 `json:"total_tokens,omitempty"`
 }
 
 func hasMeaningfulChoice(choices []AccumulatedChoice) bool {
@@ -104,8 +104,8 @@ func renderUsage(usage UsageObservation) *chatCompletionUsage {
 		return nil
 	}
 	return &chatCompletionUsage{
-		PromptTokens:     cloneInt(usage.InputTokens),
-		CompletionTokens: cloneInt(usage.OutputTokens),
-		TotalTokens:      cloneInt(usage.TotalTokens),
+		PromptTokens:     cloneInt64(usage.InputTokens),
+		CompletionTokens: cloneInt64(usage.OutputTokens),
+		TotalTokens:      cloneInt64(usage.TotalTokens),
 	}
 }

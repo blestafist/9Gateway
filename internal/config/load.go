@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -24,6 +25,13 @@ func Load(path string) (Config, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&config); err != nil {
+		return Config{}, fmt.Errorf("decode config YAML: %w", err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return Config{}, fmt.Errorf("decode config YAML: multiple documents are not supported")
+		}
 		return Config{}, fmt.Errorf("decode config YAML: %w", err)
 	}
 	if err := rejectExplicitTokenizerDefaults(data, config); err != nil {

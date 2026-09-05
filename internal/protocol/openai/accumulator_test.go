@@ -226,7 +226,7 @@ func TestChatAccumulatorAccumulatesNormalizedUsage(t *testing.T) {
 
 			got := accumulator.State().Usage
 			assertUsageObservation(t, got, UsageObservation{
-				InputTokens: intPointer(4), OutputTokens: intPointer(6), TotalTokens: intPointer(10),
+				InputTokens: int64Pointer(4), OutputTokens: int64Pointer(6), TotalTokens: int64Pointer(10),
 			})
 
 			// The source pointers are caller-owned and must not become aliases of
@@ -235,7 +235,7 @@ func TestChatAccumulatorAccumulatesNormalizedUsage(t *testing.T) {
 			*usage.OutputTokens = 60
 			*usage.TotalTokens = 100
 			assertUsageObservation(t, accumulator.State().Usage, UsageObservation{
-				InputTokens: intPointer(4), OutputTokens: intPointer(6), TotalTokens: intPointer(10),
+				InputTokens: int64Pointer(4), OutputTokens: int64Pointer(6), TotalTokens: int64Pointer(10),
 			})
 		})
 	}
@@ -247,28 +247,28 @@ func TestChatAccumulatorMergesPartialUsageReplacements(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
-		InputTokens: intPointer(1), OutputTokens: intPointer(2), TotalTokens: intPointer(3),
+		InputTokens: int64Pointer(1), OutputTokens: int64Pointer(2), TotalTokens: int64Pointer(3),
 	}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
-		OutputTokens: intPointer(9),
+		OutputTokens: int64Pointer(9),
 	}}}); err != nil {
 		t.Fatal(err)
 	}
 	assertUsageObservation(t, accumulator.State().Usage, UsageObservation{
-		InputTokens: intPointer(1), OutputTokens: intPointer(9), TotalTokens: intPointer(3),
+		InputTokens: int64Pointer(1), OutputTokens: int64Pointer(9), TotalTokens: int64Pointer(3),
 	})
 
 	// A later partial update replaces explicitly observed fields while keeping
 	// fields omitted by that update.
 	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
-		InputTokens: intPointer(4),
+		InputTokens: int64Pointer(4),
 	}}}); err != nil {
 		t.Fatal(err)
 	}
 	assertUsageObservation(t, accumulator.State().Usage, UsageObservation{
-		InputTokens: intPointer(4), OutputTokens: intPointer(9), TotalTokens: intPointer(3),
+		InputTokens: int64Pointer(4), OutputTokens: int64Pointer(9), TotalTokens: int64Pointer(3),
 	})
 }
 
@@ -285,7 +285,7 @@ func TestChatAccumulatorAcceptsUsageAfterFinishReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := accumulator.Accumulate(ObservationResult{State: ObserverState{Usage: UsageObservation{
-		InputTokens: intPointer(7), OutputTokens: intPointer(8), TotalTokens: intPointer(15),
+		InputTokens: int64Pointer(7), OutputTokens: int64Pointer(8), TotalTokens: int64Pointer(15),
 	}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestChatAccumulatorAcceptsUsageAfterFinishReason(t *testing.T) {
 		t.Fatalf("finish state = %+v, want finish reason %q", state.Choices, finish)
 	}
 	assertUsageObservation(t, state.Usage, UsageObservation{
-		InputTokens: intPointer(7), OutputTokens: intPointer(8), TotalTokens: intPointer(15),
+		InputTokens: int64Pointer(7), OutputTokens: int64Pointer(8), TotalTokens: int64Pointer(15),
 	})
 }
 

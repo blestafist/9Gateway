@@ -36,6 +36,41 @@ func TestLoadValidYAML(t *testing.T) {
 	}
 }
 
+func TestLoadAppliesOmittedTokenizerDefaults(t *testing.T) {
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	contents := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n"
+	got, err := Load(writeConfig(t, contents))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tokenizer != (TokenizerConfig{Mode: TokenizerModeEstimate, MaxInspectedRequestBytes: DefaultMaxInspectedRequestBytes, FallbackUnknownInputTokens: DefaultFallbackUnknownInputTokens, FallbackMaxOutputTokens: DefaultFallbackMaxOutputTokens}) {
+		t.Fatalf("tokenizer defaults = %+v", got.Tokenizer)
+	}
+}
+
+func TestLoadRejectsAdditionalYAMLDocuments(t *testing.T) {
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	contents := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n---\nlisten_addr: :9090\n"
+	if _, err := Load(writeConfig(t, contents)); err == nil || !strings.Contains(err.Error(), "multiple documents") {
+		t.Fatalf("Load() error = %v, want multiple-document error", err)
+	}
+}
+
+func TestLoadAcceptsEmptyAndNullTokenizerAsDefaults(t *testing.T) {
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	base := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n"
+	want := TokenizerConfig{Mode: TokenizerModeEstimate, MaxInspectedRequestBytes: DefaultMaxInspectedRequestBytes, FallbackUnknownInputTokens: DefaultFallbackUnknownInputTokens, FallbackMaxOutputTokens: DefaultFallbackMaxOutputTokens}
+	for _, suffix := range []string{"tokenizer: {}\n", "tokenizer: null\n", "tokenizer:\n"} {
+		got, err := Load(writeConfig(t, base+suffix))
+		if err != nil || got.Tokenizer != want {
+			t.Fatalf("Load(%q) = %+v, %v; want defaults", suffix, got.Tokenizer, err)
+		}
+	}
+}
+
 func TestLoadRejectsExplicitZeroTokenizerValues(t *testing.T) {
 	t.Setenv("TEST_AUTH_PEPPER", "pepper")
 	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")

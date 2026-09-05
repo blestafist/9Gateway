@@ -37,9 +37,9 @@ type ObserverState struct {
 // accessors (Input, Output, Total, CachedInput, and ReasoningOutput).
 type UsageObservation struct {
 	accounting.Usage
-	InputTokens  *int `json:"input_tokens,omitempty"`
-	OutputTokens *int `json:"output_tokens,omitempty"`
-	TotalTokens  *int `json:"total_tokens,omitempty"`
+	InputTokens  *int64 `json:"input_tokens,omitempty"`
+	OutputTokens *int64 `json:"output_tokens,omitempty"`
+	TotalTokens  *int64 `json:"total_tokens,omitempty"`
 }
 
 // ChoiceObservation is one choice entry from one observed streaming chunk.
@@ -132,6 +132,12 @@ func (observer *Observer) Observe(event streaming.SSEEvent) error {
 	data := bytes.TrimSpace([]byte(event.Data))
 	if len(data) == 0 || data[0] != '{' {
 		return fmt.Errorf("%w: expected a JSON object", ErrMalformedStreamChunk)
+	}
+	if _, err := scanKnownObjectMembers(data, map[string]struct{}{"usage": {}}); err != nil {
+		if errors.Is(err, errDuplicateKnownMember) {
+			return fmt.Errorf("%w: duplicate known usage member", ErrInvalidUsage)
+		}
+		return fmt.Errorf("%w: malformed JSON object", ErrMalformedStreamChunk)
 	}
 
 	var chunk streamChunk
@@ -371,21 +377,21 @@ func mergeCanonicalUsage(current, update accounting.Usage) (accounting.Usage, er
 }
 
 func cloneUsageObservation(usage UsageObservation) UsageObservation {
-	usage.InputTokens = cloneInt(usage.InputTokens)
-	usage.OutputTokens = cloneInt(usage.OutputTokens)
-	usage.TotalTokens = cloneInt(usage.TotalTokens)
+	usage.InputTokens = cloneInt64(usage.InputTokens)
+	usage.OutputTokens = cloneInt64(usage.OutputTokens)
+	usage.TotalTokens = cloneInt64(usage.TotalTokens)
 	return usage
 }
 
 func mergeUsageObservation(current, update UsageObservation) UsageObservation {
 	if update.InputTokens != nil {
-		current.InputTokens = cloneInt(update.InputTokens)
+		current.InputTokens = cloneInt64(update.InputTokens)
 	}
 	if update.OutputTokens != nil {
-		current.OutputTokens = cloneInt(update.OutputTokens)
+		current.OutputTokens = cloneInt64(update.OutputTokens)
 	}
 	if update.TotalTokens != nil {
-		current.TotalTokens = cloneInt(update.TotalTokens)
+		current.TotalTokens = cloneInt64(update.TotalTokens)
 	}
 	if update.Usage.Input().Known() || update.Usage.Output().Known() || update.Usage.Total().Known() ||
 		update.Usage.CachedInput().Known() || update.Usage.ReasoningOutput().Known() {
@@ -407,16 +413,16 @@ func usageObservationFromCanonical(usage accounting.Usage) UsageObservation {
 	return observation
 }
 
-func intPointerFromCanonical[T interface{ Value() (int64, bool) }](count T) *int {
+func intPointerFromCanonical[T interface{ Value() (int64, bool) }](count T) *int64 {
 	value, known := count.Value()
 	if !known {
 		return nil
 	}
-	converted := int(value)
+	converted := value
 	return &converted
 }
 
-func cloneInt(value *int) *int {
+func cloneInt64(value *int64) *int64 {
 	if value == nil {
 		return nil
 	}
@@ -440,6 +446,9 @@ func observeEventUsage(event streaming.SSEEvent, data []byte, root json.RawMessa
 	if !isResponsesCompletionEvent(event, data) {
 		return usage, observed, nil
 	}
+	if _, err := scanKnownObjectMembers(data, map[string]struct{}{"response": {}}); err != nil {
+		return accounting.Usage{}, false, fmt.Errorf("%w: response envelope", ErrInvalidUsage)
+	}
 
 	var envelope responseCompletionEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
@@ -447,6 +456,9 @@ func observeEventUsage(event streaming.SSEEvent, data []byte, root json.RawMessa
 	}
 	if len(envelope.Response) == 0 || isJSONNull(envelope.Response) {
 		return usage, observed, nil
+	}
+	if _, err := scanKnownObjectMembers(envelope.Response, map[string]struct{}{"usage": {}}); err != nil {
+		return accounting.Usage{}, false, fmt.Errorf("%w: response envelope", ErrInvalidUsage)
 	}
 	var response responseUsageEnvelope
 	if err := json.Unmarshal(envelope.Response, &response); err != nil {

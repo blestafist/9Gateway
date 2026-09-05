@@ -2,6 +2,7 @@ package openai
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/pestit/9gateway/internal/accounting"
@@ -412,12 +413,12 @@ func TestObserverNormalizesTokenUsage(t *testing.T) {
 		{
 			name: "OpenAI names",
 			data: []string{`{"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}`},
-			want: UsageObservation{InputTokens: intPointer(4), OutputTokens: intPointer(6), TotalTokens: intPointer(10)},
+			want: UsageObservation{InputTokens: int64Pointer(4), OutputTokens: int64Pointer(6), TotalTokens: int64Pointer(10)},
 		},
 		{
 			name: "input output names",
 			data: []string{`{"usage":{"input_tokens":7,"output_tokens":8}}`},
-			want: UsageObservation{InputTokens: intPointer(7), OutputTokens: intPointer(8)},
+			want: UsageObservation{InputTokens: int64Pointer(7), OutputTokens: int64Pointer(8)},
 		},
 		{
 			name: "partial usage and usage only terminal chunk",
@@ -425,7 +426,7 @@ func TestObserverNormalizesTokenUsage(t *testing.T) {
 				`{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
 				`{"usage":{"prompt_tokens":11}}`,
 			},
-			want: UsageObservation{InputTokens: intPointer(11)},
+			want: UsageObservation{InputTokens: int64Pointer(11)},
 		},
 		{
 			name: "later replacement preserves absent fields",
@@ -433,12 +434,12 @@ func TestObserverNormalizesTokenUsage(t *testing.T) {
 				`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`,
 				`{"usage":{"completion_tokens":9}}`,
 			},
-			want: UsageObservation{InputTokens: intPointer(1), OutputTokens: intPointer(9), TotalTokens: intPointer(3)},
+			want: UsageObservation{InputTokens: int64Pointer(1), OutputTokens: int64Pointer(9), TotalTokens: int64Pointer(3)},
 		},
 		{
 			name: "total remains absent",
 			data: []string{`{"usage":{"input_tokens":12,"output_tokens":13}}`},
-			want: UsageObservation{InputTokens: intPointer(12), OutputTokens: intPointer(13)},
+			want: UsageObservation{InputTokens: int64Pointer(12), OutputTokens: int64Pointer(13)},
 		},
 	}
 
@@ -465,7 +466,7 @@ func TestObserverUsageAliasPrecedenceIsIndependentOfJSONMemberOrder(t *testing.T
 			t.Fatalf("Observe(%q) error = %v, want nil", data, err)
 		}
 		assertUsageObservation(t, observer.State().Usage, UsageObservation{
-			InputTokens: intPointer(20), OutputTokens: intPointer(30),
+			InputTokens: int64Pointer(20), OutputTokens: int64Pointer(30),
 		})
 	}
 }
@@ -507,6 +508,39 @@ func TestObserverInvalidUsagePreservesStateAndCanBeReused(t *testing.T) {
 				t.Fatalf("prompt tokens after reuse = %v, want preserved 2", got)
 			}
 		})
+	}
+}
+
+func TestObserverRejectsDuplicateKnownUsageMembers(t *testing.T) {
+	observer := NewObserver()
+	for _, data := range []string{
+		`{"usage":{"prompt_tokens":-1,"prompt_tokens":10}}`,
+		`{"usage":{"completion_tokens":1,"completion_tokens":2}}`,
+		`{"usage":{"prompt_tokens_details":{"cached_tokens":1,"cached_tokens":2}}}`,
+		`{"response":{"usage":{"input_tokens":-1}},"response":{"usage":{"input_tokens":10}}}`,
+	} {
+		event := streaming.SSEEvent{Data: data}
+		if strings.Contains(data, `"response"`) {
+			event.Event = "response.completed"
+		}
+		if err := observer.Observe(event); !errors.Is(err, ErrInvalidUsage) {
+			t.Fatalf("Observe(%s) error = %v, want ErrInvalidUsage", data, err)
+		}
+	}
+	if observer.State().EventsObserved != 0 {
+		t.Fatalf("EventsObserved = %d after duplicate usage events, want 0", observer.State().EventsObserved)
+	}
+}
+
+func TestObserverCanonicalProjectionPreservesInt64Boundary(t *testing.T) {
+	data := `{"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":0}}`
+	observer := NewObserver()
+	if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	state := observer.State()
+	if state.Usage.InputTokens == nil || *state.Usage.InputTokens != int64(^uint64(0)>>1) {
+		t.Fatalf("input projection = %v, want MaxInt64", state.Usage.InputTokens)
 	}
 }
 
@@ -619,7 +653,7 @@ func assertUsageObservation(t *testing.T, got, want UsageObservation) {
 	assertOptionalInt(t, "total_tokens", got.TotalTokens, want.TotalTokens)
 }
 
-func assertOptionalInt(t *testing.T, name string, got, want *int) {
+func assertOptionalInt(t *testing.T, name string, got, want *int64) {
 	t.Helper()
 	if got == nil || want == nil {
 		if got != nil || want != nil {

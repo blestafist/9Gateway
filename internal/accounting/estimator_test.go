@@ -17,11 +17,11 @@ func TestApproximateEstimator(t *testing.T) {
 		quality EstimateQuality
 		err     error
 	}{
-		{name: "plain messages", body: `{"messages":[{"role":"system","content":"You are helpful."},{"role":"user","name":"Ada","content":"Hello"},{"role":"assistant","content":"Hi"}]}`, want: 33, quality: EstimateQualityKnown},
-		{name: "responses string", body: `{"input":"Hello"}`, want: 3, quality: EstimateQualityKnown},
-		{name: "responses items", body: `{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]},{"type":"input_text","text":"world"}]}`, want: 12, quality: EstimateQualityKnown},
-		{name: "unicode uses UTF-8 bytes", body: `{"messages":[{"role":"user","content":"你好"}]}`, want: 9, quality: EstimateQualityKnown},
-		{name: "tools and schema", body: `{"messages":[],"tools":[{"type":"function","function":{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}`, want: 30, quality: EstimateQualityKnown},
+		{name: "plain messages", body: `{"messages":[{"role":"system","content":"You are helpful."},{"role":"user","name":"Ada","content":"Hello"},{"role":"assistant","content":"Hi"}]}`, want: 57, quality: EstimateQualityKnown},
+		{name: "responses string", body: `{"input":"Hello"}`, want: 5, quality: EstimateQualityKnown},
+		{name: "responses items", body: `{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]},{"type":"input_text","text":"world"}]}`, want: 18, quality: EstimateQualityKnown},
+		{name: "unicode uses UTF-8 bytes", body: `{"messages":[{"role":"user","content":"你好"}]}`, want: 14, quality: EstimateQualityKnown},
+		{name: "tools and schema", body: `{"messages":[],"tools":[{"type":"function","function":{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}`, want: 83, quality: EstimateQualityKnown},
 		{name: "empty input", body: `{"messages":[]}`, want: 0, quality: EstimateQualityKnown},
 		{name: "multimodal fallback", body: `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"secret-image"}}]}]}`, want: 99, quality: EstimateQualityUnknown},
 		{name: "unknown response item fallback", body: `{"input":[{"type":"computer_use_preview","id":"secret-id"}]}`, want: 99, quality: EstimateQualityUnknown},

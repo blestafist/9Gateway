@@ -9,7 +9,10 @@ usage is an explicit unknown state, not automatically an error or zero.
 Preflight estimation supports `usage_only`, approximate estimation, and later
 model-specific exact tokenizers. Estimator failure does not reject a request
 unless strict enforcement requires an estimate. Approximation includes textual
-messages and tool schemas; multimodal/unknown input uses a configured fallback.
+messages and tool schemas; each UTF-8 byte costs one token, with fixed
+structural overhead for messages and tools. This model-independent rule is
+intentionally conservative for common BPE tokenizers; multimodal/unknown input
+uses a configured fallback.
 
 ## Token Reservation
 

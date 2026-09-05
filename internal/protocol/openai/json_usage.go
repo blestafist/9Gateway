@@ -3,7 +3,9 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 
 	"github.com/pestit/9gateway/internal/accounting"
 )
@@ -50,13 +52,16 @@ func ParseJSONUsage(data []byte) (JSONUsageResult, error) {
 		return JSONUsageResult{}, fmt.Errorf("%w: expected a JSON object", ErrMalformedJSON)
 	}
 
-	var response jsonUsageResponse
-	if err := json.Unmarshal(data, &response); err != nil {
+	root, err := scanKnownObjectMembers(data, map[string]struct{}{"usage": {}})
+	if err != nil {
+		if errors.Is(err, errDuplicateKnownMember) {
+			return JSONUsageResult{}, fmt.Errorf("%w: root usage", ErrInvalidJSONUsage)
+		}
 		// Do not include encoding/json's error text: keeping this independent of
 		// the input protects response secrets from observation errors.
 		return JSONUsageResult{}, ErrMalformedJSON
 	}
-	return parseJSONUsageObject(response.Usage)
+	return parseJSONUsageObject(root["usage"])
 }
 
 // parseJSONUsageObject normalizes one known usage object. Keeping this helper
@@ -149,10 +154,6 @@ func parseJSONUsageObject(raw json.RawMessage) (JSONUsageResult, error) {
 // the end of the parser name.
 func ParseUsageJSON(data []byte) (JSONUsageResult, error) { return ParseJSONUsage(data) }
 
-type jsonUsageResponse struct {
-	Usage json.RawMessage `json:"usage"`
-}
-
 type jsonUsageFields struct {
 	PromptTokens            json.RawMessage `json:"prompt_tokens"`
 	CompletionTokens        json.RawMessage `json:"completion_tokens"`
@@ -171,15 +172,21 @@ type jsonTokenDetails struct {
 }
 
 func decodeJSONUsageObject(raw json.RawMessage) (jsonUsageFields, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
+	members, err := scanKnownObjectMembers(raw, knownUsageFields)
+	if err != nil {
 		return jsonUsageFields{}, fmt.Errorf("%w: usage", ErrInvalidJSONUsage)
 	}
-	var fields jsonUsageFields
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return jsonUsageFields{}, fmt.Errorf("%w: usage", ErrInvalidJSONUsage)
-	}
-	return fields, nil
+	return jsonUsageFields{
+		PromptTokens:            members["prompt_tokens"],
+		CompletionTokens:        members["completion_tokens"],
+		InputTokens:             members["input_tokens"],
+		OutputTokens:            members["output_tokens"],
+		TotalTokens:             members["total_tokens"],
+		PromptTokensDetails:     members["prompt_tokens_details"],
+		CompletionTokensDetails: members["completion_tokens_details"],
+		InputTokensDetails:      members["input_tokens_details"],
+		OutputTokensDetails:     members["output_tokens_details"],
+	}, nil
 }
 
 func decodeKnownCount(raw json.RawMessage, name string) (*int64, error) {
@@ -221,15 +228,72 @@ func decodeReasoningDetails(raw json.RawMessage, name string) (*int64, bool, err
 }
 
 func decodeTokenDetailsObject(raw json.RawMessage, name string) (jsonTokenDetails, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
+	members, err := scanKnownObjectMembers(raw, knownDetailFields)
+	if err != nil {
 		return jsonTokenDetails{}, fmt.Errorf("%w: %s", ErrInvalidJSONUsage, name)
 	}
-	var fields jsonTokenDetails
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return jsonTokenDetails{}, fmt.Errorf("%w: %s", ErrInvalidJSONUsage, name)
+	return jsonTokenDetails{
+		CachedTokens:    members["cached_tokens"],
+		ReasoningTokens: members["reasoning_tokens"],
+	}, nil
+}
+
+var (
+	errDuplicateKnownMember = errors.New("duplicate known JSON member")
+	knownUsageFields        = map[string]struct{}{
+		"prompt_tokens": {}, "completion_tokens": {}, "input_tokens": {}, "output_tokens": {},
+		"total_tokens": {}, "prompt_tokens_details": {}, "completion_tokens_details": {},
+		"input_tokens_details": {}, "output_tokens_details": {},
 	}
-	return fields, nil
+	knownDetailFields = map[string]struct{}{"cached_tokens": {}, "reasoning_tokens": {}}
+)
+
+// scanKnownObjectMembers is a small strictness boundary for the known usage
+// surface. encoding/json intentionally accepts duplicate object members and
+// keeps only one value when decoding into a struct or map. That behavior can
+// hide an invalid earlier known value, so this scanner rejects duplicate known
+// names while retaining the usual unknown-field tolerance. It returns no input
+// data in its errors.
+func scanKnownObjectMembers(raw []byte, known map[string]struct{}) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, errors.New("malformed JSON object")
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, errors.New("expected JSON object")
+	}
+
+	members := make(map[string]json.RawMessage)
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			return nil, errors.New("malformed JSON object")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, errors.New("malformed JSON object")
+		}
+		if _, isKnown := known[key]; isKnown {
+			if _, duplicate := seen[key]; duplicate {
+				return nil, errDuplicateKnownMember
+			}
+			seen[key] = struct{}{}
+		}
+		members[key] = value
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return nil, errors.New("malformed JSON object")
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("malformed JSON object")
+	}
+	return members, nil
 }
 
 func isJSONNull(raw json.RawMessage) bool {

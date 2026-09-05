@@ -106,6 +106,28 @@ func TestParseJSONUsageRejectsMalformedKnownDataWithoutBodyFragments(t *testing.
 	}
 }
 
+func TestParseJSONUsageRejectsDuplicateKnownMembers(t *testing.T) {
+	for _, data := range []string{
+		`{"usage":{"prompt_tokens":1},"usage":{"prompt_tokens":2}}`,
+		`{"usage":{"prompt_tokens":-1,"prompt_tokens":10}}`,
+		`{"usage":{"prompt_tokens":1,"prompt_tokens":2}}`,
+		`{"usage":{"prompt_tokens":1,"input_tokens":2,"input_tokens":3}}`,
+		`{"usage":{"total_tokens":1,"total_tokens":2}}`,
+		`{"usage":{"prompt_tokens_details":{"cached_tokens":1,"cached_tokens":2}}}`,
+		`{"usage":{"completion_tokens_details":{"reasoning_tokens":1,"reasoning_tokens":2}}}`,
+		`{"usage":{"prompt_tokens_details":{},"prompt_tokens_details":{}}}`,
+		`{"usage":{"input_tokens_details":{},"input_tokens_details":{}}}`,
+	} {
+		result, err := ParseJSONUsage([]byte(data))
+		if !errors.Is(err, ErrInvalidJSONUsage) || result.Observed {
+			t.Fatalf("ParseJSONUsage(%s) = %+v, %v; want invalid and unobserved", data, result, err)
+		}
+		if strings.Contains(err.Error(), "-1") || strings.Contains(err.Error(), data) {
+			t.Fatalf("duplicate error leaked payload: %v", err)
+		}
+	}
+}
+
 func TestParseJSONUsageRejectsDerivedTotalOverflowAndDoesNotModifyInput(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":9223372036854775807,"output_tokens":1}}`)
 	wantData := append([]byte(nil), data...)

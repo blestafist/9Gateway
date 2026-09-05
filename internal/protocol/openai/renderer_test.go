@@ -29,7 +29,7 @@ func TestRenderChatCompletionRendersChoicesToolCallsUsageAndEscaping(t *testing.
 				FinishReason: nil,
 			},
 		},
-		Usage: UsageObservation{InputTokens: intPointer(11), OutputTokens: intPointer(7), TotalTokens: intPointer(18)},
+		Usage: UsageObservation{InputTokens: int64Pointer(11), OutputTokens: int64Pointer(7), TotalTokens: int64Pointer(18)},
 	}
 
 	data, err := RenderChatCompletion(state)
@@ -97,7 +97,7 @@ func TestRenderChatCompletionOmitsAbsentUsage(t *testing.T) {
 func TestRenderChatCompletionRejectsEmptyState(t *testing.T) {
 	for _, state := range []AccumulatorState{
 		{},
-		{Usage: UsageObservation{TotalTokens: intPointer(1)}},
+		{Usage: UsageObservation{TotalTokens: int64Pointer(1)}},
 		{Choices: []AccumulatedChoice{{Message: AccumulatedMessage{}}}},
 	} {
 		if data, err := RenderChatCompletion(state); !errors.Is(err, ErrInvalidAccumulatorState) || data != nil {

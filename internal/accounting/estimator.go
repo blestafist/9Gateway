@@ -62,9 +62,12 @@ const (
 	// ApproximateEstimatorDefaultFallback is deliberately the same safe value
 	// as the deployment default, without making accounting depend on config.
 	ApproximateEstimatorDefaultFallback int64 = 4 * 1024
-	approximateBytesPerToken                  = int64(4)
-	messageFrameTokens                        = int64(4)
-	toolFrameTokens                           = int64(8)
+	// approximateBytesPerToken is retained only for compatibility with the
+	// checked byte-count helpers below; text estimation itself uses one token
+	// per UTF-8 byte, a model-independent conservative upper bound for BPE.
+	approximateBytesPerToken = int64(1)
+	messageFrameTokens       = int64(4)
+	toolFrameTokens          = int64(8)
 )
 
 // ApproximateEstimator implements the T084 estimate strategy. It accepts only
@@ -72,12 +75,13 @@ const (
 // caller. Model is accepted to satisfy TokenEstimator, but is intentionally
 // unused because this is one model-independent approximation.
 //
-// The approximation is deliberately conservative and deterministic:
-// each non-empty textual value costs ceil(UTF-8 bytes / 4) + 1 token, each
-// message costs four framing tokens, and each tool costs eight framing tokens.
-// Tool schema JSON is treated as a raw fragment and costs the same byte rule;
-// it is not recursively decoded. Unsupported or malformed input uses the
-// configured fallback and is marked unknown.
+// The approximation is deliberately conservative and deterministic: each UTF-8
+// byte in a textual value costs one token, each message costs four framing
+// tokens, and each tool costs eight framing tokens. Tool schema JSON is treated
+// as a raw fragment and costs one token per byte; it is not recursively decoded.
+// This model-independent rule avoids the undercounting possible with common BPE
+// tokenizers when using a fixed bytes-per-token ratio. Unsupported or malformed
+// input uses the configured fallback and is marked unknown.
 //
 // Bifrost provenance review (03ab391865710462302bbcf52dca2f32682b91b5,
 // branch dev): inspected core/providers/bedrock/count_tokens.go and
@@ -453,8 +457,7 @@ func estimateText(text string) (int64, estimateState, error) {
 		return 0, estimateKnown, ErrEstimateOverflow
 	}
 	value := (bytesCount + approximateBytesPerToken - 1) / approximateBytesPerToken
-	value, err := addEstimate(value, 1)
-	return value, estimateKnown, err
+	return value, estimateKnown, nil
 }
 
 func estimateJSONFragment(raw []byte) (int64, error) {
