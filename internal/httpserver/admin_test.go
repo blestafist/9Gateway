@@ -521,6 +521,42 @@ func TestAdminKeyServiceCanceledPreparationDoesNotInsert(t *testing.T) {
 	}
 }
 
+func TestAdminPolicyUpdatePublishesAfterCanceledRequestContext(t *testing.T) {
+	pepper := []byte("policy-cancel-pepper")
+	generated := generatedForAdmin(t, pepper)
+	repository := &cancelingPolicyRepository{records: []storage.APIKeyRecord{{
+		ID: "key", Name: "key", DisplayPrefix: generated.DisplayPrefix, Digest: generated.Digest,
+		Enabled: true, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(), PolicyJSON: `{}`,
+	}}, updated: make(chan struct{}), allowReturn: make(chan struct{})}
+	service, err := newAdminKeyService(repository, pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, updateErr := service.updatePolicy(ctx, "key", true, []byte(`{"allowed_models":["new"]}`))
+		result <- updateErr
+	}()
+	select {
+	case <-repository.updated:
+		cancel()
+		close(repository.allowReturn)
+	case <-time.After(time.Second):
+		t.Fatal("policy update did not reach durable mutation")
+	}
+	if updateErr := <-result; updateErr != nil {
+		t.Fatalf("canceled policy update = %v", updateErr)
+	}
+	if _, err := service.auth.Authenticate(generated.RawKey); err != nil {
+		t.Fatalf("key disappeared after canceled policy update: %v", err)
+	}
+	if !repository.records[0].Enabled || repository.records[0].PolicyJSON != `{"allowed_models":["new"]}` {
+		t.Fatalf("durable policy = %#v", repository.records[0])
+	}
+}
+
 func TestAdminKeyServiceConcurrentCreationsPublishAllKeys(t *testing.T) {
 	repository := &testAdminRepository{}
 	service, err := newAdminKeyService(repository, []byte("pepper"))
@@ -617,6 +653,44 @@ type testAdminRepository struct {
 	blockAfterInsert  bool
 	insertCommitted   chan struct{}
 	allowInsertReturn chan struct{}
+}
+
+type cancelingPolicyRepository struct {
+	records     []storage.APIKeyRecord
+	updated     chan struct{}
+	allowReturn chan struct{}
+}
+
+func (repository *cancelingPolicyRepository) List(ctx context.Context) ([]storage.APIKeyRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return append([]storage.APIKeyRecord(nil), repository.records...), nil
+}
+
+func (repository *cancelingPolicyRepository) Insert(context.Context, storage.APIKeyRecord) error {
+	return nil
+}
+
+func (repository *cancelingPolicyRepository) UpdatePolicy(context.Context, string, bool, string) error {
+	return errors.New("legacy update should not be called")
+}
+
+func (repository *cancelingPolicyRepository) UpdatePolicyRecord(_ context.Context, id string, enabled bool, policy string) (storage.APIKeyRecord, error) {
+	for index := range repository.records {
+		if repository.records[index].ID == id {
+			repository.records[index].Enabled = enabled
+			repository.records[index].PolicyJSON = policy
+			if repository.updated == nil {
+				repository.updated = make(chan struct{})
+				repository.allowReturn = make(chan struct{})
+			}
+			close(repository.updated)
+			<-repository.allowReturn
+			return repository.records[index], nil
+		}
+	}
+	return storage.APIKeyRecord{}, storage.ErrNotFound
 }
 
 func generatedForAdmin(t *testing.T, pepper []byte) auth.GeneratedGatewayKey {

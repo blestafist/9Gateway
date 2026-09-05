@@ -349,10 +349,33 @@ func (repository *APIKeyRepository) UpdatePolicy(ctx context.Context, id string,
 // report SQLite's durable timestamp when the monotonic timestamp guard keeps
 // an existing value.
 func (repository *APIKeyRepository) UpdatePolicyRecord(ctx context.Context, id string, enabled bool, policyJSON string) (APIKeyRecord, error) {
-	if err := repository.UpdatePolicy(ctx, id, enabled, policyJSON); err != nil {
-		return APIKeyRecord{}, err
+	if ctx == nil {
+		return APIKeyRecord{}, errors.New("update api key policy: nil context")
 	}
-	return repository.GetByID(ctx, id)
+	if strings.TrimSpace(id) == "" {
+		return APIKeyRecord{}, ErrInvalidRecord
+	}
+	if repository == nil || repository.database == nil {
+		return APIKeyRecord{}, ErrRepositoryUnavailable
+	}
+	// UPDATE ... RETURNING makes the durable mutation and the result one SQL
+	// statement. In particular, cancellation cannot commit the UPDATE and then
+	// cancel a separate GetByID, leaving callers with no safe publication result.
+	updatedAt := time.Now().UTC().Truncate(time.Second).Unix()
+	row := repository.database.QueryRowContext(ctx, `
+		UPDATE api_keys
+		SET enabled = ?, policy_json = ?, updated_at = max(updated_at, created_at, ?)
+		WHERE id = ?
+		RETURNING id, name, prefix, key_hash, enabled, expires_at, created_at, updated_at, policy_json`,
+		boolInt(enabled), policyJSON, updatedAt, id)
+	record, err := scanAPIKey(row)
+	if errors.Is(err, ErrNotFound) {
+		return APIKeyRecord{}, ErrNotFound
+	}
+	if err != nil {
+		return APIKeyRecord{}, errors.New("update api key policy: database write failed")
+	}
+	return record, nil
 }
 
 // UpdateEnabledAndPolicy is a descriptive alias for UpdatePolicy.
@@ -368,6 +391,9 @@ func scanAPIKey(scanner interface{ Scan(...any) error }) (APIKeyRecord, error) {
 	var createdAt, updatedAt int64
 	if err := scanner.Scan(&record.ID, &record.Name, &record.Prefix, &keyHash, &enabled, &expiresAt,
 		&createdAt, &updatedAt, &record.PolicyJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return APIKeyRecord{}, ErrNotFound
+		}
 		return APIKeyRecord{}, errors.New("read api key: database row is invalid")
 	}
 	if enabled != 0 && enabled != 1 {

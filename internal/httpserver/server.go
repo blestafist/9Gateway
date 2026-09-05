@@ -212,19 +212,46 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	targetURL.RawQuery = request.URL.RawQuery
 	targetURL.Fragment = ""
 
+	principal, authenticated := PrincipalFromContext(request.Context())
+	var concurrencyLease *limiter.Lease
+	var upstreamResponse *http.Response
+	proxyContext, cancelUpstream := context.WithCancel(request.Context())
+	// Install cleanup before request inspection. Restricted model inspection can
+	// read a slow client body, and that work must occupy the same lease as the
+	// eventual upstream lifecycle. The lease is deliberately acquired before
+	// model evaluation, but request-window capacity is still checked only after
+	// a model has been accepted.
+	defer func() {
+		cancelUpstream()
+		if upstreamResponse != nil && upstreamResponse.Body != nil {
+			_ = upstreamResponse.Body.Close()
+		}
+		if request.Body != nil {
+			_ = request.Body.Close()
+		}
+		concurrencyLease.Release()
+	}()
+	if authenticated && handler.concurrencyLimiter != nil && shouldInspectRequestMetadata(request) {
+		concurrencyLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
+		if concurrencyLease == nil {
+			writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
+			return
+		}
+	}
+
 	requestBody, metadata := request.Body, (*openai.RequestMetadata)(nil)
 	if shouldInspectRequestMetadata(request) {
 		requestBody, metadata = inspectChatRequest(request)
 	}
 	if metadata != nil && metadata.Model != "" {
-		if principal, authenticated := PrincipalFromContext(request.Context()); authenticated && !principal.Policy.AllowsModel(metadata.Model) {
+		if authenticated && !principal.Policy.AllowsModel(metadata.Model) {
 			_ = requestBody.Close()
 			writeGatewayError(response, gatewayErrorModelNotAllowed, "model")
 			return
 		}
 	}
 	if handler.requestLimiter != nil {
-		if principal, authenticated := PrincipalFromContext(request.Context()); authenticated {
+		if authenticated {
 			windows := principal.Policy.RequestWindows()
 			if len(windows) != 0 {
 				allowed, resetAt := handler.requestLimiter.Allow(principal.ID, windows)
@@ -238,24 +265,8 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			}
 		}
 	}
-	proxyContext, cancelUpstream := context.WithCancel(request.Context())
-	var concurrencyLease *limiter.Lease
-	var upstreamResponse *http.Response
-	// Cancellation must reach the upstream before any request/response body is
-	// closed and before the lease is returned. Keeping all cleanup in one defer
-	// also covers every internal early return after request-window admission.
-	defer func() {
-		cancelUpstream()
-		if upstreamResponse != nil && upstreamResponse.Body != nil {
-			_ = upstreamResponse.Body.Close()
-		}
-		if requestBody != nil {
-			_ = requestBody.Close()
-		}
-		concurrencyLease.Release()
-	}()
-	if handler.concurrencyLimiter != nil {
-		if principal, authenticated := PrincipalFromContext(request.Context()); authenticated {
+	if concurrencyLease == nil && handler.concurrencyLimiter != nil {
+		if authenticated {
 			concurrencyLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
 			if concurrencyLease == nil {
 				writeGatewayError(response, gatewayErrorConcurrencyLimit, "")

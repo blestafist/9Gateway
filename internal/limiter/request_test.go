@@ -121,3 +121,46 @@ func TestRequestLimiterConcurrentAttemptsDoNotOversubscribe(t *testing.T) {
 		t.Fatalf("admitted %d concurrent requests, want %d", admittedCount, windows[0].Amount)
 	}
 }
+
+func TestRequestLimiterAdjudicatesClockAtLockedBoundary(t *testing.T) {
+	clock := &testClock{now: time.Unix(59, 0).UTC()}
+	limiter := NewRequestLimiter(clock.Now)
+	windows := []auth.RequestWindow{{Amount: 1, Duration: time.Minute}}
+	if allowed, _ := limiter.Allow("key", windows); !allowed {
+		t.Fatal("initial request rejected")
+	}
+
+	// A pre-lock timestamp observes an unlocked mutex and is stale; a clock
+	// read made after locking observes the held mutex and returns the boundary.
+	// This directly distinguishes the old pre-lock sampling race without sleep.
+	limiter.now = func() time.Time {
+		if limiter.mu.TryLock() {
+			limiter.mu.Unlock()
+			return time.Unix(59, 0).UTC()
+		}
+		return time.Unix(60, 0).UTC()
+	}
+	if allowed, _ := limiter.Allow("key", windows); !allowed {
+		t.Fatal("boundary request with effective locked time rejected")
+	}
+	if allowed, _ := limiter.Allow("key", windows); allowed {
+		t.Fatal("stale boundary bucket oversubscribed capacity")
+	}
+}
+
+func TestRequestLimiterBackwardThenForwardPreservesCapacity(t *testing.T) {
+	clock := &testClock{now: time.Unix(120, 0).UTC()}
+	limiter := NewRequestLimiter(clock.Now)
+	windows := []auth.RequestWindow{{Amount: 2, Duration: time.Minute}}
+	if allowed, _ := limiter.Allow("key", windows); !allowed {
+		t.Fatal("initial request rejected")
+	}
+	clock.Set(time.Unix(1, 0).UTC())
+	if allowed, _ := limiter.Allow("key", windows); !allowed {
+		t.Fatal("backward-clock request should consume remaining capacity")
+	}
+	clock.Set(time.Unix(120, 0).UTC())
+	if allowed, _ := limiter.Allow("key", windows); allowed {
+		t.Fatal("backward then forward movement reset active capacity")
+	}
+}

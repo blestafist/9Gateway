@@ -24,6 +24,9 @@ type RequestLimiter struct {
 	now    Clock
 	mu     sync.Mutex
 	counts map[counterKey]windowCounter
+	// lastNow is guarded by mu and prevents a backward clock movement from
+	// replacing an active bucket with an older one.
+	lastNow time.Time
 }
 
 type counterKey struct {
@@ -62,9 +65,9 @@ func (limiter *RequestLimiter) Allow(keyID string, windows []RequestWindow) (all
 		return false, time.Time{}
 	}
 
-	now := limiter.currentTime()
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
+	now := limiter.currentTimeLocked()
 	if limiter.counts == nil {
 		limiter.counts = make(map[counterKey]windowCounter)
 	}
@@ -140,7 +143,9 @@ func (limiter *RequestLimiter) RetryAfterSeconds(resetAt time.Time) int {
 	if limiter == nil || resetAt.IsZero() {
 		return 0
 	}
-	return RetryAfterSecondsAt(limiter.currentTime(), resetAt)
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	return RetryAfterSecondsAt(limiter.currentTimeLocked(), resetAt)
 }
 
 // RetryAfterSecondsAt converts a reset time into a positive delta-seconds
@@ -175,18 +180,25 @@ func (limiter *RequestLimiter) Len() int {
 	if limiter == nil {
 		return 0
 	}
-	now := limiter.currentTime()
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
+	now := limiter.currentTimeLocked()
 	limiter.discardExpiredLocked(now)
 	return len(limiter.counts)
 }
 
-func (limiter *RequestLimiter) currentTime() time.Time {
+func (limiter *RequestLimiter) currentTimeLocked() time.Time {
+	var now time.Time
 	if limiter.now == nil {
-		return time.Now().UTC()
+		now = time.Now().UTC()
+	} else {
+		now = limiter.now().UTC()
 	}
-	return limiter.now().UTC()
+	if !limiter.lastNow.IsZero() && now.Before(limiter.lastNow) {
+		return limiter.lastNow
+	}
+	limiter.lastNow = now
+	return now
 }
 
 func (limiter *RequestLimiter) discardExpiredLocked(now time.Time) {

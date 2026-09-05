@@ -273,9 +273,13 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 	}
 	var persisted storage.APIKeyRecord
 	if recordUpdater, ok := service.repository.(apiKeyPolicyRecordUpdater); ok {
-		persisted, err = recordUpdater.UpdatePolicyRecord(ctx, id, enabled, string(policyJSON))
+		// The snapshot has already been prepared and the mutation is now the
+		// commit point. Finish that operation independently of the request's
+		// cancellation so a database commit cannot succeed without publishing its
+		// returned record.
+		persisted, err = recordUpdater.UpdatePolicyRecord(context.WithoutCancel(ctx), id, enabled, string(policyJSON))
 	} else {
-		err = updater.UpdatePolicy(ctx, id, enabled, string(policyJSON))
+		err = updater.UpdatePolicy(context.WithoutCancel(ctx), id, enabled, string(policyJSON))
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -287,18 +291,8 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		replacement = persisted
 	} else {
 		// Compatibility repositories may only expose the legacy update method.
-		// Read back the durable row so their response cannot report a stale
-		// pre-update timestamp.
-		records, listErr := service.repository.List(ctx)
-		if listErr != nil {
-			return updatedAdminKey{}, errAdminKeyCreation
-		}
-		for _, record := range records {
-			if record.ID == id {
-				replacement = record
-				break
-			}
-		}
+		// The prepared replacement is sufficient for authentication publication;
+		// do not perform a cancelable read after a known durable update.
 	}
 	service.auth.Publish(prepared)
 	return updatedAdminKeyFromRecord(replacement, policyJSON), nil
