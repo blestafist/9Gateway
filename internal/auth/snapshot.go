@@ -82,24 +82,32 @@ type Snapshot struct {
 // Authenticator owns the process pepper and atomically publishes complete
 // snapshots. The pepper is deliberately not part of Snapshot.
 type Authenticator struct {
-	pepper []byte
-	now    Clock
-	state  atomic.Pointer[Snapshot]
+	pepper    []byte
+	now       Clock
+	tokenMode TokenMode
+	state     atomic.Pointer[Snapshot]
 }
 
 // NewAuthenticator creates an authenticator with an initially empty snapshot.
-func NewAuthenticator(pepper []byte, now Clock) (*Authenticator, error) {
+func NewAuthenticator(pepper []byte, now Clock, tokenModes ...TokenMode) (*Authenticator, error) {
 	if len(pepper) == 0 {
 		return nil, ErrInvalidPepper
 	}
-	authenticator := &Authenticator{pepper: append([]byte(nil), pepper...), now: now}
+	tokenMode := TokenModeEstimate
+	if len(tokenModes) > 1 || len(tokenModes) == 1 && tokenModes[0] != TokenModeUsageOnly && tokenModes[0] != TokenModeEstimate {
+		return nil, ErrInvalidPolicy
+	}
+	if len(tokenModes) == 1 {
+		tokenMode = tokenModes[0]
+	}
+	authenticator := &Authenticator{pepper: append([]byte(nil), pepper...), now: now, tokenMode: tokenMode}
 	authenticator.state.Store(emptySnapshot())
 	return authenticator, nil
 }
 
 // NewSnapshotAuthenticator is an equivalent descriptive constructor.
-func NewSnapshotAuthenticator(pepper []byte, now Clock) (*Authenticator, error) {
-	return NewAuthenticator(pepper, now)
+func NewSnapshotAuthenticator(pepper []byte, now Clock, tokenModes ...TokenMode) (*Authenticator, error) {
+	return NewAuthenticator(pepper, now, tokenModes...)
 }
 
 // Load validates and builds a complete replacement before publishing it. If
@@ -123,7 +131,7 @@ func (authenticator *Authenticator) Prepare(records []Record) (*Snapshot, error)
 	if authenticator == nil || len(authenticator.pepper) == 0 {
 		return nil, ErrInvalidPepper
 	}
-	next, err := buildSnapshot(records)
+	next, err := buildSnapshot(records, authenticator.tokenMode)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +224,7 @@ func (authenticator *Authenticator) authenticateSnapshot(current *Snapshot, rawK
 	return Principal{}, ErrInvalidCredential
 }
 
-func buildSnapshot(records []Record) (*Snapshot, error) {
+func buildSnapshot(records []Record, tokenMode TokenMode) (*Snapshot, error) {
 	next := emptySnapshot()
 	for _, record := range records {
 		prefix := record.DisplayPrefix
@@ -240,7 +248,7 @@ func buildSnapshot(records []Record) (*Snapshot, error) {
 		} else if len(record.Policy) != 0 && !bytes.Equal(record.Policy, policy) {
 			return nil, errors.New("invalid authentication record")
 		}
-		effectivePolicy, err := ParsePolicyJSON(policy)
+		effectivePolicy, err := ParsePolicyJSONWithTokenMode(policy, tokenMode)
 		if err != nil {
 			return nil, err
 		}

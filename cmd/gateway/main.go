@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/httpserver"
 	"github.com/pestit/9gateway/internal/storage"
@@ -53,7 +54,7 @@ func run() error {
 		}
 	}()
 
-	gatewayHandler, err := httpserver.NewHandlerWithAdminAndCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), completionLogger)
+	gatewayHandler, err := httpserver.NewHandlerWithAdminAndCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), completionLogger, auth.TokenMode(cfg.Tokenizer.Mode))
 	if err != nil {
 		return err
 	}

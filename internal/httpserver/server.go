@@ -37,29 +37,29 @@ func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey str
 // NewHandlerWithAdmin adds the bootstrap administration endpoint while
 // retaining the transparent gateway routes. The repository is intentionally
 // accepted through its domain API rather than a database handle.
-func NewHandlerWithAdmin(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository) (http.Handler, error) {
-	return NewHandlerWithAdminAndCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, nil)
+func NewHandlerWithAdmin(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return NewHandlerWithAdminAndCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, nil, tokenModes...)
 }
 
 // NewHandlerWithAdminAndCompletionLogger builds a handler with admin key
 // creation and the caller-owned completion logger.
-func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, completionLogger *CompletionLogger) (http.Handler, error) {
-	return NewHandlerWithAdminAndRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, limiter.NewRequestLimiter(nil), completionLogger)
+func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, completionLogger *CompletionLogger, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return NewHandlerWithAdminAndRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, limiter.NewRequestLimiter(nil), completionLogger, tokenModes...)
 }
 
 // NewHandlerWithAdminAndRequestLimiter builds the administration and public
 // routes with an explicitly owned request limiter. This form keeps the clock
 // injectable for embedders and HTTP tests while the convenience constructors
 // use the wall clock.
-func NewHandlerWithAdminAndRequestLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, completionLogger *CompletionLogger) (http.Handler, error) {
-	return NewHandlerWithAdminAndLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, limiter.NewConcurrencyLimiter(), completionLogger)
+func NewHandlerWithAdminAndRequestLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, completionLogger *CompletionLogger, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return NewHandlerWithAdminAndLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, limiter.NewConcurrencyLimiter(), completionLogger, tokenModes...)
 }
 
 // NewHandlerWithAdminAndLimiters builds the administration and public routes
 // with explicitly owned request-window and concurrency limiters. Both
 // limiters are process-local and may be shared by handlers when an application
 // needs one policy domain across more than one listener.
-func NewHandlerWithAdminAndLimiters(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger) (http.Handler, error) {
+func NewHandlerWithAdminAndLimiters(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenModes ...auth.TokenMode) (http.Handler, error) {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
@@ -67,7 +67,7 @@ func NewHandlerWithAdminAndLimiters(upstreamClient *http.Client, upstreamBaseURL
 		concurrencyLimiter = limiter.NewConcurrencyLimiter()
 	}
 	proxy := newProxyHandlerWithLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter)
-	service, err := newAdminKeyService(repository, []byte(authPepper))
+	service, err := newAdminKeyService(repository, []byte(authPepper), tokenModes...)
 	if err != nil {
 		return nil, err
 	}

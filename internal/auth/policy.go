@@ -25,15 +25,49 @@ type RequestWindow struct {
 	Duration time.Duration
 }
 
+// TokenMode selects the source of token information used by later accounting
+// stages. It is kept in auth rather than config so compiled policies do not
+// depend on the deployment configuration package.
+type TokenMode string
+
+const (
+	TokenModeUsageOnly TokenMode = "usage_only"
+	TokenModeEstimate  TokenMode = "estimate"
+)
+
+// TokenWindow is one normalized fixed token-count window. Amount is int64 to
+// match the checked token-count arithmetic used by accounting and the future
+// token limiter.
+type TokenWindow struct {
+	Amount   int64
+	Duration time.Duration
+}
+
+// Bifrost provenance review: commit 03ab391865710462302bbcf52dca2f32682b91b5
+// (branch dev), framework/configstore/tables/ratelimit.go and
+// plugins/governance/ratelimitreset_test.go were inspected for token/request
+// limit fields, duration validation, and reset behavior. Bifrost is Apache-2.0
+// under LICENSE; THIRD_PARTY_NOTICES.md was also checked for file-level and
+// dependency obligations. No source is copied or adapted and no dependency is
+// added: this policy needs strict immutable JSON compilation, while Bifrost's
+// mutable provider-governance tables are a different boundary.
+
 type policyDocument struct {
 	AllowedModels  []string                `json:"allowed_models"`
 	DeniedModels   []string                `json:"denied_models"`
 	RequestWindows []requestWindowDocument `json:"request_windows"`
+	TokenWindows   []tokenWindowDocument   `json:"token_windows"`
+	TokenMode      *TokenMode              `json:"token_mode"`
 	MaxConcurrency *int                    `json:"max_concurrent_requests"`
 }
 
 type requestWindowDocument struct {
 	Amount   int    `json:"amount"`
+	Duration string `json:"duration"`
+}
+
+type tokenWindowDocument struct {
+	Amount   int64  `json:"amount"`
 	Duration string `json:"duration"`
 }
 
@@ -44,6 +78,9 @@ type EffectivePolicy struct {
 	allowedModels  []compiledModelPattern
 	deniedModels   []compiledModelPattern
 	requestWindows []RequestWindow
+	tokenWindows   []TokenWindow
+	tokenMode      TokenMode
+	tokenModeSet   bool
 	maxConcurrency int
 }
 
@@ -51,9 +88,29 @@ type EffectivePolicy struct {
 // A nil document represents the empty, unrestricted policy. Empty JSON
 // objects are unrestricted as well.
 func ParsePolicy(data []byte) (EffectivePolicy, error) {
+	return parsePolicy(data, TokenModeEstimate)
+}
+
+// ParsePolicyWithTokenMode compiles a policy using the validated deployment
+// default for an omitted token_mode. The original JSON remains untouched, so
+// inheritance is never serialized as an invented per-key override.
+func ParsePolicyWithTokenMode(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
+	return parsePolicy(data, defaultMode)
+}
+
+// ParsePolicyWithDefaultTokenMode is a descriptive alias for
+// ParsePolicyWithTokenMode.
+func ParsePolicyWithDefaultTokenMode(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
+	return ParsePolicyWithTokenMode(data, defaultMode)
+}
+
+func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
+	if defaultMode != TokenModeUsageOnly && defaultMode != TokenModeEstimate {
+		return EffectivePolicy{}, ErrInvalidPolicy
+	}
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 {
-		return EffectivePolicy{}, nil
+		return EffectivePolicy{tokenMode: defaultMode}, nil
 	}
 	if data[0] != '{' {
 		return EffectivePolicy{}, ErrInvalidPolicy
@@ -65,7 +122,7 @@ func ParsePolicy(data []byte) (EffectivePolicy, error) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return EffectivePolicy{}, ErrInvalidPolicy
 	}
-	for _, field := range []string{"allowed_models", "denied_models", "request_windows", "max_concurrent_requests"} {
+	for _, field := range []string{"allowed_models", "denied_models", "request_windows", "token_windows", "token_mode", "max_concurrent_requests"} {
 		if value, present := fields[field]; present && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return EffectivePolicy{}, ErrInvalidPolicy
 		}
@@ -80,7 +137,7 @@ func ParsePolicy(data []byte) (EffectivePolicy, error) {
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return EffectivePolicy{}, ErrInvalidPolicy
 	}
-	policy := EffectivePolicy{maxConcurrency: 0}
+	policy := EffectivePolicy{maxConcurrency: 0, tokenMode: defaultMode}
 	seenAllowed := make(map[string]struct{}, len(document.AllowedModels))
 	for _, pattern := range document.AllowedModels {
 		if strings.TrimSpace(pattern) == "" || !utf8.ValidString(pattern) {
@@ -128,6 +185,29 @@ func ParsePolicy(data []byte) (EffectivePolicy, error) {
 		seenWindows[normalized] = struct{}{}
 		policy.requestWindows = append(policy.requestWindows, normalized)
 	}
+	seenTokenWindows := make(map[TokenWindow]struct{}, len(document.TokenWindows))
+	for _, window := range document.TokenWindows {
+		if window.Amount <= 0 || window.Duration == "" {
+			return EffectivePolicy{}, ErrInvalidPolicy
+		}
+		duration, err := time.ParseDuration(window.Duration)
+		if err != nil || duration <= 0 {
+			return EffectivePolicy{}, ErrInvalidPolicy
+		}
+		normalized := TokenWindow{Amount: window.Amount, Duration: duration}
+		if _, exists := seenTokenWindows[normalized]; exists {
+			return EffectivePolicy{}, ErrInvalidPolicy
+		}
+		seenTokenWindows[normalized] = struct{}{}
+		policy.tokenWindows = append(policy.tokenWindows, normalized)
+	}
+	if document.TokenMode != nil {
+		if *document.TokenMode != TokenModeUsageOnly && *document.TokenMode != TokenModeEstimate {
+			return EffectivePolicy{}, ErrInvalidPolicy
+		}
+		policy.tokenMode = *document.TokenMode
+		policy.tokenModeSet = true
+	}
 	if document.MaxConcurrency != nil {
 		// Zero is the documented unlimited value. Negative values are invalid.
 		if *document.MaxConcurrency < 0 {
@@ -141,6 +221,18 @@ func ParsePolicy(data []byte) (EffectivePolicy, error) {
 // ParsePolicyJSON is the explicit spelling used by storage-loading callers.
 func ParsePolicyJSON(data []byte) (EffectivePolicy, error) {
 	return ParsePolicy(data)
+}
+
+// ParsePolicyJSONWithTokenMode is the storage-loading spelling of
+// ParsePolicyWithTokenMode.
+func ParsePolicyJSONWithTokenMode(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
+	return ParsePolicyWithTokenMode(data, defaultMode)
+}
+
+// ParsePolicyJSONWithDefaultTokenMode is a descriptive alias for
+// ParsePolicyJSONWithTokenMode.
+func ParsePolicyJSONWithDefaultTokenMode(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
+	return ParsePolicyJSONWithTokenMode(data, defaultMode)
 }
 
 // CompilePolicy is a descriptive alias for ParsePolicy.
@@ -166,6 +258,23 @@ func (policy EffectivePolicy) RequestWindows() []RequestWindow {
 // RequestLimits is a compatibility spelling for RequestWindows.
 func (policy EffectivePolicy) RequestLimits() []RequestWindow {
 	return policy.RequestWindows()
+}
+
+// TokenWindows returns a copy of all normalized token windows.
+func (policy EffectivePolicy) TokenWindows() []TokenWindow {
+	return append([]TokenWindow(nil), policy.tokenWindows...)
+}
+
+// TokenMode returns the effective mode, including the deployment default when
+// the stored policy omitted token_mode.
+func (policy EffectivePolicy) TokenMode() TokenMode {
+	return policy.tokenMode
+}
+
+// TokenModeOverride reports only a mode explicitly present in stored JSON.
+// The second result is false for inherited deployment defaults.
+func (policy EffectivePolicy) TokenModeOverride() (TokenMode, bool) {
+	return policy.tokenMode, policy.tokenModeSet
 }
 
 // MaxConcurrency returns zero when concurrency is unrestricted.

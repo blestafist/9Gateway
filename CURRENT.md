@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T086`.
+Done: `T001`-`T087`.
 
-Current: `T087` - add token windows to key policy.
+Current: `T088` - reserve generic token windows.
 
-Queued: `T087`-`T100` in dependency order from `TASKS.md`.
+Queued: `T088`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 

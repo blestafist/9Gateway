@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -371,6 +372,85 @@ func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) 
 	responseUpdatedAt, err := time.Parse(time.RFC3339, firstUpdatedAt)
 	if err != nil || !reopenedRecord.UpdatedAt.Equal(responseUpdatedAt) {
 		t.Fatalf("reopened timestamp = %v, response %q", reopenedRecord.UpdatedAt, firstUpdatedAt)
+	}
+}
+
+func TestAdminUpdatePolicyHTTPTokenWindowsModesAndReopen(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	databasePath := filepath.Join(t.TempDir(), "token-policy.db")
+	database, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := storage.NewAPIKeyRepository(database)
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), upstream.URL, "upstream-secret", "admin-secret", "pepper", repository, auth.TokenModeUsageOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := httptest.NewServer(handler)
+	createdResponse, err := http.DefaultClient.Do(newAdminRequest(t, gateway.URL, `{"name":"tokens"}`, "admin-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	decodeResponse(t, createdResponse, &created)
+	if createdResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", createdResponse.StatusCode)
+	}
+	policyJSON := `{"allowed_models":["token-model"],"request_windows":[{"amount":2,"duration":"1m"}],"token_windows":[{"amount":100,"duration":"1h"},{"amount":1000,"duration":"24h"}],"token_mode":"estimate","max_concurrent_requests":2}`
+	update := newPolicyRequest(t, gateway.URL, created.ID, `{"enabled":true,"policy":`+policyJSON+`}`, "admin-secret")
+	update.Method = http.MethodPut
+	updatedResponse, err := http.DefaultClient.Do(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated struct {
+		Policy json.RawMessage `json:"Policy"`
+	}
+	decodeResponse(t, updatedResponse, &updated)
+	if updatedResponse.StatusCode != http.StatusOK || string(updated.Policy) != policyJSON {
+		t.Fatalf("token policy update = %d/%s", updatedResponse.StatusCode, updated.Policy)
+	}
+	service, err := newAdminKeyService(repository, []byte("pepper"), auth.TokenModeUsageOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := service.auth.Authenticate(created.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(principal.Policy.TokenWindows(), []auth.TokenWindow{{Amount: 100, Duration: time.Hour}, {Amount: 1000, Duration: 24 * time.Hour}}) || principal.Policy.TokenMode() != auth.TokenModeEstimate {
+		t.Fatalf("published token policy = %#v/%q", principal.Policy.TokenWindows(), principal.Policy.TokenMode())
+	}
+	if mode, ok := principal.Policy.TokenModeOverride(); !ok || mode != auth.TokenModeEstimate {
+		t.Fatalf("published token mode override = %q/%t", mode, ok)
+	}
+	if strings.Contains(string(principal.PolicyJSON), created.Key) {
+		t.Fatal("published policy contains raw key")
+	}
+
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gateway.Close()
+	reopened, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	reopenedService, err := newAdminKeyService(storage.NewAPIKeyRepository(reopened), []byte("pepper"), auth.TokenModeUsageOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenedPrincipal, err := reopenedService.auth.Authenticate(created.Key)
+	if err != nil || len(reopenedPrincipal.Policy.TokenWindows()) != 2 || reopenedPrincipal.Policy.TokenMode() != auth.TokenModeEstimate {
+		t.Fatalf("reopened token policy = %#v/%q, error %v", reopenedPrincipal.Policy.TokenWindows(), reopenedPrincipal.Policy.TokenMode(), err)
 	}
 }
 

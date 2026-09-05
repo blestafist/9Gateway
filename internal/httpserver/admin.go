@@ -62,11 +62,11 @@ type adminKeyService struct {
 	refreshMu  sync.Mutex
 }
 
-func newAdminKeyService(repository apiKeyRepository, pepper []byte) (*adminKeyService, error) {
+func newAdminKeyService(repository apiKeyRepository, pepper []byte, tokenModes ...auth.TokenMode) (*adminKeyService, error) {
 	if repository == nil {
 		return nil, errAdminKeyCreation
 	}
-	authenticator, err := auth.NewAuthenticator(pepper, nil)
+	authenticator, err := auth.NewAuthenticator(pepper, nil, tokenModes...)
 	if err != nil {
 		return nil, errAdminKeyCreation
 	}
