@@ -147,6 +147,13 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	targetURL.Fragment = ""
 
 	requestBody, metadata := inspectChatRequest(request)
+	if metadata != nil && metadata.Model != "" {
+		if principal, authenticated := PrincipalFromContext(request.Context()); authenticated && !principal.Policy.AllowsModel(metadata.Model) {
+			_ = requestBody.Close()
+			writeGatewayError(response, gatewayErrorModelNotAllowed, "model")
+			return
+		}
+	}
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), requestBody)
 	if err != nil {
 		writeGatewayError(response, gatewayErrorInternal, "")
