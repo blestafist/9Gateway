@@ -2,9 +2,9 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T071`.
+Done: `T001`-`T072`.
 
-Current: `T072` - authenticate all public v1 requests.
+Current: `T073` - define and validate key policy JSON.
 
 Queued: `T073`-`T080` in dependency order in `TASKS.md`.
 

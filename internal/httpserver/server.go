@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/protocol/openai"
 )
 
@@ -25,11 +26,11 @@ const requestInspectionLimit int64 = 64 * 1024
 type requestIDContextKey struct{}
 
 // NewHandler returns the gateway's HTTP handler using the provided upstream client.
-func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string) http.Handler {
+func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticators ...*auth.Authenticator) http.Handler {
 	// The convenience API does not own a completion worker. Applications that
 	// want asynchronous completion logging should construct and own one with
 	// NewCompletionLogger and pass it to NewHandlerWithCompletionLogger.
-	return NewHandlerWithCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, nil)
+	return NewHandlerWithCompletionLogger(upstreamClient, upstreamBaseURL, upstreamAPIKey, nil, authenticators...)
 }
 
 // NewHandlerWithAdmin adds the bootstrap administration endpoint while
@@ -48,15 +49,24 @@ func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstrea
 		return nil, err
 	}
 	admin := &adminHandler{credential: adminCredential, service: service}
-	router := routeWithAdmin(proxy, admin)
+	router := routeWithAdmin(proxy, admin, service.auth)
 	return newHandlerWithCompletionLogger(completionLogger, router), nil
+}
+
+// NewHandlerWithAuthenticator builds a handler whose public /v1/* routes
+// require a gateway bearer key. The authenticator is expected to be populated
+// before serving requests and can be atomically refreshed by its owner.
+func NewHandlerWithAuthenticator(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, completionLogger *CompletionLogger) http.Handler {
+	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
+	router := routeWithAuthenticator(proxy, nil, authenticator)
+	return newHandlerWithCompletionLogger(completionLogger, router)
 }
 
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
 // completion logger. The process entry point should shut that logger down.
-func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, completionLogger *CompletionLogger) http.Handler {
+func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, completionLogger *CompletionLogger, authenticators ...*auth.Authenticator) http.Handler {
 	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
-	router := route(proxy)
+	router := routeWithAdmin(proxy, nil, authenticators...)
 	return newHandlerWithCompletionLogger(completionLogger, router)
 }
 
@@ -64,7 +74,16 @@ func route(proxy http.Handler) http.Handler {
 	return routeWithAdmin(proxy, nil)
 }
 
-func routeWithAdmin(proxy http.Handler, admin http.Handler) http.Handler {
+func routeWithAdmin(proxy http.Handler, admin http.Handler, authenticators ...*auth.Authenticator) http.Handler {
+	var authenticator *auth.Authenticator
+	if len(authenticators) != 0 {
+		authenticator = authenticators[0]
+	}
+	return routeWithAuthenticator(proxy, admin, authenticator)
+}
+
+func routeWithAuthenticator(proxy http.Handler, admin http.Handler, authenticator *auth.Authenticator) http.Handler {
+	publicV1 := withGatewayAuthentication(authenticator, proxy)
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/health":
@@ -72,7 +91,7 @@ func routeWithAdmin(proxy http.Handler, admin http.Handler) http.Handler {
 		case admin != nil && strings.HasPrefix(request.URL.Path, "/admin/"):
 			admin.ServeHTTP(response, request)
 		case strings.HasPrefix(request.URL.Path, "/v1/"):
-			proxy.ServeHTTP(response, request)
+			publicV1.ServeHTTP(response, request)
 		default:
 			http.NotFound(response, request)
 		}
