@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/streaming"
 )
 
@@ -506,6 +507,108 @@ func TestObserverInvalidUsagePreservesStateAndCanBeReused(t *testing.T) {
 				t.Fatalf("prompt tokens after reuse = %v, want preserved 2", got)
 			}
 		})
+	}
+}
+
+func TestObserverCanonicalUsageMatchesJSONParser(t *testing.T) {
+	data := `{"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens_details":{"reasoning_tokens":3}}}`
+	parsed, err := ParseJSONUsage([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := NewObserver()
+	if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	if got := observer.State().Usage.Usage; got != parsed.Usage {
+		t.Fatalf("canonical stream usage = %+v, JSON usage = %+v", got, parsed.Usage)
+	}
+}
+
+func TestObserverSupportsResponsesCompletionUsageAndIgnoresUnrelatedNestedUsage(t *testing.T) {
+	observer := NewObserver()
+	if err := observer.Observe(streaming.SSEEvent{Data: `{"metadata":{"usage":{"prompt_tokens":99}}}`}); err != nil {
+		t.Fatal(err)
+	}
+	if observer.State().Usage.Input().Known() {
+		t.Fatal("unrelated nested usage was observed")
+	}
+	if err := observer.Observe(streaming.SSEEvent{Event: "response.completed", Data: `{"response":{"usage":{"input_tokens":7,"output_tokens":8,"input_tokens_details":{"cached_tokens":5},"output_tokens_details":{"reasoning_tokens":4}}}}`}); err != nil {
+		t.Fatal(err)
+	}
+	usage := observer.State().Usage.Usage
+	if value, known := usage.Input().Value(); !known || value != 7 {
+		t.Fatalf("input = (%d, %t), want (7, true)", value, known)
+	}
+	if value, known := usage.Output().Value(); !known || value != 8 {
+		t.Fatalf("output = (%d, %t), want (8, true)", value, known)
+	}
+	if value, known := usage.CachedInput().Value(); !known || value != 5 {
+		t.Fatalf("cached = (%d, %t), want (5, true)", value, known)
+	}
+	if value, known := usage.ReasoningOutput().Value(); !known || value != 4 {
+		t.Fatalf("reasoning = (%d, %t), want (4, true)", value, known)
+	}
+}
+
+func TestObserverCanonicalUsagePartialUpdatesAndMutationIsolation(t *testing.T) {
+	observer := NewObserver()
+	for _, data := range []string{`{"usage":{"prompt_tokens":2}}`, `{"usage":{"completion_tokens":3}}`} {
+		if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := observer.State()
+	if snapshot.Usage.InputTokens == nil || snapshot.Usage.OutputTokens == nil {
+		t.Fatalf("projection = %+v, want both fields", snapshot.Usage)
+	}
+	*snapshot.Usage.InputTokens = 99
+	*snapshot.Usage.OutputTokens = 99
+	if value := observer.State().Usage.Input().Int64(); value != 2 {
+		t.Fatalf("canonical input changed through snapshot mutation: %d", value)
+	}
+	if value := observer.State().Usage.Output().Int64(); value != 3 {
+		t.Fatalf("canonical output changed through snapshot mutation: %d", value)
+	}
+}
+
+func TestObserverInvalidRichUsageLeavesStateAndCanBeReused(t *testing.T) {
+	observer := NewObserver()
+	if err := observer.Observe(streaming.SSEEvent{Data: `{"usage":{"prompt_tokens":2}}`}); err != nil {
+		t.Fatal(err)
+	}
+	before := observer.State()
+	for _, data := range []string{
+		`{"usage":{"prompt_tokens_details":{"cached_tokens":-1}}}`,
+		`{"response":{"usage":{"output_tokens":"secret"}}}`,
+		`{"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}`,
+	} {
+		event := streaming.SSEEvent{Data: data}
+		if data == `{"response":{"usage":{"output_tokens":"secret"}}}` {
+			event.Event = "response.completed"
+		}
+		if err := observer.Observe(event); !errors.Is(err, ErrInvalidUsage) && !errors.Is(err, accounting.ErrCountOverflow) {
+			t.Fatalf("Observe(%s) error = %v, want invalid usage or overflow", data, err)
+		}
+		after := observer.State()
+		if after.EventsObserved != before.EventsObserved || after.Usage.Usage != before.Usage.Usage {
+			t.Fatalf("state changed after invalid update: before=%+v after=%+v", before, after)
+		}
+	}
+	if err := observer.Observe(streaming.SSEEvent{Data: `{"usage":{"completion_tokens":3}}`}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestObserverUsageCanonicalAliasAndDetailPrecedence(t *testing.T) {
+	observer := NewObserver()
+	data := `{"usage":{"prompt_tokens":20,"input_tokens":21,"completion_tokens":30,"output_tokens":31,"prompt_tokens_details":{"cached_tokens":2},"input_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":4},"output_tokens_details":{"reasoning_tokens":5}}}`
+	if err := observer.Observe(streaming.SSEEvent{Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	usage := observer.State().Usage.Usage
+	if usage.Input().Int64() != 20 || usage.Output().Int64() != 30 || usage.CachedInput().Int64() != 2 || usage.ReasoningOutput().Int64() != 4 {
+		t.Fatalf("precedence usage = %+v", usage)
 	}
 }
 

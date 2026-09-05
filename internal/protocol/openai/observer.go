@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/streaming"
 )
 
@@ -24,18 +25,18 @@ type ObserverState struct {
 	DoneObserved        bool
 	Choices             []ChoiceObservation
 	LatestFinishReasons map[int]string
-	Usage               UsageObservation
+	// Usage retains the existing pointer projection and embeds the immutable
+	// canonical accounting value. The projection is kept for chat aggregation;
+	// protocol-neutral callers should use its promoted accounting accessors.
+	Usage UsageObservation
 }
 
-// UsageObservation is the latest explicitly observed token usage. InputTokens
-// normalizes prompt_tokens and input_tokens; OutputTokens normalizes
-// completion_tokens and output_tokens. A nil pointer means that the
-// corresponding value has not been observed. The
-// canonical OpenAI names take precedence over their input/output aliases when
-// both names are present in one usage object: prompt_tokens wins over
-// input_tokens, and completion_tokens wins over output_tokens. This precedence
-// is independent of JSON object member order.
+// UsageObservation embeds the protocol-independent canonical usage while
+// retaining the pointer-shaped projection used by existing chat accumulation
+// and rendering callers. New callers should use the promoted accounting
+// accessors (Input, Output, Total, CachedInput, and ReasoningOutput).
 type UsageObservation struct {
+	accounting.Usage
 	InputTokens  *int `json:"input_tokens,omitempty"`
 	OutputTokens *int `json:"output_tokens,omitempty"`
 	TotalTokens  *int `json:"total_tokens,omitempty"`
@@ -137,15 +138,24 @@ func (observer *Observer) Observe(event streaming.SSEEvent) error {
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformedStreamChunk, err)
 	}
-	usage, err := observeUsage(chunk.Usage)
+	usage, observed, err := observeEventUsage(event, data, chunk.Usage)
 	if err != nil {
 		return err
+	}
+	canonical := observer.state.Usage.Usage
+	if observed {
+		canonical, err = mergeCanonicalUsage(canonical, usage)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidUsage, err)
+		}
 	}
 
 	observer.state.EventsObserved++
 	observer.observeMetadata(chunk)
 	observer.observeChoices(chunk.Choices)
-	observer.state.Usage = mergeUsageObservation(observer.state.Usage, usage)
+	if observed {
+		observer.state.Usage = usageObservationFromCanonical(canonical)
+	}
 	return nil
 }
 
@@ -320,20 +330,51 @@ func cloneString(value *string) *string {
 	return &clone
 }
 
-func cloneUsageObservation(usage UsageObservation) UsageObservation {
-	return UsageObservation{
-		InputTokens:  cloneInt(usage.InputTokens),
-		OutputTokens: cloneInt(usage.OutputTokens),
-		TotalTokens:  cloneInt(usage.TotalTokens),
+func mergeCanonicalUsage(current, update accounting.Usage) (accounting.Usage, error) {
+	input, inputKnown := current.Input().Value()
+	if value, known := update.Input().Value(); known {
+		input, inputKnown = value, true
 	}
+	output, outputKnown := current.Output().Value()
+	if value, known := update.Output().Value(); known {
+		output, outputKnown = value, true
+	}
+	total, totalKnown := current.Total().Value()
+	totalObserved := current.TotalWasObserved()
+	if value, known := update.Total().Value(); known && update.TotalWasObserved() {
+		total, totalKnown = value, true
+		totalObserved = true
+	} else if !totalObserved {
+		// A derived total must be recalculated when a later partial event updates
+		// either component. It is not an explicitly observed field.
+		total, totalKnown = 0, false
+	}
+	cached, cachedKnown := current.CachedInput().Value()
+	if value, known := update.CachedInput().Value(); known {
+		cached, cachedKnown = value, true
+	}
+	reasoning, reasoningKnown := current.ReasoningOutput().Value()
+	if value, known := update.ReasoningOutput().Value(); known {
+		reasoning, reasoningKnown = value, true
+	}
+	merged, err := accounting.NewUsage(accounting.UsageInput{
+		Input:           optionalInt64(input, inputKnown),
+		Output:          optionalInt64(output, outputKnown),
+		Total:           optionalInt64(total, totalKnown && totalObserved),
+		CachedInput:     optionalInt64(cached, cachedKnown),
+		ReasoningOutput: optionalInt64(reasoning, reasoningKnown),
+	})
+	if err != nil {
+		return accounting.Usage{}, err
+	}
+	return merged, nil
 }
 
-func cloneInt(value *int) *int {
-	if value == nil {
-		return nil
-	}
-	clone := *value
-	return &clone
+func cloneUsageObservation(usage UsageObservation) UsageObservation {
+	usage.InputTokens = cloneInt(usage.InputTokens)
+	usage.OutputTokens = cloneInt(usage.OutputTokens)
+	usage.TotalTokens = cloneInt(usage.TotalTokens)
+	return usage
 }
 
 func mergeUsageObservation(current, update UsageObservation) UsageObservation {
@@ -346,64 +387,101 @@ func mergeUsageObservation(current, update UsageObservation) UsageObservation {
 	if update.TotalTokens != nil {
 		current.TotalTokens = cloneInt(update.TotalTokens)
 	}
+	if update.Usage.Input().Known() || update.Usage.Output().Known() || update.Usage.Total().Known() ||
+		update.Usage.CachedInput().Known() || update.Usage.ReasoningOutput().Known() {
+		canonical, err := mergeCanonicalUsage(current.Usage, update.Usage)
+		if err == nil {
+			current.Usage = canonical
+		}
+	}
 	return current
 }
 
-func observeUsage(raw json.RawMessage) (UsageObservation, error) {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return UsageObservation{}, nil
+func usageObservationFromCanonical(usage accounting.Usage) UsageObservation {
+	observation := UsageObservation{Usage: usage}
+	observation.InputTokens = intPointerFromCanonical(usage.Input())
+	observation.OutputTokens = intPointerFromCanonical(usage.Output())
+	if usage.TotalWasObserved() {
+		observation.TotalTokens = intPointerFromCanonical(usage.Total())
 	}
-
-	var fields usageJSON
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		// A usage value without any known fields is not usage observation. Only
-		// reject malformed values for known fields below.
-		return UsageObservation{}, nil
-	}
-
-	prompt, err := decodeUsageInt(fields.PromptTokens, "prompt_tokens")
-	if err != nil {
-		return UsageObservation{}, err
-	}
-	input, err := decodeUsageInt(fields.InputTokens, "input_tokens")
-	if err != nil {
-		return UsageObservation{}, err
-	}
-	if prompt == nil {
-		prompt = input
-	}
-
-	completion, err := decodeUsageInt(fields.CompletionTokens, "completion_tokens")
-	if err != nil {
-		return UsageObservation{}, err
-	}
-	output, err := decodeUsageInt(fields.OutputTokens, "output_tokens")
-	if err != nil {
-		return UsageObservation{}, err
-	}
-	if completion == nil {
-		completion = output
-	}
-
-	total, err := decodeUsageInt(fields.TotalTokens, "total_tokens")
-	if err != nil {
-		return UsageObservation{}, err
-	}
-	return UsageObservation{InputTokens: prompt, OutputTokens: completion, TotalTokens: total}, nil
+	return observation
 }
 
-func decodeUsageInt(raw json.RawMessage, name string) (*int, error) {
-	if len(raw) == 0 {
-		return nil, nil
+func intPointerFromCanonical[T interface{ Value() (int64, bool) }](count T) *int {
+	value, known := count.Value()
+	if !known {
+		return nil
 	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, fmt.Errorf("%w: %s", ErrInvalidUsage, name)
+	converted := int(value)
+	return &converted
+}
+
+func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
 	}
-	var value int
-	if err := json.Unmarshal(raw, &value); err != nil || value < 0 {
-		return nil, fmt.Errorf("%w: %s", ErrInvalidUsage, name)
+	clone := *value
+	return &clone
+}
+
+func optionalInt64(value int64, known bool) *int64 {
+	if !known {
+		return nil
 	}
-	return &value, nil
+	return &value
+}
+
+func observeEventUsage(event streaming.SSEEvent, data []byte, root json.RawMessage) (accounting.Usage, bool, error) {
+	rootResult, err := parseJSONUsageObject(root)
+	if err != nil {
+		return accounting.Usage{}, false, fmt.Errorf("%w: %w", ErrInvalidUsage, err)
+	}
+	usage, observed := rootResult.Usage, rootResult.Observed
+	if !isResponsesCompletionEvent(event, data) {
+		return usage, observed, nil
+	}
+
+	var envelope responseCompletionEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return accounting.Usage{}, false, fmt.Errorf("%w: response envelope", ErrInvalidUsage)
+	}
+	if len(envelope.Response) == 0 || isJSONNull(envelope.Response) {
+		return usage, observed, nil
+	}
+	var response responseUsageEnvelope
+	if err := json.Unmarshal(envelope.Response, &response); err != nil {
+		return accounting.Usage{}, false, fmt.Errorf("%w: response envelope", ErrInvalidUsage)
+	}
+	responseResult, err := parseJSONUsageObject(response.Usage)
+	if err != nil {
+		return accounting.Usage{}, false, fmt.Errorf("%w: %w", ErrInvalidUsage, err)
+	}
+	if responseResult.Observed {
+		if observed {
+			usage, err = mergeCanonicalUsage(usage, responseResult.Usage)
+			if err != nil {
+				return accounting.Usage{}, false, fmt.Errorf("%w: %w", ErrInvalidUsage, err)
+			}
+		} else {
+			usage = responseResult.Usage
+		}
+		observed = true
+	}
+	return usage, observed, nil
+}
+
+func isResponsesCompletionEvent(event streaming.SSEEvent, data []byte) bool {
+	if event.Event == "response.completed" {
+		return true
+	}
+	var envelope struct {
+		Type json.RawMessage `json:"type"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return false
+	}
+	var eventType string
+	return json.Unmarshal(envelope.Type, &eventType) == nil && eventType == "response.completed"
 }
 
 func (observer *Observer) observeMetadata(chunk streamChunk) {
@@ -439,10 +517,10 @@ type streamChunk struct {
 	Usage   json.RawMessage `json:"usage"`
 }
 
-type usageJSON struct {
-	PromptTokens     json.RawMessage `json:"prompt_tokens"`
-	CompletionTokens json.RawMessage `json:"completion_tokens"`
-	InputTokens      json.RawMessage `json:"input_tokens"`
-	OutputTokens     json.RawMessage `json:"output_tokens"`
-	TotalTokens      json.RawMessage `json:"total_tokens"`
+type responseCompletionEnvelope struct {
+	Response json.RawMessage `json:"response"`
+}
+
+type responseUsageEnvelope struct {
+	Usage json.RawMessage `json:"usage"`
 }

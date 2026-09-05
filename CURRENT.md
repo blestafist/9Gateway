@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T082`.
+Done: `T001`-`T083`.
 
-Current: `T083` - normalize rich streaming usage.
+Current: `T084` - define tokenizer strategy configuration.
 
-Queued: `T083`-`T100` in dependency order from `TASKS.md`.
+Queued: `T084`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 

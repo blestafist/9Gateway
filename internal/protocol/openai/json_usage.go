@@ -56,11 +56,18 @@ func ParseJSONUsage(data []byte) (JSONUsageResult, error) {
 		// the input protects response secrets from observation errors.
 		return JSONUsageResult{}, ErrMalformedJSON
 	}
-	if len(response.Usage) == 0 || isJSONNull(response.Usage) {
+	return parseJSONUsageObject(response.Usage)
+}
+
+// parseJSONUsageObject normalizes one known usage object. Keeping this helper
+// shared by complete JSON responses and SSE observation makes the two protocol
+// surfaces use exactly the same field and alias semantics.
+func parseJSONUsageObject(raw json.RawMessage) (JSONUsageResult, error) {
+	if len(raw) == 0 || isJSONNull(raw) {
 		return JSONUsageResult{}, nil
 	}
 
-	usageFields, err := decodeJSONUsageObject(response.Usage)
+	usageFields, err := decodeJSONUsageObject(raw)
 	if err != nil {
 		return JSONUsageResult{}, err
 	}
