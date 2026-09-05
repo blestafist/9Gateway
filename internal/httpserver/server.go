@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pestit/9gateway/internal/auth"
+	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/protocol/openai"
 )
 
@@ -43,7 +44,18 @@ func NewHandlerWithAdmin(upstreamClient *http.Client, upstreamBaseURL, upstreamA
 // NewHandlerWithAdminAndCompletionLogger builds a handler with admin key
 // creation and the caller-owned completion logger.
 func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, completionLogger *CompletionLogger) (http.Handler, error) {
-	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
+	return NewHandlerWithAdminAndRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, limiter.NewRequestLimiter(nil), completionLogger)
+}
+
+// NewHandlerWithAdminAndRequestLimiter builds the administration and public
+// routes with an explicitly owned request limiter. This form keeps the clock
+// injectable for embedders and HTTP tests while the convenience constructors
+// use the wall clock.
+func NewHandlerWithAdminAndRequestLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, completionLogger *CompletionLogger) (http.Handler, error) {
+	if requestLimiter == nil {
+		requestLimiter = limiter.NewRequestLimiter(nil)
+	}
+	proxy := newProxyHandlerWithRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter)
 	service, err := newAdminKeyService(repository, []byte(authPepper))
 	if err != nil {
 		return nil, err
@@ -57,7 +69,18 @@ func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstrea
 // require a gateway bearer key. The authenticator is expected to be populated
 // before serving requests and can be atomically refreshed by its owner.
 func NewHandlerWithAuthenticator(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, completionLogger *CompletionLogger) http.Handler {
-	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
+	return NewHandlerWithAuthenticatorAndRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, limiter.NewRequestLimiter(nil), completionLogger)
+}
+
+// NewHandlerWithAuthenticatorAndRequestLimiter builds an authenticated public
+// handler with the supplied process-local request limiter. A nil limiter keeps
+// the existing unrestricted behavior and is useful for callers that do not
+// configure request windows.
+func NewHandlerWithAuthenticatorAndRequestLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, completionLogger *CompletionLogger) http.Handler {
+	if requestLimiter == nil {
+		requestLimiter = limiter.NewRequestLimiter(nil)
+	}
+	proxy := newProxyHandlerWithRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter)
 	router := routeWithAuthenticator(proxy, nil, authenticator)
 	return newHandlerWithCompletionLogger(completionLogger, router)
 }
@@ -65,7 +88,7 @@ func NewHandlerWithAuthenticator(upstreamClient *http.Client, upstreamBaseURL, u
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
 // completion logger. The process entry point should shut that logger down.
 func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, completionLogger *CompletionLogger, authenticators ...*auth.Authenticator) http.Handler {
-	proxy := newProxyHandler(upstreamClient, upstreamBaseURL, upstreamAPIKey)
+	proxy := newProxyHandlerWithRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, limiter.NewRequestLimiter(nil))
 	router := routeWithAdmin(proxy, nil, authenticators...)
 	return newHandlerWithCompletionLogger(completionLogger, router)
 }
@@ -115,6 +138,7 @@ type proxyHandler struct {
 	client           *http.Client
 	baseURL          *url.URL
 	apiKey           string
+	requestLimiter   *limiter.RequestLimiter
 	responseDispatch responseDispatchFunc
 }
 
@@ -135,9 +159,13 @@ const (
 var errDecodedRepresentationTooLarge = errors.New("decoded representation exceeds limit")
 
 func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler {
+	return newProxyHandlerWithRequestLimiter(client, baseURL, apiKey, nil)
+}
+
+func newProxyHandlerWithRequestLimiter(client *http.Client, baseURL, apiKey string, requestLimiter *limiter.RequestLimiter) *proxyHandler {
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
-		return &proxyHandler{client: client, apiKey: apiKey, responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
+		return &proxyHandler{client: client, apiKey: apiKey, requestLimiter: requestLimiter, responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
 			writeGatewayError(response, gatewayErrorInternal, "")
 		}}
 	}
@@ -145,7 +173,7 @@ func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler 
 	// A nil responseDispatch selects the built-in dispatcher. Keeping the
 	// injectable legacy-shaped callback available is useful to transport tests
 	// and avoids making request classification part of that callback's API.
-	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey}
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -159,12 +187,30 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	targetURL.RawQuery = request.URL.RawQuery
 	targetURL.Fragment = ""
 
-	requestBody, metadata := inspectChatRequest(request)
+	requestBody, metadata := request.Body, (*openai.RequestMetadata)(nil)
+	if shouldInspectRequestMetadata(request) {
+		requestBody, metadata = inspectChatRequest(request)
+	}
 	if metadata != nil && metadata.Model != "" {
 		if principal, authenticated := PrincipalFromContext(request.Context()); authenticated && !principal.Policy.AllowsModel(metadata.Model) {
 			_ = requestBody.Close()
 			writeGatewayError(response, gatewayErrorModelNotAllowed, "model")
 			return
+		}
+	}
+	if handler.requestLimiter != nil {
+		if principal, authenticated := PrincipalFromContext(request.Context()); authenticated {
+			windows := principal.Policy.RequestWindows()
+			if len(windows) != 0 {
+				allowed, resetAt := handler.requestLimiter.Allow(principal.ID, windows)
+				if !allowed {
+					if requestBody != nil {
+						_ = requestBody.Close()
+					}
+					writeGatewayErrorRetryAfter(response, gatewayErrorRequestLimit, "", handler.requestLimiter.RetryAfterSeconds(resetAt))
+					return
+				}
+			}
 		}
 	}
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), requestBody)
@@ -187,6 +233,19 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	dispatchResponse(response, upstreamResponse, metadata, request)
+}
+
+func shouldInspectRequestMetadata(request *http.Request) bool {
+	if request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" || !isJSONMediaType(request.Header) {
+		return false
+	}
+	principal, authenticated := PrincipalFromContext(request.Context())
+	if !authenticated {
+		return true
+	}
+	// An unrestricted policy has no model decision to make. Avoid touching the
+	// body in that common case, in particular before a request-count rejection.
+	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0
 }
 
 func inspectChatRequest(request *http.Request) (io.ReadCloser, *openai.RequestMetadata) {

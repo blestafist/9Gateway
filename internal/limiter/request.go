@@ -133,6 +133,26 @@ func (limiter *RequestLimiter) Check(keyID string, windows []RequestWindow) (boo
 	return limiter.Allow(keyID, windows)
 }
 
+// RetryAfterSeconds returns the positive, rounded-up number of seconds from
+// the limiter's clock until resetAt. A reset that is already due still needs a
+// positive header value because HTTP Retry-After is a delay, not a timestamp.
+func (limiter *RequestLimiter) RetryAfterSeconds(resetAt time.Time) int {
+	if limiter == nil || resetAt.IsZero() {
+		return 0
+	}
+	return RetryAfterSecondsAt(limiter.currentTime(), resetAt)
+}
+
+// RetryAfterSecondsAt converts a reset time into a positive delta-seconds
+// value, rounding fractional seconds up.
+func RetryAfterSecondsAt(now, resetAt time.Time) int {
+	delta := resetAt.Sub(now)
+	if delta <= 0 {
+		return 1
+	}
+	return int((delta-1)/time.Second) + 1
+}
+
 // FixedWindowStart returns the UTC, Unix-epoch-aligned start of the fixed
 // window containing now. Every duration therefore has explicit boundaries at
 // integer multiples of that duration from 1970-01-01T00:00:00Z.

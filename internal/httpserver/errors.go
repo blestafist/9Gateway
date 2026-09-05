@@ -3,6 +3,7 @@ package httpserver
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 const (
@@ -51,6 +52,13 @@ var gatewayErrorDefinitions = map[string]gatewayErrorDefinition{
 // writeGatewayError emits only a known, constant definition. In particular,
 // no cause, URL, credential, or parser detail is ever copied into the body.
 func writeGatewayError(response http.ResponseWriter, code, param string) {
+	writeGatewayErrorRetryAfter(response, code, param, 0)
+}
+
+// writeGatewayErrorRetryAfter emits a gateway error and, when requested, a
+// delta-seconds Retry-After header. The value is intentionally supplied by the
+// limiter rather than derived from a wall clock in the HTTP layer.
+func writeGatewayErrorRetryAfter(response http.ResponseWriter, code, param string, retryAfter int) {
 	definition, ok := gatewayErrorDefinitions[code]
 	if !ok {
 		code = gatewayErrorInternal
@@ -59,6 +67,9 @@ func writeGatewayError(response http.ResponseWriter, code, param string) {
 	}
 	if param != "model" {
 		param = ""
+	}
+	if retryAfter > 0 {
+		response.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	}
 	writeGatewayErrorStatus(response, definition.status, code, definition, param)
 }
