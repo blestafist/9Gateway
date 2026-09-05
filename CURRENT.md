@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T089`.
+Done: `T001`-`T090`.
 
-Current: `T090` - compose one request resource lease.
+Current: `T091` - enforce token preflight admission.
 
-Queued: `T090`-`T100` in dependency order from `TASKS.md`.
+Queued: `T092`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
