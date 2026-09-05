@@ -33,7 +33,12 @@ func PrincipalFromContext(ctx context.Context) (auth.Principal, bool) {
 
 func withGatewayAuthentication(authenticator *auth.Authenticator, next http.Handler) http.Handler {
 	if authenticator == nil {
-		return next
+		// Never turn a missing production dependency into anonymous access to
+		// public v1 routes. Test-only direct route construction is therefore
+		// fail-closed too, instead of weakening the public contract.
+		return http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			writeGatewayError(response, gatewayErrorInvalidAPIKey, "")
+		})
 	}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		values := request.Header.Values("Authorization")

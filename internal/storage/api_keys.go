@@ -344,6 +344,17 @@ func (repository *APIKeyRepository) UpdatePolicy(ctx context.Context, id string,
 	return nil
 }
 
+// UpdatePolicyRecord atomically replaces a key's enabled state and complete
+// policy document and returns the record as persisted. This lets callers
+// report SQLite's durable timestamp when the monotonic timestamp guard keeps
+// an existing value.
+func (repository *APIKeyRepository) UpdatePolicyRecord(ctx context.Context, id string, enabled bool, policyJSON string) (APIKeyRecord, error) {
+	if err := repository.UpdatePolicy(ctx, id, enabled, policyJSON); err != nil {
+		return APIKeyRecord{}, err
+	}
+	return repository.GetByID(ctx, id)
+}
+
 // UpdateEnabledAndPolicy is a descriptive alias for UpdatePolicy.
 func (repository *APIKeyRepository) UpdateEnabledAndPolicy(ctx context.Context, id string, enabled bool, policyJSON string) error {
 	return repository.UpdatePolicy(ctx, id, enabled, policyJSON)

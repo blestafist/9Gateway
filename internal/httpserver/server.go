@@ -71,7 +71,20 @@ func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL
 }
 
 func route(proxy http.Handler) http.Handler {
-	return routeWithAdmin(proxy, nil)
+	// This package-private route is retained for focused transport tests that
+	// exercise proxy behavior without constructing gateway credentials. Exported
+	// constructors never use it; public constructors always pass an
+	// authenticator (or fail closed when one is absent).
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/health":
+			health(response, request)
+		case strings.HasPrefix(request.URL.Path, "/v1/"):
+			proxy.ServeHTTP(response, request)
+		default:
+			http.NotFound(response, request)
+		}
+	})
 }
 
 func routeWithAdmin(proxy http.Handler, admin http.Handler, authenticators ...*auth.Authenticator) http.Handler {

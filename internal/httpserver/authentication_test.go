@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -115,6 +116,148 @@ func TestPublicV1AuthenticationRejectsCredentialsBeforeReadingBodyOrCallingUpstr
 	}
 }
 
+func TestExportedConstructorsFailClosedWithoutAuthenticator(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { upstreamCalls++ }))
+	t.Cleanup(upstream.Close)
+
+	constructors := []struct {
+		name    string
+		handler http.Handler
+	}{
+		{name: "default", handler: NewHandler(transport.NewClient(), upstream.URL, "upstream-secret")},
+		{name: "completion", handler: NewHandlerWithCompletionLogger(transport.NewClient(), upstream.URL, "upstream-secret", nil)},
+	}
+	for _, test := range constructors {
+		t.Run(test.name, func(t *testing.T) {
+			gateway := httptest.NewServer(test.handler)
+			defer gateway.Close()
+			response, err := http.Get(gateway.URL + "/v1/models")
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := decodeGatewayError(t, response)
+			if response.StatusCode != http.StatusUnauthorized || payload.Error.Code != gatewayErrorInvalidAPIKey || response.Header.Get(requestIDHeader) == "" {
+				t.Fatalf("response = status %d, code %q, request ID %q", response.StatusCode, payload.Error.Code, response.Header.Get(requestIDHeader))
+			}
+		})
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want zero", upstreamCalls)
+	}
+}
+
+func TestAuthenticatedHTTPPropagatesCancellationToUpstream(t *testing.T) {
+	pepper := []byte("test-pepper")
+	generated, err := auth.GenerateGatewayKey(pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := auth.NewAuthenticator(pepper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authenticator.Load([]auth.Record{{ID: "cancel", DisplayPrefix: generated.DisplayPrefix, Digest: generated.Digest, Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	upstreamStarted := make(chan struct{})
+	upstreamCanceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		close(upstreamStarted)
+		<-request.Context().Done()
+		close(upstreamCanceled)
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandlerWithAuthenticator(transport.NewClient(), upstream.URL, "upstream-secret", authenticator, nil))
+	t.Cleanup(gateway.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, gateway.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+generated.RawKey)
+	result := make(chan error, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		result <- requestErr
+	}()
+	select {
+	case <-upstreamStarted:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("upstream request did not start")
+	}
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream request context was not canceled")
+	}
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("client request did not return after cancellation")
+	}
+}
+
+func TestAuthenticatedHTTPRequestsRunConcurrently(t *testing.T) {
+	pepper := []byte("test-pepper")
+	generated, err := auth.GenerateGatewayKey(pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := auth.NewAuthenticator(pepper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authenticator.Load([]auth.Record{{ID: "concurrent", DisplayPrefix: generated.DisplayPrefix, Digest: generated.Digest, Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		started <- struct{}{}
+		<-release
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandlerWithAuthenticator(transport.NewClient(), upstream.URL, "upstream-secret", authenticator, nil))
+	t.Cleanup(gateway.Close)
+
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			request, requestErr := http.NewRequest(http.MethodGet, gateway.URL+"/v1/models", nil)
+			if requestErr != nil {
+				results <- requestErr
+				return
+			}
+			request.Header.Set("Authorization", "Bearer "+generated.RawKey)
+			response, requestErr := http.DefaultClient.Do(request)
+			if response != nil {
+				response.Body.Close()
+			}
+			results <- requestErr
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("authenticated requests were serialized or did not reach upstream")
+		}
+	}
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestPublicV1AuthenticationAddsPrincipalAndReplacesCredential(t *testing.T) {
 	pepper := []byte("test-pepper")
 	generated, err := auth.GenerateGatewayKey(pepper)
@@ -167,7 +310,7 @@ func TestPublicV1AuthenticationAddsPrincipalAndReplacesCredential(t *testing.T) 
 		observedOK.Store(ok)
 		proxy.ServeHTTP(response, request)
 	}))
-	gateway := httptest.NewServer(newHandlerWithCompletionLogger(nil, routeWithAuthenticator(public, nil, nil)))
+	gateway := httptest.NewServer(newHandlerWithCompletionLogger(nil, route(public)))
 	t.Cleanup(gateway.Close)
 
 	body := []byte(`{"messages":[{"role":"user","content":"keep"}]}`)

@@ -46,6 +46,10 @@ type apiKeyPolicyUpdater interface {
 	UpdatePolicy(context.Context, string, bool, string) error
 }
 
+type apiKeyPolicyRecordUpdater interface {
+	UpdatePolicyRecord(context.Context, string, bool, string) (storage.APIKeyRecord, error)
+}
+
 type gatewayKeyGenerator interface {
 	Generate([]byte) (auth.GeneratedGatewayKey, error)
 }
@@ -267,11 +271,34 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		service.auth.Publish(prepared)
 		return updatedAdminKeyFromRecord(replacement, policyJSON), nil
 	}
-	if err := updater.UpdatePolicy(ctx, id, enabled, string(policyJSON)); err != nil {
+	var persisted storage.APIKeyRecord
+	if recordUpdater, ok := service.repository.(apiKeyPolicyRecordUpdater); ok {
+		persisted, err = recordUpdater.UpdatePolicyRecord(ctx, id, enabled, string(policyJSON))
+	} else {
+		err = updater.UpdatePolicy(ctx, id, enabled, string(policyJSON))
+	}
+	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return updatedAdminKey{}, storage.ErrNotFound
 		}
 		return updatedAdminKey{}, errAdminKeyCreation
+	}
+	if persisted.ID != "" {
+		replacement = persisted
+	} else {
+		// Compatibility repositories may only expose the legacy update method.
+		// Read back the durable row so their response cannot report a stale
+		// pre-update timestamp.
+		records, listErr := service.repository.List(ctx)
+		if listErr != nil {
+			return updatedAdminKey{}, errAdminKeyCreation
+		}
+		for _, record := range records {
+			if record.ID == id {
+				replacement = record
+				break
+			}
+		}
 	}
 	service.auth.Publish(prepared)
 	return updatedAdminKeyFromRecord(replacement, policyJSON), nil

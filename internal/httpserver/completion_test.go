@@ -53,7 +53,7 @@ func TestCompletionHandoffDoesNotDelayResponseCompletion(t *testing.T) {
 				_, _ = io.WriteString(response, test.body)
 			}))
 			t.Cleanup(upstream.Close)
-			gateway := httptest.NewServer(NewHandlerWithCompletionLogger(transport.NewClient(), upstream.URL, "upstream-secret", completionLogger))
+			gateway := httptest.NewServer(newTransportHandlerWithCompletionLogger(transport.NewClient(), upstream.URL, "upstream-secret", completionLogger))
 			t.Cleanup(gateway.Close)
 
 			response, err := http.Get(gateway.URL + "/v1/response")
@@ -112,7 +112,7 @@ func TestNewHandlerDoesNotSynchronouslyLogCompletion(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 			response, err := http.Get(gateway.URL + "/v1/response")
 			if err != nil {

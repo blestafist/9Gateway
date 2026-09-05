@@ -97,7 +97,7 @@ func TestProxyPreservesInspectedChatAndUnknownRequestBodies(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	for _, test := range tests {

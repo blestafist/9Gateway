@@ -242,6 +242,138 @@ func TestAdminUpdateKeyPolicyHTTPIsAtomicAndTakesEffectImmediately(t *testing.T)
 	}
 }
 
+func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) {
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamCalls++
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	databasePath := filepath.Join(t.TempDir(), "policy.db")
+	database, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := storage.NewAPIKeyRepository(database)
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), upstream.URL, "upstream-secret", "admin-secret", "pepper", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := httptest.NewServer(handler)
+	createdResponse, err := http.DefaultClient.Do(newAdminRequest(t, gateway.URL, `{"name":"transitions"}`, "admin-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	decodeResponse(t, createdResponse, &created)
+	if createdResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", createdResponse.StatusCode)
+	}
+
+	update := func(id, body, credential string) (*http.Response, map[string]any) {
+		t.Helper()
+		request := newPolicyRequest(t, gateway.URL, id, body, credential)
+		response, requestErr := http.DefaultClient.Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		var payload map[string]any
+		decodeResponse(t, response, &payload)
+		return response, payload
+	}
+
+	unauthorized, payload := update(created.ID, `{"enabled":false,"policy":{}}`, "wrong-admin")
+	if unauthorized.StatusCode != http.StatusUnauthorized || payload["error"] == nil || unauthorized.Header.Get(requestIDHeader) == "" {
+		t.Fatalf("unauthorized update = %d/%v", unauthorized.StatusCode, payload)
+	}
+	for _, body := range []string{
+		`{"enabled":false,"policy":{"unknown":true}}`,
+		`{"enabled":false,"policy":{}} trailing`,
+		`{"enabled":false,"enabled":true,"policy":{}}`,
+		`{"enabled":false,"policy":{"allowed_models":["[broken"]}}`,
+	} {
+		response, bodyPayload := update(created.ID, body, "admin-secret")
+		if response.StatusCode != http.StatusBadRequest || response.Header.Get(requestIDHeader) == "" || bodyPayload["error"] == nil {
+			t.Fatalf("invalid body %s = %d/%v", body, response.StatusCode, bodyPayload)
+		}
+	}
+	tooLarge := `{"enabled":false,"policy":{"allowed_models":["` + strings.Repeat("x", int(adminRequestBodyLimit)) + `"]}}`
+	oversized, oversizedPayload := update(created.ID, tooLarge, "admin-secret")
+	if oversized.StatusCode != http.StatusRequestEntityTooLarge || oversized.Header.Get(requestIDHeader) == "" || oversizedPayload["error"] == nil {
+		t.Fatalf("oversized update = %d/%v", oversized.StatusCode, oversizedPayload)
+	}
+
+	updated, updatedPayload := update(created.ID, `{"enabled":false,"policy":{"allowed_models":["new-model"]}}`, "admin-secret")
+	if updated.StatusCode != http.StatusOK || updatedPayload["Enabled"] != false {
+		t.Fatalf("disable update = %d/%v", updated.StatusCode, updatedPayload)
+	}
+	firstUpdatedAt, ok := updatedPayload["UpdatedAt"].(string)
+	if !ok || firstUpdatedAt == "" {
+		// encoding/json field matching permits lowercase request decoding, but
+		// response field names are intentionally deterministic from the struct.
+		t.Fatalf("update timestamp = %#v", updatedPayload["UpdatedAt"])
+	}
+	call := func(model string) *http.Response {
+		t.Helper()
+		request, requestErr := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"`+model+`"}`))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		request.Header.Set("Authorization", "Bearer "+created.Key)
+		request.Header.Set("Content-Type", "application/json")
+		response, requestErr := http.DefaultClient.Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		response.Body.Close()
+		return response
+	}
+	if response := call("new-model"); response.StatusCode != http.StatusUnauthorized || upstreamCalls != 0 {
+		t.Fatalf("disabled key response/calls = %d/%d", response.StatusCode, upstreamCalls)
+	}
+
+	enabled, enabledPayload := update(created.ID, `{"enabled":true,"policy":{"allowed_models":["new-model"]}}`, "admin-secret")
+	if enabled.StatusCode != http.StatusOK || enabledPayload["Enabled"] != true {
+		t.Fatalf("enable update = %d/%v", enabled.StatusCode, enabledPayload)
+	}
+	if response := call("old-model"); response.StatusCode != http.StatusForbidden || upstreamCalls != 0 {
+		t.Fatalf("policy rejection response/calls = %d/%d", response.StatusCode, upstreamCalls)
+	}
+	if response := call("new-model"); response.StatusCode != http.StatusNoContent || upstreamCalls != 1 {
+		t.Fatalf("policy admission response/calls = %d/%d", response.StatusCode, upstreamCalls)
+	}
+
+	repeated, repeatedPayload := update(created.ID, `{"enabled":true,"policy":{"allowed_models":["new-model"]}}`, "admin-secret")
+	if repeated.StatusCode != http.StatusOK || repeatedPayload["UpdatedAt"] != enabledPayload["UpdatedAt"] {
+		t.Fatalf("idempotent update timestamps = %#v/%#v", repeatedPayload["UpdatedAt"], enabledPayload["UpdatedAt"])
+	}
+	notFound, notFoundPayload := update("missing-key", `{"enabled":true,"policy":{}}`, "admin-secret")
+	if notFound.StatusCode != http.StatusNotFound || notFoundPayload["error"] == nil || notFound.Header.Get(requestIDHeader) == "" {
+		t.Fatalf("missing update = %d/%v", notFound.StatusCode, notFoundPayload)
+	}
+
+	gateway.Close()
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	reopenedRecord, err := storage.NewAPIKeyRepository(reopened).GetByID(context.Background(), created.ID)
+	if err != nil || !reopenedRecord.Enabled || reopenedRecord.PolicyJSON != `{"allowed_models":["new-model"]}` {
+		t.Fatalf("reopened policy record = %#v, error %v", reopenedRecord, err)
+	}
+	responseUpdatedAt, err := time.Parse(time.RFC3339, firstUpdatedAt)
+	if err != nil || !reopenedRecord.UpdatedAt.Equal(responseUpdatedAt) {
+		t.Fatalf("reopened timestamp = %v, response %q", reopenedRecord.UpdatedAt, firstUpdatedAt)
+	}
+}
+
 func TestAdminKeyServiceRetriesDuplicateGenerationAndReturnsSafeFailure(t *testing.T) {
 	database, err := storage.Open(context.Background(), ":memory:")
 	if err != nil {

@@ -20,7 +20,7 @@ import (
 )
 
 func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
-	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
+	server := httptest.NewServer(newTransportHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
 	t.Cleanup(server.Close)
 
 	response, err := http.Get(server.URL)
@@ -35,7 +35,7 @@ func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
+	server := httptest.NewServer(newTransportHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
 	t.Cleanup(server.Close)
 
 	response, err := http.Get(server.URL + "/health")
@@ -53,7 +53,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestRequestIDsAreDistinct(t *testing.T) {
-	server := httptest.NewServer(NewHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
+	server := httptest.NewServer(newTransportHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
 	t.Cleanup(server.Close)
 
 	requestIDs := make([]string, 2)
@@ -78,7 +78,7 @@ func TestProxyForwardsMethodPathAndQuery(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/models?alpha=one&beta=two", nil)
@@ -117,7 +117,7 @@ func TestProxyPreservesUpstreamErrorResponse(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 	response, err := http.Get(gateway.URL + "/v1/models")
 	if err != nil {
@@ -230,7 +230,7 @@ func TestProxyJoinsConfiguredBasePathWithoutChangingAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream URL: %v", err)
 	}
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL+"/gateway", "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL+"/gateway", "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodGet, gateway.URL+"/v1//models%2Fspecial?target=//attacker.example", nil)
@@ -266,7 +266,7 @@ func TestProxyRewritesAuthorization(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodGet, gateway.URL+"/v1/models", nil)
@@ -297,7 +297,7 @@ func TestProxyCopiesEndToEndHeadersAndRemovesHopByHopHeaders(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/models", nil)
@@ -336,7 +336,7 @@ func TestProxyPreservesUpstreamResponseStatus(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/status")
@@ -359,7 +359,7 @@ func TestProxyCopiesEndToEndResponseHeadersAndRemovesHopByHopHeaders(t *testing.
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/status")
@@ -421,7 +421,7 @@ func TestProxyPassesOrdinaryResponseBodyWithoutChangingBytes(t *testing.T) {
 		fragments:   []string{string(wantBody)},
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/responses")
@@ -461,7 +461,7 @@ func TestProxyPreservesRepresentationHeadersWithoutTransformation(t *testing.T) 
 				_, _ = response.Write(body)
 			}))
 			t.Cleanup(upstream.Close)
-			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 
 			client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
@@ -525,7 +525,7 @@ data: [DONE]
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","stream":false,"messages":[{"role":"user","content":"hi"}]}`))
@@ -601,7 +601,7 @@ func TestProxyReturnsIdentityChatSSEAfterDONEWithoutWaitingForUpstreamEOF(t *tes
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 	if err != nil {
@@ -673,7 +673,7 @@ func TestProxyConvertsGzipChatSSEToUncompressedJSON(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 	if err != nil {
@@ -767,7 +767,7 @@ func TestProxyConvertsChatSSEWithExactAccumulatedPayloadLimit(t *testing.T) {
 		_, _ = io.WriteString(response, stream.String())
 	}))
 	t.Cleanup(upstream.Close)
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
@@ -829,7 +829,7 @@ func TestProxyValidatesGzipTrailerAfterSSEDONE(t *testing.T) {
 				_, _ = response.Write(test.body)
 			}))
 			t.Cleanup(upstream.Close)
-			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 
 			request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
@@ -875,7 +875,7 @@ func TestProxyCancellationUnblocksGzipDrainAfterSSEDONE(t *testing.T) {
 		close(cancelled)
 	}))
 	t.Cleanup(upstream.Close)
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	requestContext, cancel := context.WithCancel(context.Background())
@@ -929,7 +929,7 @@ func TestProxyConvertsCleanEOFGzipChatSSE(t *testing.T) {
 		_, _ = response.Write(compressed.Bytes())
 	}))
 	t.Cleanup(upstream.Close)
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 	if err != nil {
@@ -969,7 +969,7 @@ func TestProxyRejectsDecodedSSERepresentationOverflow(t *testing.T) {
 		_, _ = response.Write(compressed.Bytes())
 	}))
 	t.Cleanup(upstream.Close)
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 	if err != nil {
@@ -1017,7 +1017,7 @@ func TestProxyPreservesCompressedTransparentChatSSE(t *testing.T) {
 		_, _ = response.Write(wantBody)
 	}))
 	t.Cleanup(upstream.Close)
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":true}`))
@@ -1072,7 +1072,7 @@ func TestProxyRejectsUnsupportedOrMalformedEncodingDuringChatSSEConversion(t *te
 			}))
 			t.Cleanup(upstream.Close)
 
-			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 			request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 			if err != nil {
@@ -1124,7 +1124,7 @@ func TestProxyAggregatesChatSSEAtGatewayOnCleanEOFWithSplitToolCallsAndChoices(t
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
@@ -1171,7 +1171,7 @@ func TestProxyKeepsChatSSETransparentUnlessRequestExplicitlyDisablesStreaming(t 
 		contentType: "text/event-stream",
 		fragments:   []string{body},
 	})
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	requestBodies := []struct {
@@ -1225,7 +1225,7 @@ func TestProxyCancelsChatSSEAggregationPromptly(t *testing.T) {
 		close(cancelled)
 	}))
 	t.Cleanup(upstream.Close)
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	requestContext, cancel := context.WithCancel(context.Background())
@@ -1269,7 +1269,7 @@ func TestProxyAggregationFailureIsControlledAndDoesNotCommitUpstreamResponse(t *
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 	if err != nil {
@@ -1325,7 +1325,7 @@ func TestProxyDispatchesResponseBodyByUpstreamContentType(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 
 			response, err := http.Get(gateway.URL + "/v1/dispatch")
@@ -1393,7 +1393,7 @@ func TestProxyFlushesEachSSEFragmentBeforeUpstreamContinues(t *testing.T) {
 		waitAfterFirst: true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/stream")
@@ -1446,7 +1446,7 @@ func TestProxyPreservesSSECommentsDoneAndBytesAfterDone(t *testing.T) {
 		waitAfterFirst: true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/stream")
@@ -1497,7 +1497,7 @@ func TestProxyPreservesSplitSSEWrites(t *testing.T) {
 		flushEach:   true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/stream")
@@ -1522,7 +1522,7 @@ func TestProxyPreservesCoalescedSSEEvents(t *testing.T) {
 		flushEach:   true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/stream")
@@ -1615,7 +1615,7 @@ func TestProxyStreamsRunInParallel(t *testing.T) {
 		waitAfterFirst: true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	type streamResult struct {
@@ -1690,7 +1690,7 @@ func TestProxyClosesSSEOnUpstreamEOFWithoutDone(t *testing.T) {
 		flushEach:   true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	startedAt := time.Now()
@@ -1726,7 +1726,7 @@ func TestProxySSECloseDelayRegression(t *testing.T) {
 		flushEach:   true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	response, err := http.Get(gateway.URL + "/v1/stream")
@@ -1782,7 +1782,7 @@ func TestProxyPreservesCompressedResponseRepresentation(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 
 			request, err := http.NewRequest(http.MethodGet, gateway.URL+"/v1/responses", nil)
@@ -1824,7 +1824,7 @@ func TestProxySupportsUnknownV1Endpoint(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/something-unknown?mode=raw", strings.NewReader("unknown-payload"))
@@ -1901,7 +1901,7 @@ func TestProxyPropagatesHTTPClientCancellationToUpstream(t *testing.T) {
 		waitForCancellation: true,
 	})
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	requestContext, cancel := context.WithCancel(context.Background())
@@ -1951,7 +1951,7 @@ func TestProxyStreamsRequestBodyWithoutChangingBytes(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 	t.Cleanup(gateway.Close)
 
 	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/unknown", bytes.NewReader(wantBody))
@@ -2048,7 +2048,7 @@ func TestProxyPreservesRequestContentLengthSemantics(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+			gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
 			t.Cleanup(gateway.Close)
 
 			request, err := http.NewRequest(http.MethodPost, gateway.URL+test.path, test.body)
