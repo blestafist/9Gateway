@@ -17,8 +17,10 @@ Deny takes precedence. Do not add regex without a concrete need.
 
 ## Request Limits
 
-Request limits are amount plus duration; RPM is the first implementation. Fixed
-or sliding semantics must be explicit and tested with an injectable clock.
+Request limits are amount plus duration; RPM is the ordinary `amount / 1m`
+policy form. The in-memory implementation uses fixed windows whose boundaries
+are aligned to integer multiples of each duration from the Unix epoch. Semantics
+are tested with an injectable clock.
 Consume request capacity before upstream work and normally do not refund it for
 an upstream error. Return HTTP 429 and `Retry-After` when reset time is known.
 

@@ -2,11 +2,11 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T075`.
+Done: `T001`-`T076`.
 
-Current: `T076` - implement generic per-key request windows.
+Current: `T077` - integrate request limits and Retry-After.
 
-Queued: `T077`-`T080` in dependency order in `TASKS.md`.
+Queued: `T078`-`T080` in dependency order in `TASKS.md`.
 
 Known issues: none for the current milestone.
 
