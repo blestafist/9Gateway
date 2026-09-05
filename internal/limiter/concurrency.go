@@ -23,6 +23,7 @@ type Lease struct {
 	mu       sync.Mutex
 	released bool
 	claimed  bool
+	admitted bool
 }
 
 // NewConcurrencyLimiter creates an empty per-key concurrency limiter.
@@ -38,7 +39,9 @@ func (limiter *ConcurrencyLimiter) Acquire(keyID string, max int) (*Lease, bool)
 		return nil, false
 	}
 	if max == 0 {
-		return &Lease{}, true
+		// Keep the admitted identity on an unlimited no-op lease so promotion
+		// can still reject a lease supplied for a different key.
+		return &Lease{keyID: keyID, admitted: true}, true
 	}
 
 	limiter.mu.Lock()
@@ -60,7 +63,7 @@ func (limiter *ConcurrencyLimiter) Acquire(keyID string, max int) (*Lease, bool)
 		return nil, false
 	}
 	state.active++
-	return &Lease{limiter: limiter, keyID: keyID, state: state}, true
+	return &Lease{limiter: limiter, keyID: keyID, state: state, admitted: true}, true
 }
 
 // Release returns the lease's slot exactly once. A nil or unlimited lease is a
@@ -70,7 +73,7 @@ func (lease *Lease) Release() {
 		return
 	}
 	lease.mu.Lock()
-	if lease.released || lease.claimed {
+	if lease.released || lease.claimed || !lease.admitted {
 		lease.mu.Unlock()
 		return
 	}
@@ -88,7 +91,39 @@ func (lease *Lease) adopt() bool {
 	}
 	lease.mu.Lock()
 	defer lease.mu.Unlock()
-	if lease.released || lease.claimed {
+	if lease.released || lease.claimed || !lease.admitted {
+		return false
+	}
+	lease.claimed = true
+	return true
+}
+
+// adoptFor transfers a provisional lease only when it belongs to the expected
+// coordinator and key. Positive-limit promotion additionally requires a live
+// slot in the limiter's current state; an unlimited no-op lease cannot be
+// promoted into a configured limit.
+func (lease *Lease) adoptFor(expected *ConcurrencyLimiter, keyID string, requireSlot bool) bool {
+	if lease == nil {
+		return false
+	}
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	if lease.released || lease.claimed || !lease.admitted {
+		return false
+	}
+	if lease.limiter == nil {
+		if requireSlot || (lease.keyID != "" && lease.keyID != keyID) {
+			return false
+		}
+		lease.claimed = true
+		return true
+	}
+	if expected == nil || lease.limiter != expected || lease.keyID != keyID || lease.state == nil {
+		return false
+	}
+	expected.mu.Lock()
+	defer expected.mu.Unlock()
+	if expected.states == nil || expected.states[keyID] != lease.state || lease.state.active <= 0 {
 		return false
 	}
 	lease.claimed = true

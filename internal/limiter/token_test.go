@@ -281,6 +281,34 @@ func TestTokenReservationFinalizationConcurrentAndOneShot(t *testing.T) {
 	}
 }
 
+func TestTokenAdjustmentConcurrentCallsRemainOneShot(t *testing.T) {
+	clock := &testClock{now: time.Unix(60, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	reservation, allowed, _ := limiter.Reserve("adjust-once", tokenWindowForTest(), 40)
+	if !allowed {
+		t.Fatal("reservation rejected")
+	}
+	ticket, err := reservation.CommitDeferred()
+	if err != nil || ticket == nil {
+		t.Fatalf("deferred commit = (%v, %v)", ticket, err)
+	}
+	if err := ticket.Adjust(10); err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_ = ticket.Adjust(30)
+		}()
+	}
+	wait.Wait()
+	if got := bucketForTest(t, limiter, "adjust-once").committed; got != 10 {
+		t.Fatalf("concurrent repeated adjustment changed charge to %d, want 10", got)
+	}
+}
+
 func TestTokenReservationBoundaryAdjustmentCannotTouchNewBucket(t *testing.T) {
 	clock := &testClock{now: time.Unix(59, 0).UTC()}
 	limiter := NewTokenLimiter(clock.Now)
@@ -304,4 +332,39 @@ func TestTokenReservationBoundaryAdjustmentCannotTouchNewBucket(t *testing.T) {
 		t.Fatalf("old ticket touched new bucket, bucket %+v", bucket)
 	}
 	_ = newReservation.AbortConservative()
+}
+
+func TestTokenLimiterClockForwardRollbackAndRecovery(t *testing.T) {
+	clock := &testClock{now: time.Unix(59, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	windows := tokenWindowForTest()
+	initial, allowed, _ := limiter.Reserve("clock", windows, 100)
+	if !allowed {
+		t.Fatal("initial reservation rejected")
+	}
+
+	clock.Set(time.Unix(60, 0).UTC())
+	boundary, allowed, _ := limiter.Reserve("clock", windows, 100)
+	if !allowed {
+		t.Fatal("boundary reservation rejected")
+	}
+	// A rollback must not make the limiter revisit the previous bucket or
+	// discard the capacity admitted at the forward boundary.
+	clock.Set(time.Unix(59, 0).UTC())
+	if _, allowed, _ := limiter.Reserve("clock", windows, 1); allowed {
+		t.Fatal("clock rollback reset active boundary capacity")
+	}
+	if err := boundary.ReleaseBeforeUpstream(); err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.ReleaseBeforeUpstream(); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Set(time.Unix(120, 0).UTC())
+	if recovered, allowed, _ := limiter.Reserve("clock", windows, 100); !allowed || recovered == nil {
+		t.Fatalf("clock recovery reservation = (%v, %v), want admitted", recovered, allowed)
+	} else {
+		recovered.ReleaseBeforeUpstream()
+	}
 }

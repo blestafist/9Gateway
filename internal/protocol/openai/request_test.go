@@ -34,12 +34,12 @@ func TestRequestMetadataStreamStates(t *testing.T) {
 func TestRequestMetadataTokenStates(t *testing.T) {
 	tests := []struct {
 		name  string
-		value *int
-		want  *int
+		value *int64
+		want  *int64
 	}{
 		{name: "absent", value: nil, want: nil},
-		{name: "zero", value: intPointer(0), want: intPointer(0)},
-		{name: "positive", value: intPointer(128), want: intPointer(128)},
+		{name: "zero", value: int64Pointer(0), want: int64Pointer(0)},
+		{name: "positive", value: int64Pointer(128), want: int64Pointer(128)},
 	}
 
 	for _, test := range tests {
@@ -79,9 +79,9 @@ func TestParseRequestMetadata(t *testing.T) {
 			want: RequestMetadata{
 				Model:               "gpt-test",
 				Stream:              boolPointer(true),
-				MaxTokens:           intPointer(128),
-				MaxCompletionTokens: intPointer(256),
-				MaxOutputTokens:     intPointer(512),
+				MaxTokens:           int64Pointer(128),
+				MaxCompletionTokens: int64Pointer(256),
+				MaxOutputTokens:     int64Pointer(512),
 			},
 		},
 		{
@@ -102,19 +102,19 @@ func TestParseRequestMetadata(t *testing.T) {
 		{
 			name:  "max tokens zero",
 			input: `{"max_tokens":0}`,
-			want:  RequestMetadata{MaxTokens: intPointer(0)},
+			want:  RequestMetadata{MaxTokens: int64Pointer(0)},
 		},
 		{
 			name:  "max completion tokens zero",
 			input: `{"max_completion_tokens":0}`,
-			want:  RequestMetadata{MaxCompletionTokens: intPointer(0)},
+			want:  RequestMetadata{MaxCompletionTokens: int64Pointer(0)},
 		},
 		{
 			name:  "both token fields zero",
 			input: `{"max_tokens":0,"max_completion_tokens":0}`,
 			want: RequestMetadata{
-				MaxTokens:           intPointer(0),
-				MaxCompletionTokens: intPointer(0),
+				MaxTokens:           int64Pointer(0),
+				MaxCompletionTokens: int64Pointer(0),
 			},
 		},
 		{
@@ -160,7 +160,7 @@ func TestParseRequestMetadata(t *testing.T) {
 		{
 			name:  "max output tokens zero",
 			input: `{"max_output_tokens":0}`,
-			want:  RequestMetadata{MaxOutputTokens: intPointer(0)},
+			want:  RequestMetadata{MaxOutputTokens: int64Pointer(0)},
 		},
 		{
 			name:       "responses max output tokens wrong type",
@@ -227,7 +227,7 @@ func assertBoolPointer(t *testing.T, name string, got, want *bool) {
 	}
 }
 
-func assertIntPointer(t *testing.T, name string, got, want *int) {
+func assertIntPointer(t *testing.T, name string, got, want *int64) {
 	t.Helper()
 
 	if (got == nil) != (want == nil) {
@@ -242,6 +242,23 @@ func boolPointer(value bool) *bool {
 	return &value
 }
 
-func intPointer(value int) *int {
-	return &value
+func TestParseRequestMetadataInt64TokenBoundaries(t *testing.T) {
+	const maximum = "9223372036854775807"
+	metadata, err := ParseRequestMetadata([]byte(`{"max_tokens":9223372036854775807,"max_completion_tokens":9223372036854775807,"max_output_tokens":9223372036854775807}`))
+	if err != nil {
+		t.Fatalf("ParseRequestMetadata(max int64) error = %v", err)
+	}
+	for name, value := range map[string]*int64{
+		"MaxTokens":           metadata.MaxTokens,
+		"MaxCompletionTokens": metadata.MaxCompletionTokens,
+		"MaxOutputTokens":     metadata.MaxOutputTokens,
+	} {
+		if value == nil || *value != int64(^uint64(0)>>1) {
+			t.Fatalf("%s = %v, want %s", name, value, maximum)
+		}
+	}
+
+	if _, err := ParseRequestMetadata([]byte(`{"max_tokens":9223372036854775808}`)); !errors.Is(err, ErrInvalidMetadataField) {
+		t.Fatalf("int64 overflow error = %v, want ErrInvalidMetadataField", err)
+	}
 }

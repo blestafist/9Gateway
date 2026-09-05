@@ -23,9 +23,9 @@ var ErrInvalidMetadataField = errors.New("openai: invalid metadata field")
 type RequestMetadata struct {
 	Model               string `json:"model,omitempty"`
 	Stream              *bool  `json:"stream,omitempty"`
-	MaxTokens           *int   `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int   `json:"max_completion_tokens,omitempty"`
-	MaxOutputTokens     *int   `json:"max_output_tokens,omitempty"`
+	MaxTokens           *int64 `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int64 `json:"max_completion_tokens,omitempty"`
+	MaxOutputTokens     *int64 `json:"max_output_tokens,omitempty"`
 }
 
 // ParseRequestMetadata extracts the small set of request fields observed by

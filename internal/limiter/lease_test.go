@@ -190,6 +190,75 @@ func TestResourceLeasePromotesProvisionalWithoutSecondConcurrencySlot(t *testing
 	}
 }
 
+func TestResourceLeaseCannotPromoteUnlimitedProvisionalIntoConfiguredLimit(t *testing.T) {
+	concurrency := NewConcurrencyLimiter()
+	coordinator := NewResourceLeaseCoordinator(concurrency, nil)
+	provisional, admitted := concurrency.Acquire("key", 0)
+	if !admitted {
+		t.Fatal("unlimited provisional acquisition rejected")
+	}
+	if promoted, rejection := coordinator.AcquireWithProvisional(provisional, ResourceLeaseOptions{KeyID: "key", MaxConcurrency: 1}); promoted != nil || rejection == nil {
+		t.Fatalf("unlimited promotion = (%v, %v), want rejection", promoted, rejection)
+	}
+	// The failed promotion must not consume or release another request's slot.
+	first, rejection := coordinator.Acquire(ResourceLeaseOptions{KeyID: "key", MaxConcurrency: 1})
+	if rejection != nil || first == nil {
+		t.Fatalf("capacity after failed promotion = (%v, %v)", first, rejection)
+	}
+	if second, rejection := coordinator.Acquire(ResourceLeaseOptions{KeyID: "key", MaxConcurrency: 1}); second != nil || rejection == nil {
+		t.Fatal("configured concurrency limit was bypassed")
+	}
+	first.ReleaseBeforeUpstream()
+}
+
+func TestResourceLeaseProvisionalValidationDoesNotConsumeCapacity(t *testing.T) {
+	concurrency := NewConcurrencyLimiter()
+	coordinator := NewResourceLeaseCoordinator(concurrency, nil)
+	backed, admitted := concurrency.Acquire("key", 1)
+	if !admitted {
+		t.Fatal("backed provisional acquisition rejected")
+	}
+	for name, test := range map[string]struct {
+		provisional *Lease
+		options     ResourceLeaseOptions
+	}{
+		"negative limit": {provisional: backed, options: ResourceLeaseOptions{KeyID: "key", MaxConcurrency: -1}},
+		"wrong key":      {provisional: backed, options: ResourceLeaseOptions{KeyID: "other", MaxConcurrency: 1}},
+		"zero value":     {provisional: &Lease{}, options: ResourceLeaseOptions{KeyID: "key", MaxConcurrency: 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if promoted, rejection := coordinator.AcquireWithProvisional(test.provisional, test.options); promoted != nil || rejection == nil {
+				t.Fatalf("invalid promotion = (%v, %v), want rejection", promoted, rejection)
+			}
+		})
+	}
+	backed.Release()
+	if next, rejection := coordinator.Acquire(ResourceLeaseOptions{KeyID: "key", MaxConcurrency: 1}); rejection != nil || next == nil {
+		t.Fatalf("capacity after invalid promotions = (%v, %v)", next, rejection)
+	} else {
+		next.ReleaseBeforeUpstream()
+	}
+}
+
+func TestResourceLeaseRejectsProvisionalFromAnotherLimiter(t *testing.T) {
+	coordinatorLimiter := NewConcurrencyLimiter()
+	otherLimiter := NewConcurrencyLimiter()
+	coordinator := NewResourceLeaseCoordinator(coordinatorLimiter, nil)
+	provisional, admitted := otherLimiter.Acquire("key", 1)
+	if !admitted {
+		t.Fatal("other-limiter provisional acquisition rejected")
+	}
+	if promoted, rejection := coordinator.AcquireWithProvisional(provisional, ResourceLeaseOptions{KeyID: "key", MaxConcurrency: 1}); promoted != nil || rejection == nil {
+		t.Fatalf("wrong-limiter promotion = (%v, %v), want rejection", promoted, rejection)
+	}
+	provisional.Release()
+	if next, rejection := coordinator.Acquire(ResourceLeaseOptions{KeyID: "key", MaxConcurrency: 1}); rejection != nil || next == nil {
+		t.Fatalf("coordinator capacity after wrong-limiter rejection = (%v, %v)", next, rejection)
+	} else {
+		next.ReleaseBeforeUpstream()
+	}
+}
+
 func TestResourceLeaseConcurrentRepeatedCleanup(t *testing.T) {
 	clock := &testClock{now: time.Unix(1, 0).UTC()}
 	concurrency := NewConcurrencyLimiter()

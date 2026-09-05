@@ -144,13 +144,10 @@ func (coordinator *ResourceLeaseCoordinator) AcquireWithProvisional(provisional 
 	if coordinator == nil || provisional == nil {
 		return nil, &AdmissionError{Resource: AdmissionConcurrency}
 	}
-	if coordinator.concurrency != nil && provisional.limiter != nil && provisional.limiter != coordinator.concurrency {
+	if options.MaxConcurrency < 0 {
 		return nil, &AdmissionError{Resource: AdmissionConcurrency}
 	}
-	if provisional.limiter != nil && provisional.keyID != options.KeyID {
-		return nil, &AdmissionError{Resource: AdmissionConcurrency}
-	}
-	if !provisional.adopt() {
+	if !provisional.adoptFor(coordinator.concurrency, options.KeyID, options.MaxConcurrency > 0) {
 		return nil, &AdmissionError{Resource: AdmissionConcurrency}
 	}
 	return coordinator.finishAdmission(provisional, options)
@@ -182,7 +179,7 @@ func (coordinator *ResourceLeaseCoordinator) acquireConcurrency(keyID string, ma
 		return nil, &AdmissionError{Resource: AdmissionConcurrency}
 	}
 	if coordinator.concurrency == nil {
-		return &Lease{}, nil
+		return &Lease{keyID: keyID, admitted: true}, nil
 	}
 	lease, ok := coordinator.concurrency.Acquire(keyID, maximum)
 	if !ok {
