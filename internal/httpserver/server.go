@@ -52,10 +52,21 @@ func NewHandlerWithAdminAndCompletionLogger(upstreamClient *http.Client, upstrea
 // injectable for embedders and HTTP tests while the convenience constructors
 // use the wall clock.
 func NewHandlerWithAdminAndRequestLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, completionLogger *CompletionLogger) (http.Handler, error) {
+	return NewHandlerWithAdminAndLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, limiter.NewConcurrencyLimiter(), completionLogger)
+}
+
+// NewHandlerWithAdminAndLimiters builds the administration and public routes
+// with explicitly owned request-window and concurrency limiters. Both
+// limiters are process-local and may be shared by handlers when an application
+// needs one policy domain across more than one listener.
+func NewHandlerWithAdminAndLimiters(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger) (http.Handler, error) {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
-	proxy := newProxyHandlerWithRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter)
+	if concurrencyLimiter == nil {
+		concurrencyLimiter = limiter.NewConcurrencyLimiter()
+	}
+	proxy := newProxyHandlerWithLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter)
 	service, err := newAdminKeyService(repository, []byte(authPepper))
 	if err != nil {
 		return nil, err
@@ -77,10 +88,19 @@ func NewHandlerWithAuthenticator(upstreamClient *http.Client, upstreamBaseURL, u
 // the existing unrestricted behavior and is useful for callers that do not
 // configure request windows.
 func NewHandlerWithAuthenticatorAndRequestLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, completionLogger *CompletionLogger) http.Handler {
+	return NewHandlerWithAuthenticatorAndLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, limiter.NewConcurrencyLimiter(), completionLogger)
+}
+
+// NewHandlerWithAuthenticatorAndLimiters builds an authenticated public
+// handler with explicitly owned request-window and concurrency limiters.
+func NewHandlerWithAuthenticatorAndLimiters(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger) http.Handler {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
-	proxy := newProxyHandlerWithRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter)
+	if concurrencyLimiter == nil {
+		concurrencyLimiter = limiter.NewConcurrencyLimiter()
+	}
+	proxy := newProxyHandlerWithLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter)
 	router := routeWithAuthenticator(proxy, nil, authenticator)
 	return newHandlerWithCompletionLogger(completionLogger, router)
 }
@@ -88,7 +108,7 @@ func NewHandlerWithAuthenticatorAndRequestLimiter(upstreamClient *http.Client, u
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
 // completion logger. The process entry point should shut that logger down.
 func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, completionLogger *CompletionLogger, authenticators ...*auth.Authenticator) http.Handler {
-	proxy := newProxyHandlerWithRequestLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, limiter.NewRequestLimiter(nil))
+	proxy := newProxyHandlerWithLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, limiter.NewRequestLimiter(nil), limiter.NewConcurrencyLimiter())
 	router := routeWithAdmin(proxy, nil, authenticators...)
 	return newHandlerWithCompletionLogger(completionLogger, router)
 }
@@ -135,11 +155,12 @@ func routeWithAuthenticator(proxy http.Handler, admin http.Handler, authenticato
 }
 
 type proxyHandler struct {
-	client           *http.Client
-	baseURL          *url.URL
-	apiKey           string
-	requestLimiter   *limiter.RequestLimiter
-	responseDispatch responseDispatchFunc
+	client             *http.Client
+	baseURL            *url.URL
+	apiKey             string
+	requestLimiter     *limiter.RequestLimiter
+	concurrencyLimiter *limiter.ConcurrencyLimiter
+	responseDispatch   responseDispatchFunc
 }
 
 type responseDispatchFunc func(http.ResponseWriter, *http.Response, *openai.RequestMetadata)
@@ -163,9 +184,13 @@ func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler 
 }
 
 func newProxyHandlerWithRequestLimiter(client *http.Client, baseURL, apiKey string, requestLimiter *limiter.RequestLimiter) *proxyHandler {
+	return newProxyHandlerWithLimiters(client, baseURL, apiKey, requestLimiter, limiter.NewConcurrencyLimiter())
+}
+
+func newProxyHandlerWithLimiters(client *http.Client, baseURL, apiKey string, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter) *proxyHandler {
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
-		return &proxyHandler{client: client, apiKey: apiKey, requestLimiter: requestLimiter, responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
+		return &proxyHandler{client: client, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
 			writeGatewayError(response, gatewayErrorInternal, "")
 		}}
 	}
@@ -173,7 +198,7 @@ func newProxyHandlerWithRequestLimiter(client *http.Client, baseURL, apiKey stri
 	// A nil responseDispatch selects the built-in dispatcher. Keeping the
 	// injectable legacy-shaped callback available is useful to transport tests
 	// and avoids making request classification part of that callback's API.
-	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter}
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -213,7 +238,32 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			}
 		}
 	}
-	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), requestBody)
+	proxyContext, cancelUpstream := context.WithCancel(request.Context())
+	var concurrencyLease *limiter.Lease
+	var upstreamResponse *http.Response
+	// Cancellation must reach the upstream before any request/response body is
+	// closed and before the lease is returned. Keeping all cleanup in one defer
+	// also covers every internal early return after request-window admission.
+	defer func() {
+		cancelUpstream()
+		if upstreamResponse != nil && upstreamResponse.Body != nil {
+			_ = upstreamResponse.Body.Close()
+		}
+		if requestBody != nil {
+			_ = requestBody.Close()
+		}
+		concurrencyLease.Release()
+	}()
+	if handler.concurrencyLimiter != nil {
+		if principal, authenticated := PrincipalFromContext(request.Context()); authenticated {
+			concurrencyLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
+			if concurrencyLease == nil {
+				writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
+				return
+			}
+		}
+	}
+	upstreamRequest, err := http.NewRequestWithContext(proxyContext, request.Method, targetURL.String(), requestBody)
 	if err != nil {
 		writeGatewayError(response, gatewayErrorInternal, "")
 		return
@@ -222,17 +272,16 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
 
-	upstreamResponse, err := handler.client.Do(upstreamRequest)
+	upstreamResponse, err = handler.client.Do(upstreamRequest)
 	if err != nil {
 		writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 		return
 	}
-	defer upstreamResponse.Body.Close()
 	if handler.responseDispatch != nil {
 		handler.responseDispatch(response, upstreamResponse, metadata)
 		return
 	}
-	dispatchResponse(response, upstreamResponse, metadata, request)
+	dispatchResponse(response, upstreamResponse, metadata, request.WithContext(proxyContext))
 }
 
 func shouldInspectRequestMetadata(request *http.Request) bool {
