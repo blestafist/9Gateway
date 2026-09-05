@@ -1,18 +1,18 @@
 # Current Work
 
-Current milestone: authentication and per-key request/concurrency policy.
+Current milestone: none.
 
-Done: `T001`-`T079`.
+Done: `T001`-`T080`.
 
-Current: `T080` - harden the authentication and limits milestone.
+Current: none.
 
-Queued: none for the current milestone.
+Queued: none.
 
-Known issues: none for the current milestone.
+Known issues: none.
 
 Important: transparent SSE remains byte-preserving and independent from the
 bounded generic parser. T061-T063 close narrow transport and observability
-risks found by the milestone audit. T065-T079 add SQLite-backed gateway keys,
+risks found by the milestone audit. T065-T080 add SQLite-backed gateway keys,
 minimal admin bootstrap, hot-path authentication, model policy, generic request
 windows, and per-key concurrency. Token accounting, budgets, request-history
 persistence, CLI, tool-call execution/validation, and Web UI remain out of scope.

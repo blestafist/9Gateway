@@ -8,9 +8,9 @@ slow bodies, hanging connections, or parallel requests.
 
 Current transport scenarios include ordinary JSON, SSE with and without
 `[DONE]`, split and coalesced SSE reads, client cancellation, concurrent
-requests, upstream error statuses, unknown endpoints, binary bodies, and bounded
-large requests. Future compatibility coverage will include client `stream:false`
-with upstream SSE and fragmented tool calls.
+requests, upstream error statuses, unknown endpoints, binary bodies, bounded
+large requests, and client `stream:false` with upstream SSE, including
+fragmented tool calls.
 
 ## Regressions
 
@@ -22,8 +22,9 @@ with upstream SSE and fragmented tool calls.
 - Client cancellation promptly reaches upstream.
 - Slow parsing/telemetry does not block streaming.
 
-Future compatibility regressions will cover SSE aggregation for a non-stream
-client and fragmented tool calls.
+SSE aggregation regressions cover a non-stream client and fragmented tool calls;
+the conversion is bounded and is only selected after actual upstream response
+classification.
 
 Timing assertions use generous CI thresholds, not flaky one-millisecond targets.
 

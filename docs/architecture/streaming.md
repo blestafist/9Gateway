@@ -65,7 +65,7 @@ telemetry errors and do not break otherwise healthy passthrough.
 ## SSE To JSON
 
 When a client explicitly requests `stream:false` and upstream actually returns
-SSE, a future compatibility layer may buffer and aggregate the stream into one
+SSE, the bounded compatibility path buffers and aggregates the stream into one
 OpenAI-compatible JSON response.
 Support multiple choices, role/content deltas, finish reason, usage, and indexed
 tool calls. Concatenate fragmented function arguments before any JSON decoding.
