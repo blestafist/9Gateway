@@ -160,6 +160,88 @@ func TestAdminCreateKeyHTTPRejectsInvalidBodies(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateKeyPolicyHTTPIsAtomicAndTakesEffectImmediately(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamCalls++
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repository := storage.NewAPIKeyRepository(database)
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), upstream.URL, "upstream-secret", "admin-secret", "pepper", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := httptest.NewServer(handler)
+	t.Cleanup(gateway.Close)
+	createdResponse, err := http.DefaultClient.Do(newAdminRequest(t, gateway.URL, `{"name":"mutable"}`, "admin-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	decodeResponse(t, createdResponse, &created)
+	if createdResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", createdResponse.StatusCode)
+	}
+
+	update := newPolicyRequest(t, gateway.URL, created.ID, `{"enabled":true,"policy":{"allowed_models":["new-model"],"request_windows":[{"amount":2,"duration":"1m"}]}}`, "admin-secret")
+	update.Method = http.MethodPut
+	updatedResponse, err := http.DefaultClient.Do(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated struct {
+		ID      string          `json:"id"`
+		Enabled bool            `json:"enabled"`
+		Policy  json.RawMessage `json:"policy"`
+	}
+	decodeResponse(t, updatedResponse, &updated)
+	if updatedResponse.StatusCode != http.StatusOK || updated.ID != created.ID || !updated.Enabled || string(updated.Policy) != `{"allowed_models":["new-model"],"request_windows":[{"amount":2,"duration":"1m"}]}` {
+		t.Fatalf("update response = %#v, status %d", updated, updatedResponse.StatusCode)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"old-model"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+created.Key)
+	request.Header.Set("Content-Type", "application/json")
+	oldResponse, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldResponse.Body.Close()
+	if oldResponse.StatusCode != http.StatusForbidden || upstreamCalls != 0 {
+		t.Fatalf("old model status/calls = %d/%d", oldResponse.StatusCode, upstreamCalls)
+	}
+
+	invalid := newPolicyRequest(t, gateway.URL, created.ID, `{"enabled":false,"policy":{"unknown":true}}`, "admin-secret")
+	invalid.Method = http.MethodPut
+	invalidResponse, err := http.DefaultClient.Do(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidResponse.Body.Close()
+	if invalidResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid update status = %d", invalidResponse.StatusCode)
+	}
+	record, err := repository.GetByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Enabled || record.PolicyJSON != `{"allowed_models":["new-model"],"request_windows":[{"amount":2,"duration":"1m"}]}` {
+		t.Fatalf("invalid update changed record = %#v", record)
+	}
+}
+
 func TestAdminKeyServiceRetriesDuplicateGenerationAndReturnsSafeFailure(t *testing.T) {
 	database, err := storage.Open(context.Background(), ":memory:")
 	if err != nil {
@@ -450,6 +532,19 @@ func newAdminRequest(t *testing.T, baseURL, body, credential string) *http.Reque
 		} else {
 			request.Header.Set("Authorization", "Bearer "+credential)
 		}
+	}
+	return request
+}
+
+func newPolicyRequest(t *testing.T, baseURL, id, body, credential string) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPut, baseURL+"/admin/v1/keys/"+id+"/policy", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if credential != "" {
+		request.Header.Set("Authorization", "Bearer "+credential)
 	}
 	return request
 }

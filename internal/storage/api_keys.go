@@ -315,6 +315,40 @@ func (repository *APIKeyRepository) UpdateEnabled(ctx context.Context, id string
 	return repository.SetEnabled(ctx, id, enabled)
 }
 
+// UpdatePolicy atomically replaces a key's enabled state and complete policy
+// document. Policy validation belongs to the auth/admin boundary; this method
+// only persists the already validated replacement as one SQLite update.
+func (repository *APIKeyRepository) UpdatePolicy(ctx context.Context, id string, enabled bool, policyJSON string) error {
+	if ctx == nil {
+		return errors.New("update api key policy: nil context")
+	}
+	if strings.TrimSpace(id) == "" {
+		return ErrInvalidRecord
+	}
+	if repository == nil || repository.database == nil {
+		return ErrRepositoryUnavailable
+	}
+	result, err := repository.database.ExecContext(ctx,
+		"UPDATE api_keys SET enabled = ?, policy_json = ?, updated_at = max(updated_at, created_at, ?) WHERE id = ?",
+		boolInt(enabled), policyJSON, time.Now().UTC().Truncate(time.Second).Unix(), id)
+	if err != nil {
+		return errors.New("update api key policy: database write failed")
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return errors.New("update api key policy: database result unavailable")
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateEnabledAndPolicy is a descriptive alias for UpdatePolicy.
+func (repository *APIKeyRepository) UpdateEnabledAndPolicy(ctx context.Context, id string, enabled bool, policyJSON string) error {
+	return repository.UpdatePolicy(ctx, id, enabled, policyJSON)
+}
+
 func scanAPIKey(scanner interface{ Scan(...any) error }) (APIKeyRecord, error) {
 	var record APIKeyRecord
 	var keyHash []byte

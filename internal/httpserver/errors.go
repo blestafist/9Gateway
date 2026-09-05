@@ -13,6 +13,7 @@ const (
 	gatewayErrorRequestLimit       = "request_limit_exceeded"
 	gatewayErrorConcurrencyLimit   = "concurrency_limit_exceeded"
 	gatewayErrorInvalidRequest     = "invalid_request"
+	gatewayErrorNotFound           = "not_found"
 	gatewayErrorUpstreamConnection = "upstream_connection_error"
 	gatewayErrorInternal           = "gateway_internal_error"
 )
@@ -42,6 +43,7 @@ var gatewayErrorDefinitions = map[string]gatewayErrorDefinition{
 	gatewayErrorRequestLimit:       {"Request limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
 	gatewayErrorConcurrencyLimit:   {"Concurrency limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
 	gatewayErrorInvalidRequest:     {"Invalid request.", "invalid_request_error", http.StatusBadRequest},
+	gatewayErrorNotFound:           {"The requested resource was not found.", "invalid_request_error", http.StatusNotFound},
 	gatewayErrorUpstreamConnection: {"Unable to connect to the upstream service.", "upstream_error", http.StatusBadGateway},
 	gatewayErrorInternal:           {"An internal gateway error occurred.", "server_error", http.StatusInternalServerError},
 }

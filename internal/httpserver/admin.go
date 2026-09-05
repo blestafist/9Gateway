@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -39,6 +40,10 @@ type apiKeyLister interface {
 type apiKeyRepository interface {
 	apiKeyInserter
 	apiKeyLister
+}
+
+type apiKeyPolicyUpdater interface {
+	UpdatePolicy(context.Context, string, bool, string) error
 }
 
 type gatewayKeyGenerator interface {
@@ -116,6 +121,17 @@ type createdAdminKey struct {
 	ExpiresAt *time.Time
 	CreatedAt time.Time
 	RawKey    string
+}
+
+type updatedAdminKey struct {
+	ID        string
+	Name      string
+	Prefix    string
+	Enabled   bool
+	ExpiresAt *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Policy    json.RawMessage
 }
 
 // create makes one persistent key. A small retry budget handles an extremely
@@ -198,6 +214,78 @@ func (service *adminKeyService) create(ctx context.Context, name string, expires
 	return createdAdminKey{}, errAdminKeyCreation
 }
 
+// updatePolicy validates and prepares the complete replacement before the
+// durable update. The prepared snapshot is published only after the one-statement
+// status/policy update succeeds, so an invalid replacement cannot alter either
+// persistent or in-memory state.
+func (service *adminKeyService) updatePolicy(ctx context.Context, id string, enabled bool, policyJSON []byte) (updatedAdminKey, error) {
+	if service == nil || service.repository == nil || service.auth == nil {
+		return updatedAdminKey{}, errAdminKeyCreation
+	}
+	if strings.TrimSpace(id) == "" {
+		return updatedAdminKey{}, storage.ErrNotFound
+	}
+	if _, err := auth.ParsePolicyJSON(policyJSON); err != nil {
+		return updatedAdminKey{}, errInvalidAdminRequest
+	}
+	updater, ok := service.repository.(apiKeyPolicyUpdater)
+	if !ok {
+		return updatedAdminKey{}, errAdminKeyCreation
+	}
+
+	service.refreshMu.Lock()
+	defer service.refreshMu.Unlock()
+	records, err := service.repository.List(ctx)
+	if err != nil {
+		return updatedAdminKey{}, errAdminKeyCreation
+	}
+	var replacement storage.APIKeyRecord
+	found := false
+	unchanged := false
+	for index := range records {
+		if records[index].ID != id {
+			continue
+		}
+		found = true
+		unchanged = records[index].Enabled == enabled && records[index].PolicyJSON == string(policyJSON)
+		replacement = records[index]
+		replacement.Enabled = enabled
+		replacement.PolicyJSON = string(policyJSON)
+		records[index] = replacement
+		break
+	}
+	if !found {
+		return updatedAdminKey{}, storage.ErrNotFound
+	}
+	prepared, err := service.auth.Prepare(authRecords(records))
+	if err != nil {
+		return updatedAdminKey{}, errAdminKeyCreation
+	}
+	if unchanged {
+		// A durable no-op still publishes the prepared equivalent so the request
+		// has the same immediate effect even if a prior process refresh lagged.
+		service.auth.Publish(prepared)
+		return updatedAdminKeyFromRecord(replacement, policyJSON), nil
+	}
+	if err := updater.UpdatePolicy(ctx, id, enabled, string(policyJSON)); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return updatedAdminKey{}, storage.ErrNotFound
+		}
+		return updatedAdminKey{}, errAdminKeyCreation
+	}
+	service.auth.Publish(prepared)
+	return updatedAdminKeyFromRecord(replacement, policyJSON), nil
+}
+
+func updatedAdminKeyFromRecord(record storage.APIKeyRecord, policyJSON []byte) updatedAdminKey {
+	return updatedAdminKey{
+		ID: record.ID, Name: record.Name, Prefix: record.DisplayPrefix,
+		Enabled: record.Enabled, ExpiresAt: record.ExpiresAt,
+		CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		Policy: append(json.RawMessage(nil), policyJSON...),
+	}
+}
+
 func newAPIKeyID() (string, error) {
 	var random [16]byte
 	if _, err := io.ReadFull(rand.Reader, random[:]); err != nil {
@@ -207,6 +295,10 @@ func newAPIKeyID() (string, error) {
 }
 
 func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/admin/v1/keys/") && strings.HasSuffix(request.URL.Path, "/policy") {
+		handler.updatePolicy(response, request)
+		return
+	}
 	if request.Method != http.MethodPost || request.URL.Path != "/admin/v1/keys" {
 		http.NotFound(response, request)
 		return
@@ -250,6 +342,41 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		Key       string     `json:"key"`
 	}{created.ID, created.Name, created.Prefix, created.Enabled, created.ExpiresAt, created.CreatedAt, created.RawKey}
 	writeAdminJSON(response, http.StatusCreated, responseBody)
+}
+
+func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request *http.Request) {
+	const prefix = "/admin/v1/keys/"
+	id := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, prefix), "/policy")
+	if id == "" || strings.Contains(id, "/") {
+		writeAdminError(response, http.StatusNotFound, "not_found", "")
+		return
+	}
+	if !adminBearerMatches(request, handler.credential) {
+		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+		return
+	}
+	body, err := decodeAdminPolicyRequest(response, request)
+	if err != nil {
+		if errors.Is(err, errAdminBodyTooLarge) {
+			writeAdminError(response, http.StatusRequestEntityTooLarge, "invalid_request", "request body is too large")
+		} else {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request body")
+		}
+		return
+	}
+	updated, err := handler.service.updatePolicy(request.Context(), id, *body.Enabled, body.Policy)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			writeAdminError(response, http.StatusNotFound, gatewayErrorNotFound, "")
+		case errors.Is(err, errInvalidAdminRequest), errors.Is(err, auth.ErrInvalidPolicy):
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request body")
+		default:
+			writeAdminError(response, http.StatusInternalServerError, "internal_error", "key policy update failed")
+		}
+		return
+	}
+	writeAdminJSON(response, http.StatusOK, updated)
 }
 
 type adminHandler struct {
@@ -305,6 +432,114 @@ func decodeAdminKeyRequest(response http.ResponseWriter, request *http.Request) 
 		return adminKeyRequest{}, errInvalidAdminRequest
 	}
 	return body, nil
+}
+
+type adminPolicyRequest struct {
+	Enabled *bool           `json:"enabled"`
+	Policy  json.RawMessage `json:"policy"`
+}
+
+func decodeAdminPolicyRequest(response http.ResponseWriter, request *http.Request) (adminPolicyRequest, error) {
+	if request.Body == nil || !isJSONMediaType(request.Header) {
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, adminRequestBodyLimit)
+	defer request.Body.Close()
+	data, err := io.ReadAll(request.Body)
+	if err != nil {
+		if isAdminBodyTooLarge(err) {
+			return adminPolicyRequest{}, errAdminBodyTooLarge
+		}
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var body adminPolicyRequest
+	if err := decoder.Decode(&body); err != nil {
+		if isAdminBodyTooLarge(err) {
+			return adminPolicyRequest{}, errAdminBodyTooLarge
+		}
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if isAdminBodyTooLarge(err) {
+			return adminPolicyRequest{}, errAdminBodyTooLarge
+		}
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	if body.Enabled == nil || len(bytes.TrimSpace(body.Policy)) == 0 {
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	if _, err := auth.ParsePolicyJSON(body.Policy); err != nil {
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	compact := new(bytes.Buffer)
+	if err := json.Compact(compact, body.Policy); err != nil {
+		return adminPolicyRequest{}, errInvalidAdminRequest
+	}
+	body.Policy = compact.Bytes()
+	return body, nil
+}
+
+// rejectDuplicateJSONKeys rejects duplicate names at every object level. The
+// policy parser has the same rule, while this outer envelope must not silently
+// choose between repeated enabled/policy members either.
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := scanJSONValue(decoder); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errInvalidAdminRequest
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch delimiter := token.(type) {
+	case json.Delim:
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				name, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := name.(string)
+				if !ok {
+					return errInvalidAdminRequest
+				}
+				if _, exists := seen[key]; exists {
+					return errInvalidAdminRequest
+				}
+				seen[key] = struct{}{}
+				if err := scanJSONValue(decoder); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := scanJSONValue(decoder); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		}
+	}
+	return nil
 }
 
 func isAdminBodyTooLarge(err error) bool {
