@@ -331,15 +331,15 @@ func writeAdminJSON(response http.ResponseWriter, status int, value any) {
 }
 
 func writeAdminError(response http.ResponseWriter, status int, code, message string) {
-	writeAdminJSON(response, status, struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-		} `json:"error"`
-	}{Error: struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-	}{Message: message, Type: "gateway_error", Code: code}})
+	// Do not expose parser/storage detail supplied by callers. Keep the custom
+	// status for the oversized-body case, but use the shared safe envelope.
+	if code == "unauthorized" {
+		code = gatewayErrorInvalidAPIKey
+	} else if code == "invalid_request" {
+		code = gatewayErrorInvalidRequest
+	} else if _, ok := gatewayErrorDefinitions[code]; !ok {
+		code = gatewayErrorInternal
+	}
+	definition := gatewayErrorDefinitions[code]
+	writeGatewayErrorStatus(response, status, code, definition, "")
 }

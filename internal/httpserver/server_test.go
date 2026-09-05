@@ -107,6 +107,35 @@ func TestProxyForwardsMethodPathAndQuery(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesUpstreamErrorResponse(t *testing.T) {
+	wantBody := []byte(`{"error":{"message":"upstream failure","code":"provider_error"}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("X-Upstream-Error", "preserve-me")
+		response.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = response.Write(wantBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+	response, err := http.Get(gateway.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || !bytes.Equal(gotBody, wantBody) {
+		t.Fatalf("upstream error = status %d body %q", response.StatusCode, gotBody)
+	}
+	if response.Header.Get("Content-Type") != "application/json" || response.Header.Get("X-Upstream-Error") != "preserve-me" {
+		t.Fatalf("upstream error headers were not preserved: %v", response.Header)
+	}
+}
+
 func TestJoinURLPath(t *testing.T) {
 	for _, test := range []struct {
 		name        string

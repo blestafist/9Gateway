@@ -106,7 +106,7 @@ func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler 
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
 		return &proxyHandler{client: client, apiKey: apiKey, responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
-			http.Error(response, "invalid upstream URL", http.StatusInternalServerError)
+			writeGatewayError(response, gatewayErrorInternal, "")
 		}}
 	}
 
@@ -118,7 +118,7 @@ func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler 
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	if handler.baseURL == nil {
-		http.Error(response, "invalid upstream URL", http.StatusInternalServerError)
+		writeGatewayError(response, gatewayErrorInternal, "")
 		return
 	}
 
@@ -130,7 +130,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	requestBody, metadata := inspectChatRequest(request)
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, targetURL.String(), requestBody)
 	if err != nil {
-		http.Error(response, "failed to create upstream request", http.StatusBadGateway)
+		writeGatewayError(response, gatewayErrorInternal, "")
 		return
 	}
 	upstreamRequest.ContentLength = request.ContentLength
@@ -139,7 +139,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 
 	upstreamResponse, err := handler.client.Do(upstreamRequest)
 	if err != nil {
-		http.Error(response, "upstream request failed", http.StatusBadGateway)
+		writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 		return
 	}
 	defer upstreamResponse.Body.Close()
@@ -213,7 +213,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 			// A response transformation cannot safely preserve an unsupported or
 			// malformed representation. Fail before copying upstream headers or
 			// committing any downstream bytes.
-			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
+			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 			return
 		}
 		if closeAggregationBody != nil {
@@ -223,7 +223,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 		if err != nil {
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
-			http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
+			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 			return
 		}
 		// AggregateSSEToJSON intentionally stops reading at [DONE]. Encodings
@@ -231,7 +231,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 		// representation has nothing left to validate and must not wait for EOF.
 		if !done || requiresDrain {
 			if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
-				http.Error(response, "upstream response could not be converted", http.StatusBadGateway)
+				writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 				return
 			}
 		} else {
@@ -526,7 +526,7 @@ func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		id, err := newRequestID()
 		if err != nil {
-			http.Error(response, "failed to create request ID", http.StatusInternalServerError)
+			writeGatewayError(response, gatewayErrorInternal, "")
 			return
 		}
 

@@ -2,11 +2,11 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T070`.
+Done: `T001`-`T071`.
 
-Current: `T071` - render OpenAI-style gateway errors.
+Current: `T072` - authenticate all public v1 requests.
 
-Queued: `T072`-`T080` in dependency order in `TASKS.md`.
+Queued: `T073`-`T080` in dependency order in `TASKS.md`.
 
 Known issues: none for the current milestone.
 
