@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T081`.
+Done: `T001`-`T082`.
 
-Current: `T082` - extract usage from JSON responses.
+Current: `T083` - normalize rich streaming usage.
 
-Queued: `T082`-`T100` in dependency order from `TASKS.md`.
+Queued: `T083`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
