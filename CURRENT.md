@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T087`.
+Done: `T001`-`T088`.
 
-Current: `T088` - reserve generic token windows.
+Current: `T089` - reconcile token reservations exactly once.
 
-Queued: `T088`-`T100` in dependency order from `TASKS.md`.
+Queued: `T089`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
