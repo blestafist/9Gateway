@@ -2,9 +2,9 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T077`.
+Done: `T001`-`T078`.
 
-Current: `T078` - implement per-key concurrency leases.
+Current: `T079` - hold concurrency through the full proxy lifecycle.
 
 Queued: `T079`-`T080` in dependency order in `TASKS.md`.
 
