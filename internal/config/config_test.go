@@ -1,10 +1,22 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func minimalConfig(databasePath string) Config {
+	return Config{
+		ListenAddr:      ":8080",
+		UpstreamBaseURL: "http://router.example.test",
+		UpstreamAPIKey:  "secret",
+		SQLitePath:      databasePath,
+		AuthPepper:      "pepper",
+		AdminCredential: "admin",
+	}
+}
 
 func TestConfigValidate(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
@@ -134,6 +146,80 @@ func TestConfigValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want error containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestTokenizerConfigDefaultsAndValidation(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	config := minimalConfig(databasePath)
+	if err := config.Validate(); err != nil {
+		t.Fatalf("minimal Config.Validate() error = %v", err)
+	}
+	config.ApplyDefaults()
+	want := TokenizerConfig{
+		Mode:                       TokenizerModeEstimate,
+		MaxInspectedRequestBytes:   DefaultMaxInspectedRequestBytes,
+		FallbackUnknownInputTokens: DefaultFallbackUnknownInputTokens,
+		FallbackMaxOutputTokens:    DefaultFallbackMaxOutputTokens,
+	}
+	if config.Tokenizer != want {
+		t.Fatalf("defaults = %+v, want %+v", config.Tokenizer, want)
+	}
+
+	for _, mode := range []TokenizerMode{TokenizerModeUsageOnly, TokenizerModeEstimate} {
+		t.Run(string(mode), func(t *testing.T) {
+			config := minimalConfig(databasePath)
+			config.Tokenizer.Mode = mode
+			if err := config.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestTokenizerConfigRejectsInvalidValues(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	tests := []struct {
+		name string
+		edit func(*TokenizerConfig)
+		want string
+	}{
+		{name: "unknown mode", edit: func(c *TokenizerConfig) { c.Mode = "exact" }, want: "mode"},
+		{name: "zero bytes", edit: func(c *TokenizerConfig) { c.MaxInspectedRequestBytes = -1 }, want: "request bytes"},
+		{name: "excessive bytes", edit: func(c *TokenizerConfig) { c.MaxInspectedRequestBytes = MaxMaxInspectedRequestBytes + 1 }, want: "exceeds maximum"},
+		{name: "zero unknown fallback", edit: func(c *TokenizerConfig) { c.FallbackUnknownInputTokens = -1 }, want: "unknown input tokens"},
+		{name: "excessive unknown fallback", edit: func(c *TokenizerConfig) { c.FallbackUnknownInputTokens = MaxFallbackUnknownInputTokens + 1 }, want: "exceeds maximum"},
+		{name: "zero output fallback", edit: func(c *TokenizerConfig) { c.FallbackMaxOutputTokens = -1 }, want: "max output tokens"},
+		{name: "excessive output fallback", edit: func(c *TokenizerConfig) { c.FallbackMaxOutputTokens = MaxFallbackMaxOutputTokens + 1 }, want: "exceeds maximum"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := minimalConfig(databasePath)
+			config.ApplyDefaults()
+			tt.edit(&config.Tokenizer)
+			err := config.Validate()
+			if err == nil || !contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestTokenizerConfigBoundsAreFinite(t *testing.T) {
+	if MaxMaxInspectedRequestBytes <= 0 || MaxFallbackUnknownInputTokens <= 0 || MaxFallbackMaxOutputTokens <= 0 {
+		t.Fatal("tokenizer maxima must be positive")
+	}
+	if MaxFallbackUnknownInputTokens > math.MaxInt64-MaxFallbackMaxOutputTokens {
+		t.Fatal("fallback maxima can overflow int64 when combined")
+	}
+}
+
+func TestTokenizerConfigErrorIncludesUnsupportedMode(t *testing.T) {
+	config := minimalConfig(filepath.Join(t.TempDir(), "gateway.db"))
+	config.Tokenizer.Mode = "exact"
+	err := config.Validate()
+	if err == nil || !contains(err.Error(), `"exact"`) {
+		t.Fatalf("Validate() error = %v, want unsupported mode value", err)
 	}
 }
 

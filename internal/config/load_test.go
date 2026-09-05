@@ -10,7 +10,7 @@ import (
 func TestLoadValidYAML(t *testing.T) {
 	t.Setenv("TEST_AUTH_PEPPER", "pepper-from-environment")
 	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin-from-environment")
-	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: https://router.example.test/v1\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n")
+	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: https://router.example.test/v1\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\ntokenizer:\n  mode: usage_only\n  max_inspected_request_bytes: 1024\n  fallback_unknown_input_tokens: 123\n  fallback_max_output_tokens: 456\n")
 
 	got, err := Load(path)
 	if err != nil {
@@ -24,9 +24,38 @@ func TestLoadValidYAML(t *testing.T) {
 		SQLitePath:      ":memory:",
 		AuthPepper:      "pepper-from-environment",
 		AdminCredential: "admin-from-environment",
+		Tokenizer: TokenizerConfig{
+			Mode:                       TokenizerModeUsageOnly,
+			MaxInspectedRequestBytes:   1024,
+			FallbackUnknownInputTokens: 123,
+			FallbackMaxOutputTokens:    456,
+		},
 	}
 	if got != want {
 		t.Fatalf("Load() = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadRejectsExplicitZeroTokenizerValues(t *testing.T) {
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	base := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\ntokenizer:\n"
+	for _, field := range []string{"max_inspected_request_bytes", "fallback_unknown_input_tokens", "fallback_max_output_tokens"} {
+		t.Run(field, func(t *testing.T) {
+			_, err := Load(writeConfig(t, base+"  "+field+": 0\n"))
+			if err == nil || !strings.Contains(err.Error(), "must be positive") {
+				t.Fatalf("Load() error = %v, want positive-value error", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsUnknownTokenizerFields(t *testing.T) {
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	contents := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\ntokenizer:\n  unknown: value\n"
+	if _, err := Load(writeConfig(t, contents)); err == nil || !strings.Contains(err.Error(), "decode config YAML") {
+		t.Fatalf("Load() error = %v, want unknown tokenizer field error", err)
 	}
 }
 

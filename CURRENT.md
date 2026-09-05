@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T083`.
+Done: `T001`-`T084`.
 
-Current: `T084` - define tokenizer strategy configuration.
+Current: `T085` - implement bounded approximate estimation.
 
-Queued: `T084`-`T100` in dependency order from `TASKS.md`.
+Queued: `T086`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 

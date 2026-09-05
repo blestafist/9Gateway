@@ -26,6 +26,10 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("decode config YAML: %w", err)
 	}
+	if err := rejectExplicitTokenizerDefaults(data, config); err != nil {
+		return Config{}, fmt.Errorf("validate config: %w", err)
+	}
+	config.ApplyDefaults()
 	secretFields := []*struct {
 		name              string
 		value             *string
@@ -49,6 +53,33 @@ func Load(path string) (Config, error) {
 	}
 
 	return config, nil
+}
+
+// rejectExplicitTokenizerDefaults distinguishes an omitted scalar (which is
+// defaulted) from an explicitly supplied zero value. yaml.v3 does not retain
+// that distinction in an ordinary value struct, so inspect only the small
+// tokenizer section before applying defaults. Unknown fields are still
+// rejected by the KnownFields decoder above.
+func rejectExplicitTokenizerDefaults(data []byte, config Config) error {
+	var raw struct {
+		Tokenizer map[string]yaml.Node `yaml:"tokenizer"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("decode tokenizer YAML: %w", err)
+	}
+	if _, ok := raw.Tokenizer["mode"]; ok && config.Tokenizer.Mode == "" {
+		return fmt.Errorf("tokenizer mode must be usage_only or estimate")
+	}
+	if _, ok := raw.Tokenizer["max_inspected_request_bytes"]; ok && config.Tokenizer.MaxInspectedRequestBytes == 0 {
+		return fmt.Errorf("tokenizer max inspected request bytes must be positive")
+	}
+	if _, ok := raw.Tokenizer["fallback_unknown_input_tokens"]; ok && config.Tokenizer.FallbackUnknownInputTokens == 0 {
+		return fmt.Errorf("tokenizer fallback unknown input tokens must be positive")
+	}
+	if _, ok := raw.Tokenizer["fallback_max_output_tokens"]; ok && config.Tokenizer.FallbackMaxOutputTokens == 0 {
+		return fmt.Errorf("tokenizer fallback max output tokens must be positive")
+	}
+	return nil
 }
 
 func isEnvironmentReference(value string) bool {
