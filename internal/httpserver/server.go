@@ -213,14 +213,15 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	targetURL.Fragment = ""
 
 	principal, authenticated := PrincipalFromContext(request.Context())
+	var inspectionLease *limiter.Lease
 	var concurrencyLease *limiter.Lease
 	var upstreamResponse *http.Response
 	proxyContext, cancelUpstream := context.WithCancel(request.Context())
-	// Install cleanup before request inspection. Restricted model inspection can
-	// read a slow client body, and that work must occupy the same lease as the
-	// eventual upstream lifecycle. The lease is deliberately acquired before
-	// model evaluation, but request-window capacity is still checked only after
-	// a model has been accepted.
+	// Restricted model inspection may block while reading a client body. Reserve
+	// a slot for that phase, but do not retain it as the full-lifecycle lease:
+	// inspection must finish and release its provisional reservation before the
+	// request window is consumed. The lifecycle lease is acquired only after
+	// that admission, so a rate-rejected request never retains a slot.
 	defer func() {
 		cancelUpstream()
 		if upstreamResponse != nil && upstreamResponse.Body != nil {
@@ -229,11 +230,12 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		if request.Body != nil {
 			_ = request.Body.Close()
 		}
+		inspectionLease.Release()
 		concurrencyLease.Release()
 	}()
 	if authenticated && handler.concurrencyLimiter != nil && shouldInspectRequestMetadata(request) {
-		concurrencyLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
-		if concurrencyLease == nil {
+		inspectionLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
+		if inspectionLease == nil {
 			writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
 			return
 		}
@@ -243,9 +245,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	if shouldInspectRequestMetadata(request) {
 		requestBody, metadata = inspectChatRequest(request)
 	}
+	// End the potentially blocking inspection phase before evaluating the model
+	// decision and, importantly, before request-window admission. A later
+	// lifecycle acquisition may race with another inspection reservation and
+	// reject; consumed request capacity is intentionally not refunded.
+	inspectionLease.Release()
+	inspectionLease = nil
 	if metadata != nil && metadata.Model != "" {
 		if authenticated && !principal.Policy.AllowsModel(metadata.Model) {
-			_ = requestBody.Close()
 			writeGatewayError(response, gatewayErrorModelNotAllowed, "model")
 			return
 		}
@@ -256,16 +263,13 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			if len(windows) != 0 {
 				allowed, resetAt := handler.requestLimiter.Allow(principal.ID, windows)
 				if !allowed {
-					if requestBody != nil {
-						_ = requestBody.Close()
-					}
 					writeGatewayErrorRetryAfter(response, gatewayErrorRequestLimit, "", handler.requestLimiter.RetryAfterSeconds(resetAt))
 					return
 				}
 			}
 		}
 	}
-	if concurrencyLease == nil && handler.concurrencyLimiter != nil {
+	if handler.concurrencyLimiter != nil {
 		if authenticated {
 			concurrencyLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
 			if concurrencyLease == nil {

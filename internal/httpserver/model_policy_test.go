@@ -183,7 +183,7 @@ func TestModelPolicyLeavesUnknownRequestsInspectablePassthrough(t *testing.T) {
 	}
 }
 
-func TestRestrictedModelInspectionHoldsConcurrencyAndDoesNotSpendRequestWindow(t *testing.T) {
+func TestRestrictedModelInspectionUsesProvisionalConcurrencyAndDoesNotSpendRequestWindow(t *testing.T) {
 	pepper := []byte("slow-model-policy")
 	key, err := auth.GenerateGatewayKey(pepper)
 	if err != nil {
@@ -243,6 +243,9 @@ func TestRestrictedModelInspectionHoldsConcurrencyAndDoesNotSpendRequestWindow(t
 	if secondResponse.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("slow-upload saturation status = %d, want 429", secondResponse.StatusCode)
 	}
+	if got := concurrencyLimiter.Len(); got != 1 {
+		t.Fatalf("provisional inspection reservations = %d, want 1", got)
+	}
 
 	close(body.release)
 	select {
@@ -256,6 +259,9 @@ func TestRestrictedModelInspectionHoldsConcurrencyAndDoesNotSpendRequestWindow(t
 		t.Fatal(requestErr)
 	case <-time.After(time.Second):
 		t.Fatal("slow restricted request did not finish")
+	}
+	if got := concurrencyLimiter.Len(); got != 0 {
+		t.Fatalf("reservations after model denial = %d, want 0", got)
 	}
 	cancelFirst()
 
