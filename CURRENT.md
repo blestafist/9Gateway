@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T088`.
+Done: `T001`-`T089`.
 
-Current: `T089` - reconcile token reservations exactly once.
+Current: `T090` - compose one request resource lease.
 
-Queued: `T089`-`T100` in dependency order from `TASKS.md`.
+Queued: `T090`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 

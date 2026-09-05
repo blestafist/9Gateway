@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -150,4 +151,157 @@ func TestTokenLimiterOverflowAndAmountTooLarge(t *testing.T) {
 	if _, allowed, _ := limiter.Reserve("overflow", []auth.TokenWindow{{Amount: maxInt64, Duration: time.Minute}}, 1); allowed {
 		t.Fatal("overflowed committed plus active state was admitted")
 	}
+}
+
+func tokenWindowForTest() []auth.TokenWindow {
+	return []auth.TokenWindow{{Amount: 100, Duration: time.Minute}}
+}
+
+func bucketForTest(t *testing.T, limiter *TokenLimiter, key string) tokenBucket {
+	t.Helper()
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	now := limiter.currentTimeLocked()
+	identity := tokenBucketKey{keyID: key, window: tokenWindowKey{amount: 100, duration: time.Minute}, start: FixedWindowStart(now, time.Minute)}
+	return limiter.buckets[identity]
+}
+
+func TestTokenReservationCommitRefundExactAndDebt(t *testing.T) {
+	clock := &testClock{now: time.Unix(60, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	refund, allowed, _ := limiter.Reserve("refund", tokenWindowForTest(), 40)
+	if !allowed || refund.Commit(10) != nil {
+		t.Fatal("refund commit failed")
+	}
+	if got := bucketForTest(t, limiter, "refund").committed; got != 10 {
+		t.Fatalf("refund committed %d, want 10", got)
+	}
+	exact, allowed, _ := limiter.Reserve("exact", tokenWindowForTest(), 10)
+	if !allowed || exact.Commit(10) != nil {
+		t.Fatal("exact commit failed")
+	}
+	debt, allowed, _ := limiter.Reserve("debt", tokenWindowForTest(), 20)
+	if !allowed || debt.Commit(130) != nil {
+		t.Fatal("over-estimate commit should reconcile debt")
+	}
+	if _, allowed, _ := limiter.Reserve("debt", tokenWindowForTest(), 1); allowed {
+		t.Fatal("committed debt did not block later admission")
+	}
+}
+
+func TestTokenReservationAbortAndPreUpstreamRelease(t *testing.T) {
+	clock := &testClock{now: time.Unix(60, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	abort, allowed, _ := limiter.Reserve("abort", tokenWindowForTest(), 40)
+	if !allowed || abort.AbortConservative() != nil {
+		t.Fatal("conservative abort failed")
+	}
+	if got := bucketForTest(t, limiter, "abort").committed; got != 40 {
+		t.Fatalf("abort committed %d, want 40", got)
+	}
+	release, allowed, _ := limiter.Reserve("release", tokenWindowForTest(), 40)
+	if !allowed || release.ReleaseBeforeUpstream() != nil {
+		t.Fatal("pre-upstream release failed")
+	}
+	if got := limiter.Len(); got != 1 {
+		t.Fatalf("zero release retained %d buckets, want only abort bucket", got)
+	}
+}
+
+func TestTokenReservationDeferredAdjustmentAndDrop(t *testing.T) {
+	clock := &testClock{now: time.Unix(60, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	lower, allowed, _ := limiter.Reserve("lower", tokenWindowForTest(), 40)
+	if !allowed {
+		t.Fatal("lower reservation rejected")
+	}
+	ticket, err := lower.CommitDeferred()
+	if err != nil || ticket == nil || ticket.Adjust(10) != nil {
+		t.Fatal("lower deferred adjustment failed")
+	}
+	if got := bucketForTest(t, limiter, "lower").committed; got != 10 {
+		t.Fatalf("lower adjustment committed %d, want 10", got)
+	}
+	higher, allowed, _ := limiter.Reserve("higher", tokenWindowForTest(), 10)
+	if !allowed {
+		t.Fatal("higher reservation rejected")
+	}
+	higherTicket, err := higher.CommitDeferred()
+	if err != nil || higherTicket == nil || higherTicket.Adjust(30) != nil {
+		t.Fatal("higher deferred adjustment failed")
+	}
+	if got := bucketForTest(t, limiter, "higher").committed; got != 30 {
+		t.Fatalf("higher adjustment committed %d, want 30", got)
+	}
+	dropped, allowed, _ := limiter.Reserve("dropped", tokenWindowForTest(), 20)
+	if !allowed {
+		t.Fatal("dropped reservation rejected")
+	}
+	droppedTicket, err := dropped.CommitDeferred()
+	if err != nil || droppedTicket == nil {
+		t.Fatal("dropped ticket creation failed")
+	}
+	if got := bucketForTest(t, limiter, "dropped").committed; got != 20 {
+		t.Fatalf("dropped ticket charge %d, want 20", got)
+	}
+}
+
+func TestTokenReservationFinalizationConcurrentAndOneShot(t *testing.T) {
+	clock := &testClock{now: time.Unix(60, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	reservation, allowed, _ := limiter.Reserve("race", tokenWindowForTest(), 40)
+	if !allowed {
+		t.Fatal("race reservation rejected")
+	}
+	var wait sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_ = reservation.Commit(10)
+		}()
+	}
+	wait.Wait()
+	if got := bucketForTest(t, limiter, "race").committed; got != 10 {
+		t.Fatalf("concurrent commit charged %d, want 10", got)
+	}
+	if reservation.Commit(30) != nil {
+		t.Fatal("repeated commit did not return first result")
+	}
+
+	invalid, allowed, _ := limiter.Reserve("invalid", tokenWindowForTest(), 10)
+	if !allowed {
+		t.Fatal("invalid reservation rejected")
+	}
+	if !errors.Is(invalid.Commit(-1), ErrInvalidTokenUsage) {
+		t.Fatal("negative actual did not report invalid usage")
+	}
+	if got := bucketForTest(t, limiter, "invalid").committed; got != 10 {
+		t.Fatalf("invalid usage did not conservatively charge, got %d", got)
+	}
+}
+
+func TestTokenReservationBoundaryAdjustmentCannotTouchNewBucket(t *testing.T) {
+	clock := &testClock{now: time.Unix(59, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	reservation, allowed, _ := limiter.Reserve("boundary-adjust", tokenWindowForTest(), 40)
+	if !allowed {
+		t.Fatal("boundary reservation rejected")
+	}
+	ticket, err := reservation.CommitDeferred()
+	if err != nil || ticket == nil {
+		t.Fatal("boundary ticket failed")
+	}
+	clock.Set(time.Unix(60, 0).UTC())
+	newReservation, allowed, _ := limiter.Reserve("boundary-adjust", tokenWindowForTest(), 100)
+	if !allowed {
+		t.Fatal("new boundary reservation rejected")
+	}
+	if ticket.Adjust(0) != nil {
+		t.Fatal("old adjustment failed")
+	}
+	if bucket := bucketForTest(t, limiter, "boundary-adjust"); bucket.committed != 0 || bucket.active != 100 {
+		t.Fatalf("old ticket touched new bucket, bucket %+v", bucket)
+	}
+	_ = newReservation.AbortConservative()
 }
