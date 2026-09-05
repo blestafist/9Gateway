@@ -50,15 +50,16 @@ type Record struct {
 // AuthRecord is a descriptive alias for Record.
 type AuthRecord = Record
 
-// Principal is the safe identity returned after authentication. Its byte
-// fields are owned by the caller and can be changed without changing the
-// published snapshot.
+// Principal is the safe identity returned after authentication. Its byte field
+// is owned by the caller and can be changed without changing the published
+// snapshot; Policy is a value with private compiled state and copy-returning
+// accessors.
 type Principal struct {
 	ID            string
 	Name          string
 	DisplayPrefix string
 	PolicyJSON    []byte
-	Policy        []byte
+	Policy        EffectivePolicy
 }
 
 type snapshotRecord struct {
@@ -68,6 +69,7 @@ type snapshotRecord struct {
 	enabled    bool
 	expiresAt  *time.Time
 	policyJSON []byte
+	policy     EffectivePolicy
 }
 
 // Snapshot is an immutable collection of authentication candidates. The map
@@ -238,11 +240,16 @@ func buildSnapshot(records []Record) (*Snapshot, error) {
 		} else if len(record.Policy) != 0 && !bytes.Equal(record.Policy, policy) {
 			return nil, errors.New("invalid authentication record")
 		}
+		effectivePolicy, err := ParsePolicyJSON(policy)
+		if err != nil {
+			return nil, err
+		}
 		candidate := snapshotRecord{
 			id:         record.ID,
 			name:       record.Name,
 			enabled:    record.Enabled,
 			policyJSON: append([]byte(nil), policy...),
+			policy:     effectivePolicy,
 		}
 		copy(candidate.digest[:], digest)
 		if record.ExpiresAt != nil {
@@ -260,7 +267,7 @@ func principalFor(candidate snapshotRecord, prefix string) Principal {
 		Name:          candidate.name,
 		DisplayPrefix: prefix,
 		PolicyJSON:    append([]byte(nil), candidate.policyJSON...),
-		Policy:        append([]byte(nil), candidate.policyJSON...),
+		Policy:        candidate.policy,
 	}
 }
 

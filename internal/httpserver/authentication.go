@@ -24,11 +24,10 @@ func PrincipalFromContext(ctx context.Context) (auth.Principal, bool) {
 	if !ok {
 		return auth.Principal{}, false
 	}
-	// Do not hand out the context-owned slices. This keeps the principal
+	// Do not hand out the context-owned byte slice. This keeps the principal
 	// immutable even when a later middleware inspects and modifies its local
 	// copy while the request continues through the chain.
 	principal.PolicyJSON = append([]byte(nil), principal.PolicyJSON...)
-	principal.Policy = append([]byte(nil), principal.Policy...)
 	return principal, true
 }
 

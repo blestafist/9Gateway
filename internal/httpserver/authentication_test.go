@@ -125,7 +125,7 @@ func TestPublicV1AuthenticationAddsPrincipalAndReplacesCredential(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := authenticator.Load([]auth.Record{{ID: "principal-id", Name: "safe name", DisplayPrefix: generated.DisplayPrefix, Digest: generated.Digest, Enabled: true, PolicyJSON: []byte(`{"future":"opaque"}`)}}); err != nil {
+	if err := authenticator.Load([]auth.Record{{ID: "principal-id", Name: "safe name", DisplayPrefix: generated.DisplayPrefix, Digest: generated.Digest, Enabled: true, PolicyJSON: []byte(`{}`)}}); err != nil {
 		t.Fatal(err)
 	}
 

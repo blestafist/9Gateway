@@ -2,11 +2,11 @@
 
 Current milestone: authentication and per-key request/concurrency policy.
 
-Done: `T001`-`T072`.
+Done: `T001`-`T073`.
 
-Current: `T073` - define and validate key policy JSON.
+Current: `T074` - enforce model allow and deny rules.
 
-Queued: `T073`-`T080` in dependency order in `TASKS.md`.
+Queued: `T075`-`T080` in dependency order in `TASKS.md`.
 
 Known issues: none for the current milestone.
 

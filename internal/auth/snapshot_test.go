@@ -23,7 +23,7 @@ func TestAuthenticatorCredentialOutcomes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := authenticator.Load([]Record{
-		{ID: "first", Name: "first", DisplayPrefix: first.DisplayPrefix, Digest: first.Digest, Enabled: true, PolicyJSON: []byte(`{"rpm":1}`)},
+		{ID: "first", Name: "first", DisplayPrefix: first.DisplayPrefix, Digest: first.Digest, Enabled: true, PolicyJSON: []byte(`{}`)},
 		// This candidate has the same indexed prefix as first and proves lookup
 		// does not stop after the first digest mismatch.
 		{ID: "collision", Name: "collision", DisplayPrefix: first.DisplayPrefix, Digest: collision.Digest, Enabled: true},
@@ -35,12 +35,12 @@ func TestAuthenticatorCredentialOutcomes(t *testing.T) {
 	}
 
 	principal, err := authenticator.Authenticate(first.RawKey)
-	if err != nil || principal.ID != "first" || string(principal.PolicyJSON) != `{"rpm":1}` {
+	if err != nil || principal.ID != "first" || string(principal.PolicyJSON) != `{}` {
 		t.Fatalf("valid authentication = %#v, %v", principal, err)
 	}
 	principal.PolicyJSON[0] = 'X'
 	again, err := authenticator.Authenticate(first.RawKey)
-	if err != nil || string(again.PolicyJSON) != `{"rpm":1}` {
+	if err != nil || string(again.PolicyJSON) != `{}` {
 		t.Fatalf("principal mutated snapshot = %#v, %v", again, err)
 	}
 	if got, err := authenticator.Authenticate(collision.RawKey); err != nil || got.ID != "collision" {
