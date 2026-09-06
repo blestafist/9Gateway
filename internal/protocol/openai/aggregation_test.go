@@ -98,6 +98,46 @@ data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}
 	}
 }
 
+func TestAggregateSSEToJSONWithResultCarriesCanonicalUsageWithoutChangingJSON(t *testing.T) {
+	input := `data: {"choices":[{"index":0,"delta":{"content":"answer"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}
+
+data: [DONE]
+
+`
+	result, err := AggregateSSEToJSONWithResult(bytes.NewBufferString(input), 4096, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Done || !result.Observed {
+		t.Fatalf("result termination/usage state = done %t observed %t", result.Done, result.Observed)
+	}
+	if total, known := result.Usage.Total().Value(); !known || total != 5 || !result.Usage.TotalWasObserved() {
+		t.Fatalf("canonical usage = %+v, want observed total 5", result.Usage)
+	}
+	wrapper, _, err := AggregateSSEToJSONWithTermination(bytes.NewBufferString(input), 4096, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(result.JSON, wrapper) {
+		t.Fatalf("result JSON changed compatibility output: %s != %s", result.JSON, wrapper)
+	}
+}
+
+func TestAggregateSSEToJSONWithResultMarksPartialUsageObserved(t *testing.T) {
+	input := `data: {"choices":[{"index":0,"delta":{"content":"answer"}}],"usage":{"prompt_tokens":4}}
+
+`
+	result, err := AggregateSSEToJSONWithResult(bytes.NewBufferString(input), 4096, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Observed || result.Usage.Total().Known() {
+		t.Fatalf("partial usage = observed %t, canonical %+v", result.Observed, result.Usage)
+	}
+}
+
 func TestAggregateSSEToJSONCleanEOFRequiresMeaningfulCompleteData(t *testing.T) {
 	for _, test := range []struct {
 		name string

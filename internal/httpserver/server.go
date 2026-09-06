@@ -425,7 +425,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			response = responseObservation.wrap(response)
 		}
 	}
-	dispatchErr = dispatchResponseResult(response, upstreamResponse, metadata, request.WithContext(proxyContext))
+	dispatchErr = dispatchResponseResultWithLease(response, upstreamResponse, metadata, lifecycleLease, request.WithContext(proxyContext))
 	if responseObservation != nil {
 		responseObservation.finish(dispatchErr)
 	}
@@ -566,6 +566,10 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 }
 
 func dispatchResponseResult(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, requests ...*http.Request) error {
+	return dispatchResponseResultWithLease(response, upstreamResponse, metadata, nil, requests...)
+}
+
+func dispatchResponseResultWithLease(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, lease *limiter.ResourceLease, requests ...*http.Request) error {
 	var request *http.Request
 	if len(requests) != 0 {
 		request = requests[0]
@@ -578,24 +582,28 @@ func dispatchResponseResult(response http.ResponseWriter, upstreamResponse *http
 			// malformed representation. Fail before copying upstream headers or
 			// committing any downstream bytes.
 			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
+			finalizeConvertedLeaseConservatively(lease)
 			return err
 		}
 		if closeAggregationBody != nil {
 			defer closeAggregationBody()
 		}
-		body, done, err := openai.AggregateSSEToJSONWithTermination(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize)
+		aggregation, err := openai.AggregateSSEToJSONWithResult(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize)
 		if err != nil {
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
 			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
+			finalizeConvertedLeaseConservatively(lease)
 			return err
 		}
+		body, done := aggregation.JSON, aggregation.Done
 		// AggregateSSEToJSON intentionally stops reading at [DONE]. Encodings
 		// with trailers still need a bounded drain to validate them; an identity
 		// representation has nothing left to validate and must not wait for EOF.
 		if !done || requiresDrain {
 			if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
 				writeGatewayError(response, gatewayErrorUpstreamConnection, "")
+				finalizeConvertedLeaseConservatively(lease)
 				return err
 			}
 		} else {
@@ -609,8 +617,18 @@ func dispatchResponseResult(response http.ResponseWriter, upstreamResponse *http
 		response.Header().Set("Content-Type", "application/json")
 		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		response.WriteHeader(upstreamResponse.StatusCode)
-		_, _ = response.Write(body)
-		return nil
+		written, writeErr := response.Write(body)
+		if writeErr == nil && written != len(body) {
+			writeErr = io.ErrShortWrite
+		}
+		if lease != nil {
+			if writeErr == nil && aggregation.Observed && aggregation.Usage.Total().Known() {
+				_ = lease.CommitKnown(aggregation.Usage.Total().Int64())
+			} else {
+				finalizeConvertedLeaseConservatively(lease)
+			}
+		}
+		return writeErr
 	}
 
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
@@ -620,6 +638,16 @@ func dispatchResponseResult(response http.ResponseWriter, upstreamResponse *http
 	}
 	_, err := io.Copy(response, upstreamResponse.Body)
 	return err
+}
+
+// finalizeConvertedLeaseConservatively settles a conversion that cannot use a
+// valid canonical total. It intentionally performs only the bounded in-memory
+// lease operation; no observation worker, parser, logging, channel, or SQL is
+// involved.
+func finalizeConvertedLeaseConservatively(lease *limiter.ResourceLease) {
+	if lease != nil {
+		_ = lease.CompleteConservative()
+	}
 }
 
 // aggregationReader returns the decoded representation needed by the bounded

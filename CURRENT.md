@@ -2,15 +2,17 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T093`.
+Done: `T001`-`T094`.
 
-Current: `T094` - reconcile converted SSE responses.
+Current: `T095` - observe transparent SSE without blocking.
 
-Queued: `T095`-`T100` in dependency order from `TASKS.md`.
+Queued: `T096`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
-Important: T093 now attaches bounded transparent JSON response observation to
+Important: T094 now carries canonical usage directly from bounded SSE-to-JSON
+conversion into synchronous lease finalization, without reparsing the rendered
+response. T093 attaches bounded transparent JSON response observation to
 the T092 process handoff: transport
 can settle deferred conservative accounting before a non-blocking immutable job
 submission, while queue drops and bounded shutdown invalidate tickets safely.
