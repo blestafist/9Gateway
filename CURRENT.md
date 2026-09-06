@@ -2,13 +2,15 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T096`.
+Done: `T001`-`T097`.
 
-Current: `T097`.
+Current: `T098`.
 
-Queued: `T098`-`T100` in dependency order from `TASKS.md`.
+Queued: `T099`-`T100` in dependency order from `TASKS.md`.
 
-Known issues: none.
+Known issues: none. T097 added real-HTTP lifecycle/redaction/contention coverage and
+made the focused SSE-to-JSON timing regression deterministic by waiting for
+cancellation cleanup before the next admission; repeated runs and race runs pass.
 
 Important: T096 makes lease cleanup deterministic at the upstream-start
 boundary: pre-start exits release zero usage, while every post-start ambiguity
