@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/httpserver"
+	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/storage"
 	"github.com/pestit/9gateway/internal/transport"
 )
@@ -43,6 +45,59 @@ func run() error {
 			log.Printf("SQLite shutdown: %v", err)
 		}
 	}()
+	keyRepository := storage.NewAPIKeyRepository(database)
+	keyRecords, err := keyRepository.List(context.Background())
+	if err != nil {
+		return err
+	}
+	tokenLimiter := limiter.NewTokenLimiter(nil)
+	usageRepository := storage.NewUsageBucketRepository(database)
+	persisted, err := usageRepository.LoadUnexpired(context.Background(), time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	allowedWindows := make(map[string]map[limiter.TokenWindow]struct{}, len(keyRecords))
+	for _, record := range keyRecords {
+		policy, policyErr := auth.ParsePolicyJSONWithTokenMode([]byte(record.PolicyJSON), auth.TokenMode(cfg.Tokenizer.Mode))
+		if policyErr != nil {
+			return policyErr
+		}
+		windows := make(map[limiter.TokenWindow]struct{})
+		for _, window := range policy.TokenWindows() {
+			windows[window] = struct{}{}
+		}
+		allowedWindows[record.ID] = windows
+	}
+	committed := make([]limiter.CommittedTokenBucket, 0, len(persisted))
+	for _, bucket := range persisted {
+		// The storage row carries only the fixed-window width. Its capacity is
+		// recovered from the key policy; a row for an unknown key/window is
+		// inconsistent and must fail closed at startup.
+		windows := allowedWindows[bucket.APIKeyID]
+		var matched limiter.TokenWindow
+		for candidate := range windows {
+			if int64(candidate.Duration/time.Second) == bucket.BucketSeconds && candidate.Amount == bucket.BucketAmount {
+				matched = candidate
+				break
+			}
+		}
+		if matched.Duration == 0 {
+			return errors.New("startup: persisted token bucket does not match key policy")
+		}
+		committed = append(committed, limiter.CommittedTokenBucket{KeyID: bucket.APIKeyID, BucketStart: bucket.BucketStart, Window: matched, CommittedTokens: bucket.CommittedTokens})
+	}
+	if err := tokenLimiter.LoadCommitted(time.Now().UTC(), committed); err != nil {
+		return err
+	}
+	aggregateAccumulator := storage.NewUsageAggregateAccumulator(usageRepository)
+	tokenLimiter.SetCommittedDeltaSink(aggregateAccumulator.Sink)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := aggregateAccumulator.Shutdown(ctx); err != nil {
+			log.Printf("token aggregate shutdown: %v", err)
+		}
+	}()
 
 	upstreamClient := transport.NewClient()
 	completionLogger := httpserver.NewCompletionLogger(slog.Default(), 0)
@@ -62,7 +117,7 @@ func run() error {
 		}
 	}()
 
-	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndUsageObservationWorker(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), nil, nil, completionLogger, httpserver.TokenAdmissionConfig{
+	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, keyRepository, nil, nil, completionLogger, tokenLimiter, httpserver.TokenAdmissionConfig{
 		MaxInspectedRequestBytes:   cfg.Tokenizer.MaxInspectedRequestBytes,
 		FallbackUnknownInputTokens: cfg.Tokenizer.FallbackUnknownInputTokens,
 		FallbackMaxOutputTokens:    cfg.Tokenizer.FallbackMaxOutputTokens,

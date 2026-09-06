@@ -109,13 +109,19 @@ func NewHandlerWithAdminAndLimitersAndTokenConfig(upstreamClient *http.Client, u
 // process-wiring form of the admin/public constructor. The supplied worker is
 // owned by the caller and is never shut down by the handler.
 func NewHandlerWithAdminAndLimitersAndTokenConfigAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, concurrencyLimiter, completionLogger, nil, tokenConfig, usageWorker, tokenModes...)
+}
+
+// NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker
+// is the process-wiring form used when startup restores committed token state.
+func NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, tokenModes ...auth.TokenMode) (http.Handler, error) {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
 	if concurrencyLimiter == nil {
 		concurrencyLimiter = limiter.NewConcurrencyLimiter()
 	}
-	proxy := newProxyHandlerWithLimitersAndTokenConfig(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenConfig)
+	proxy := newProxyHandlerWithLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenLimiter, tokenConfig)
 	proxy.usageObservationWorker = usageWorker
 	service, err := newAdminKeyService(repository, []byte(authPepper), tokenModes...)
 	if err != nil {

@@ -12,6 +12,24 @@ import (
 // TokenWindow is the normalized token-window policy type.
 type TokenWindow = auth.TokenWindow
 
+// CommittedTokenBucket is the durable portion of a token limiter bucket.
+// Active reservations are intentionally excluded and never restored.
+type CommittedTokenBucket struct {
+	KeyID           string
+	BucketStart     time.Time
+	Window          TokenWindow
+	CommittedTokens int64
+}
+
+// CommittedTokenDelta identifies one synchronous committed change. A sink is
+// best-effort persistence plumbing only; admission never waits for it.
+type CommittedTokenDelta struct {
+	KeyID          string
+	BucketStart    time.Time
+	Window         TokenWindow
+	CommittedDelta int64
+}
+
 // TokenLimiter reserves token estimates in epoch-aligned fixed windows. The
 // key contains the stable gateway key ID, never the credential itself.
 //
@@ -39,6 +57,9 @@ type TokenLimiter struct {
 	// lastNow is guarded by mu. Holding time steady on a backwards clock move
 	// prevents a new earlier bucket from replacing an active reservation.
 	lastNow time.Time
+	// deltaSink is called after committed state changes. It must not perform
+	// blocking work or call back into this limiter.
+	deltaSink func(CommittedTokenDelta)
 }
 
 var (
@@ -101,6 +122,60 @@ type TokenAdjustmentTicket struct {
 // time; callers and tests may inject a clock through the existing Clock type.
 func NewTokenLimiter(now Clock) *TokenLimiter {
 	return &TokenLimiter{now: now, buckets: make(map[tokenBucketKey]tokenBucket)}
+}
+
+// SetCommittedDeltaSink installs process-owned persistence notification. The
+// callback is deliberately narrow so the limiter remains synchronous and
+// storage remains off the transport path.
+func (limiter *TokenLimiter) SetCommittedDeltaSink(sink func(CommittedTokenDelta)) {
+	if limiter == nil {
+		return
+	}
+	limiter.mu.Lock()
+	limiter.deltaSink = sink
+	limiter.mu.Unlock()
+}
+
+// LoadCommitted replaces the limiter's committed state before serving. It
+// rejects malformed, expired, duplicate, overflowing, or over-limit rows and
+// never imports active reservations.
+func (limiter *TokenLimiter) LoadCommitted(now time.Time, buckets []CommittedTokenBucket) error {
+	if limiter == nil || now.IsZero() {
+		return ErrTokenReservationState
+	}
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if limiter.buckets == nil {
+		limiter.buckets = make(map[tokenBucketKey]tokenBucket)
+	}
+	for _, persisted := range buckets {
+		if persisted.KeyID == "" || persisted.BucketStart.Nanosecond() != 0 || persisted.BucketStart.Before(time.Unix(0, 0)) || persisted.CommittedTokens < 0 || persisted.Window.Amount <= 0 || persisted.Window.Duration <= 0 || persisted.CommittedTokens > persisted.Window.Amount {
+			return ErrTokenReservationState
+		}
+		start, ok := fixedWindowStartChecked(persisted.BucketStart, persisted.Window.Duration)
+		if !ok || !start.Equal(persisted.BucketStart) {
+			return ErrTokenReservationState
+		}
+		reset, ok := checkedWindowReset(persisted.BucketStart, persisted.Window.Duration)
+		if !ok || !reset.After(now) {
+			continue
+		}
+		window := tokenWindowKey{amount: persisted.Window.Amount, duration: persisted.Window.Duration}
+		key := tokenBucketKey{keyID: persisted.KeyID, window: window, start: persisted.BucketStart.UTC()}
+		if _, exists := limiter.buckets[key]; exists {
+			return ErrTokenReservationState
+		}
+		limiter.buckets[key] = tokenBucket{committed: persisted.CommittedTokens}
+	}
+	limiter.lastNow = now.UTC()
+	return nil
+}
+
+func (limiter *TokenLimiter) emitDeltaLocked(key tokenBucketKey, delta int64) {
+	if limiter.deltaSink == nil || delta == 0 {
+		return
+	}
+	limiter.deltaSink(CommittedTokenDelta{KeyID: key.keyID, BucketStart: key.start, Window: TokenWindow{Amount: key.window.amount, Duration: key.window.duration}, CommittedDelta: delta})
 }
 
 // Reserve atomically reserves amount in every configured window. A nil
@@ -341,6 +416,7 @@ func (reservation *TokenReservation) finalize(usage int64, actual bool) error {
 		} else {
 			limiter.buckets[key] = bucket
 		}
+		limiter.emitDeltaLocked(key, settle)
 	}
 	limiter.discardExpiredLocked(limiter.currentTimeLocked())
 	return result
@@ -411,6 +487,7 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 			} else {
 				limiter.buckets[key] = bucket
 			}
+			limiter.emitDeltaLocked(key, delta)
 		}
 		limiter.discardExpiredLocked(limiter.currentTimeLocked())
 	})
