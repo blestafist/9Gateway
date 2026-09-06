@@ -65,3 +65,16 @@ func TestObserveStreamDoesNotModifyCopiedSource(t *testing.T) {
 		t.Fatalf("source changed after observation: got %q, want %q", source, wantSource)
 	}
 }
+
+func TestObserveStreamValidatesTrailingFramingAfterDone(t *testing.T) {
+	input := "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n" +
+		"data: [DONE]\n\n" +
+		"data: {truncated"
+	result, err := ObserveStream(bytes.NewBufferString(input), 1024, nil)
+	if !errors.Is(err, streaming.ErrEventIncomplete) {
+		t.Fatalf("trailing framing error = %v, want ErrEventIncomplete", err)
+	}
+	if !result.State.DoneObserved || !result.State.Usage.Total().Known() || result.State.Usage.Total().Int64() != 3 {
+		t.Fatalf("observed state = %+v, want usage 3 and DONE", result.State)
+	}
+}

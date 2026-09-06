@@ -43,19 +43,25 @@ func ObserveStream(input io.Reader, maxEventSize int, reportError func(error)) (
 			return result, normalizeObservationEOF(err)
 		}
 
+		// Once DONE is seen, continue reading only to validate physical SSE
+		// framing through EOF. Post-DONE events cannot contribute usage (or any
+		// other observed state), but an incomplete trailing frame must still
+		// retain conservative accounting for transparent observations.
+		if observer.state.DoneObserved {
+			trailing := NewObserver()
+			if err := trailing.Observe(event); err != nil {
+				result.Errors = append(result.Errors, err)
+				if reportError != nil {
+					reportError(err)
+				}
+			}
+			continue
+		}
 		if err := observer.Observe(event); err != nil {
 			result.Errors = append(result.Errors, err)
 			if reportError != nil {
 				reportError(err)
 			}
-		}
-		// [DONE] is observation metadata, but it is also the end of the
-		// representation relevant to usage. Do not wait for or inspect bytes
-		// after it; transparent transport has its own physical EOF lifetime.
-		if observer.state.DoneObserved {
-			result.State = observer.State()
-			result.Metadata = observer.Metadata()
-			return result, nil
 		}
 	}
 }

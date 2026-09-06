@@ -456,7 +456,10 @@ func (handler *proxyHandler) tokenPlan(request *http.Request, principal auth.Pri
 	responses := request.URL.Path == "/v1/responses"
 	input := accounting.UnknownInputTokens()
 	quality := accounting.EstimateQualityUnknown
-	if principal.Policy.TokenMode() == auth.TokenModeEstimate && available && eligibleTokenRequest(request) {
+	// A nil metadata value with an available inspection is a malformed known
+	// request, not an empty request. Do not let the estimator's zero-input result
+	// turn malformed output metadata into a smaller-than-conservative reservation.
+	if principal.Policy.TokenMode() == auth.TokenModeEstimate && metadata != nil && available && eligibleTokenRequest(request) {
 		estimator := accounting.NewApproximateEstimator(handler.tokenConfig.FallbackUnknownInputTokens)
 		var err error
 		model := ""
@@ -483,8 +486,23 @@ func (handler *proxyHandler) tokenPlan(request *http.Request, principal auth.Pri
 		Quality:                 quality,
 	})
 	if err != nil {
-		if errors.Is(err, accounting.ErrReservationUnavailable) {
-			return nil, nil
+		if errors.Is(err, accounting.ErrReservationUnavailable) || errors.Is(err, accounting.ErrReservationOverflow) {
+			// Unusable request metadata must never disable token admission. A
+			// conservative plan is safer than forwarding an unreserved request;
+			// in particular this covers negative output limits rejected by the
+			// accounting planner.
+			fallback, fallbackErr := accounting.PlanReservation(accounting.ReservationOptions{
+				Mode:                    accounting.ReservationMode(principal.Policy.TokenMode()),
+				UnknownInputFallback:    handler.tokenConfig.FallbackUnknownInputTokens,
+				FallbackMaxOutputTokens: handler.tokenConfig.FallbackMaxOutputTokens,
+				ResponsesEndpoint:       responses,
+				Input:                   accounting.UnknownInputTokens(),
+				Quality:                 accounting.EstimateQualityUnknown,
+			})
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			return &fallback, nil
 		}
 		return nil, err
 	}

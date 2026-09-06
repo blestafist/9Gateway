@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -144,4 +145,51 @@ func TestT095TransparentGzipSSEReconcilesWithoutChangingWireBytes(t *testing.T) 
 		t.Fatalf("transparent gzip = encoding %q/body %x, want gzip/%x", response.Header.Get("Content-Encoding"), got, want)
 	}
 	waitForObservationCount(t, worker, 1)
+}
+
+func TestT095TransparentSSETrailingMalformedDataRetainsConservativeCharge(t *testing.T) {
+	const body = "data: {\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":1,\"total_tokens\":1}}\n\ndata: [DONE]\n\ndata: {truncated"
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	key, authenticator := requestLimitTestAuthenticator(t, []byte("t095-trailing-malformed"), "t095-trailing", `{"token_mode":"usage_only","token_windows":[{"amount":5,"duration":"1m"}]}`, clock)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, body)
+	}))
+	t.Cleanup(upstream.Close)
+	worker := NewUsageObservationWorker(UsageObservationWorkerOptions{Capacity: 1})
+	t.Cleanup(func() { shutdownObservationWorker(t, worker) })
+	gateway := httptest.NewServer(NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(
+		transport.NewClient(), upstream.URL, "upstream-secret", authenticator,
+		limiter.NewRequestLimiter(clock.Now), limiter.NewConcurrencyLimiter(), nil,
+		limiter.NewTokenLimiter(clock.Now), TokenAdmissionConfig{FallbackUnknownInputTokens: 2, FallbackMaxOutputTokens: 2}, worker,
+	))
+	t.Cleanup(gateway.Close)
+
+	request := func() *http.Response {
+		req, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-test","stream":true}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+key.RawKey)
+		req.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	first := request()
+	got, err := io.ReadAll(first.Body)
+	first.Body.Close()
+	if err != nil || first.StatusCode != http.StatusOK || string(got) != body {
+		t.Fatalf("transparent malformed trailing response = %d/%q (%v), want original 200 body", first.StatusCode, got, err)
+	}
+	waitForObservationCount(t, worker, 1)
+	second := request()
+	second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests || calls.Load() != 1 {
+		t.Fatalf("post-malformed admission = status %d, calls %d; want 429 and one upstream call", second.StatusCode, calls.Load())
+	}
 }

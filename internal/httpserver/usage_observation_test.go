@@ -151,6 +151,12 @@ func TestUsageObservationShutdownDiscardsQueuedTicketsAndIsIdempotent(t *testing
 	if err := worker.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("blocked shutdown error = %v, want deadline exceeded", err)
 	}
+	// Shutdown invalidates queued tickets at its boundary, even while the
+	// already-claimed parser remains blocked. If the queued ticket were allowed
+	// to adjust after release, 41 more tokens would fit in this 100-token window.
+	if _, admitted, _ := tokens.Reserve("key", []limiter.TokenWindow{{Amount: 100, Duration: time.Minute}}, 41); admitted {
+		t.Fatal("queued shutdown ticket remained adjustable after shutdown boundary")
+	}
 	cancel()
 	close(release)
 	shutdownObservationWorker(t, worker)
@@ -162,6 +168,35 @@ func TestUsageObservationShutdownDiscardsQueuedTicketsAndIsIdempotent(t *testing
 	}
 	if _, admitted, _ := tokens.Reserve("key", []limiter.TokenWindow{{Amount: 100, Duration: time.Minute}}, 71); admitted {
 		t.Fatal("queued shutdown ticket did not retain conservative charge")
+	}
+}
+
+func TestUsageObservationAcceptedJobOwnsOneImmutableCopy(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	observed := make(chan byte, 1)
+	worker := NewUsageObservationWorker(UsageObservationWorkerOptions{
+		Capacity: 1,
+		Parse: func(data []byte, _ ContentCoding) (int64, error) {
+			close(started)
+			<-release
+			observed <- data[0]
+			return 1, nil
+		},
+	})
+	defer shutdownObservationWorker(t, worker)
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	tokens := limiter.NewTokenLimiter(clock.Now)
+	lease := mustObservationLease(t, limiter.NewResourceLeaseCoordinator(nil, tokens), []limiter.TokenWindow{{Amount: 10, Duration: time.Minute}}, 1)
+	captured := []byte("original")
+	if !worker.CompleteAndSubmit(lease, captured, ContentCodingIdentity) {
+		t.Fatal("observation was dropped")
+	}
+	<-started
+	captured[0] = 'm'
+	close(release)
+	if got := <-observed; got != 'o' {
+		t.Fatalf("parser saw caller mutation %q, want immutable copy", got)
 	}
 }
 

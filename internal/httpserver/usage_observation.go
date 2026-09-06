@@ -70,10 +70,11 @@ func ParseContentCoding(value string) (ContentCoding, error) {
 	return ValidateContentCoding(value)
 }
 
-// UsageObservationJob is the complete immutable handoff to the usage worker.
-// Submit copies Bytes before enqueueing. No request, headers, reservation, or
-// concurrency lease is part of this value; the ticket is the already-settled
-// one-shot adjustment handle only.
+// UsageObservationJob is the complete handoff to the usage worker. Submit takes
+// ownership of Bytes and makes the one immutable queue copy only after a queue
+// slot has been admitted. No request, headers, reservation, or concurrency
+// lease is part of this value; the ticket is the already-settled one-shot
+// adjustment handle only.
 type UsageObservationJob struct {
 	Bytes         []byte
 	ContentCoding ContentCoding
@@ -94,12 +95,14 @@ func NewUsageObservationJobWithCoding(captured []byte, contentEncoding string, t
 	return NewUsageObservationJob(captured, coding, ticket), nil
 }
 
-// NewUsageObservationJob copies the bounded captured bytes into a job.
+// NewUsageObservationJob bounds captured bytes and transfers their ownership
+// to the returned job. Submit makes an immutable copy only when it accepts the
+// job; callers must not mutate captured after submitting it.
 func NewUsageObservationJob(captured []byte, coding ContentCoding, ticket *limiter.TokenAdjustmentTicket) UsageObservationJob {
 	if int64(len(captured)) > DefaultUsageObservationMaxBytes {
 		captured = captured[:DefaultUsageObservationMaxBytes]
 	}
-	return UsageObservationJob{Bytes: append([]byte(nil), captured...), ContentCoding: coding, Ticket: ticket}
+	return UsageObservationJob{Bytes: captured, ContentCoding: coding, Ticket: ticket}
 }
 
 // UsageObservationStats contains safe scalar worker counters.
@@ -124,6 +127,8 @@ type UsageObservationWorkerOptions struct {
 // process-owned worker. Submission never waits and never starts a goroutine.
 type UsageObservationWorker struct {
 	queue chan UsageObservationJob
+	slots chan struct{}
+	wake  chan struct{}
 	stop  chan struct{}
 	done  chan struct{}
 
@@ -154,11 +159,16 @@ func NewUsageObservationWorker(options UsageObservationWorkerOptions) *UsageObse
 	}
 	worker := &UsageObservationWorker{
 		queue:     make(chan UsageObservationJob, options.Capacity),
+		slots:     make(chan struct{}, options.Capacity),
+		wake:      make(chan struct{}, 1),
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 		maxBytes:  options.MaxBytes,
 		parse:     options.Parse,
 		accepting: true,
+	}
+	for index := 0; index < options.Capacity; index++ {
+		worker.slots <- struct{}{}
 	}
 	if worker.parse == nil {
 		worker.parse = func(data []byte, coding ContentCoding) (int64, error) {
@@ -177,20 +187,36 @@ func NewUsageObserver(options UsageObservationWorkerOptions) *UsageObservationWo
 func (worker *UsageObservationWorker) run() {
 	defer close(worker.done)
 	for {
-		// Prefer shutdown over another queued job. Queued jobs are safe to drop:
-		// their conservative charges were committed before submission.
 		select {
 		case <-worker.stop:
-			worker.discardQueued()
+			worker.mu.Lock()
+			worker.discardQueuedLocked()
+			worker.mu.Unlock()
 			return
-		default:
+		case <-worker.wake:
 		}
-		select {
-		case <-worker.stop:
-			worker.discardQueued()
-			return
-		case job := <-worker.queue:
-			worker.process(job)
+		// Queue claims are serialized with the shutdown boundary. A job claimed
+		// here is in flight; jobs still queued when accepting becomes false are
+		// synchronously invalidated by Shutdown and cannot adjust late.
+		for {
+			worker.mu.Lock()
+			if !worker.accepting {
+				worker.discardQueuedLocked()
+				worker.mu.Unlock()
+				return
+			}
+			var job UsageObservationJob
+			select {
+			case job = <-worker.queue:
+				worker.releaseSlot()
+				worker.mu.Unlock()
+				worker.process(job)
+				continue
+			default:
+				worker.mu.Unlock()
+				break
+			}
+			break
 		}
 	}
 }
@@ -227,9 +253,16 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 }
 
 func (worker *UsageObservationWorker) discardQueued() {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	worker.discardQueuedLocked()
+}
+
+func (worker *UsageObservationWorker) discardQueuedLocked() {
 	for {
 		select {
 		case job := <-worker.queue:
+			worker.releaseSlot()
 			worker.dropped.Add(1)
 			if job.Ticket != nil {
 				job.Ticket.Invalidate()
@@ -250,23 +283,52 @@ func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
 		}
 		return false
 	}
-	worker.mu.Lock()
-	defer worker.mu.Unlock()
-	if !worker.accepting || job.Ticket == nil || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
+	if job.Ticket == nil || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
 		worker.dropped.Add(1)
 		if job.Ticket != nil {
 			job.Ticket.Invalidate()
 		}
 		return false
 	}
-	// Copy while holding the handoff gate. The caller can immediately reuse its
-	// capture after Submit returns without mutating the queued immutable job.
+	select {
+	case <-worker.slots:
+	default:
+		worker.dropped.Add(1)
+		job.Ticket.Invalidate()
+		return false
+	}
+	worker.mu.Lock()
+	if !worker.accepting {
+		worker.mu.Unlock()
+		worker.releaseSlot()
+		worker.dropped.Add(1)
+		job.Ticket.Invalidate()
+		return false
+	}
+	worker.mu.Unlock()
+
+	// Make the sole immutable ownership copy outside the contended lifecycle
+	// gate. Shutdown may race this copy; the final gate below invalidates the
+	// ticket instead of allowing a late queue adjustment.
 	job.Bytes = append([]byte(nil), job.Bytes...)
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	if !worker.accepting {
+		worker.releaseSlot()
+		worker.dropped.Add(1)
+		job.Ticket.Invalidate()
+		return false
+	}
 	select {
 	case worker.queue <- job:
+		select {
+		case worker.wake <- struct{}{}:
+		default:
+		}
 		worker.submitted.Add(1)
 		return true
 	default:
+		worker.releaseSlot()
 		worker.dropped.Add(1)
 		job.Ticket.Invalidate()
 		return false
@@ -323,6 +385,10 @@ func (worker *UsageObservationWorker) Shutdown(ctx context.Context) error {
 	}
 	worker.mu.Lock()
 	worker.accepting = false
+	// Drain synchronously at the shutdown boundary. The worker may be blocked
+	// parsing an already-claimed job, but queued tickets must not remain valid
+	// until that parse returns.
+	worker.discardQueuedLocked()
 	worker.mu.Unlock()
 	worker.stopOnce.Do(func() { close(worker.stop) })
 	select {
@@ -331,6 +397,10 @@ func (worker *UsageObservationWorker) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (worker *UsageObservationWorker) releaseSlot() {
+	worker.slots <- struct{}{}
 }
 
 func validContentCoding(coding ContentCoding) bool {

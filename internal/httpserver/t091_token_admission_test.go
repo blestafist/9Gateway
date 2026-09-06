@@ -125,3 +125,61 @@ func TestT091TokenFallbackPreservesMalformedAndUnknownBodies(t *testing.T) {
 		}
 	}
 }
+
+func TestT091UnusableOutputMetadataStillConsumesTokenAdmission(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "chat max_tokens", path: "/v1/chat/completions", body: `{"model":"gpt-test","max_tokens":-1}`},
+		{name: "chat max_completion_tokens", path: "/v1/chat/completions", body: `{"model":"gpt-test","max_completion_tokens":-1}`},
+		{name: "responses max_output_tokens", path: "/v1/responses", body: `{"model":"gpt-test","max_output_tokens":-1}`},
+		{name: "malformed output metadata", path: "/v1/chat/completions", body: `{"model":"gpt-test","max_tokens":"invalid"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clock := &requestLimitTestClock{now: time.Unix(10, 0).UTC()}
+			key, authenticator := requestLimitTestAuthenticator(t, []byte("t091-unusable-output-"+test.name), "unusable-output-"+test.name, `{"token_windows":[{"amount":4,"duration":"1m"}]}`, clock)
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				response.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(upstream.Close)
+			gateway := httptest.NewServer(NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(
+				transport.NewClient(), upstream.URL, "upstream-secret", authenticator,
+				limiter.NewRequestLimiter(clock.Now), limiter.NewConcurrencyLimiter(), nil,
+				limiter.NewTokenLimiter(clock.Now), TokenAdmissionConfig{FallbackUnknownInputTokens: 2, FallbackMaxOutputTokens: 2},
+			))
+			t.Cleanup(gateway.Close)
+
+			request := func() *http.Response {
+				req, err := http.NewRequest(http.MethodPost, gateway.URL+test.path, bytes.NewBufferString(test.body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Authorization", "Bearer "+key.RawKey)
+				req.Header.Set("Content-Type", "application/json")
+				response, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response
+			}
+
+			first := request()
+			first.Body.Close()
+			if first.StatusCode != http.StatusNoContent {
+				t.Fatalf("first unusable-metadata status = %d, want 204", first.StatusCode)
+			}
+			second := request()
+			second.Body.Close()
+			if second.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("exhausted unusable-metadata status = %d, want 429", second.StatusCode)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("upstream calls after exhausted unusable-metadata window = %d, want 1", got)
+			}
+		})
+	}
+}
