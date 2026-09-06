@@ -2,17 +2,20 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T091`.
+Done: `T001`-`T092`.
 
-Current: `T092` - add bounded usage-observation handoff.
+Current: `T093` - reconcile transparent JSON responses.
 
-Queued: `T093`-`T100` in dependency order from `TASKS.md`.
+Queued: `T094`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
-Important: T091 now performs bounded token preflight for configured keys,
+Important: T092 now owns a bounded process usage-observation handoff: transport
+can settle deferred conservative accounting before a non-blocking immutable job
+submission, while queue drops and bounded shutdown invalidate tickets safely.
+T091 performs bounded token preflight for configured keys,
 conservatively completing admitted reservations after transport; response usage
-observation remains for T092-T095. Transparent SSE remains byte-preserving and independent from the
+observation remains for T093-T095. Transparent SSE remains byte-preserving and independent from the
 bounded generic parser. T061-T080 completed transport hardening, SQLite-backed
 gateway keys, minimal admin bootstrap, hot-path authentication, model policy,
 generic request windows, and per-key concurrency. T081-T100 add token usage,

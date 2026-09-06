@@ -92,6 +92,13 @@ func NewHandlerWithAdminAndLimiters(upstreamClient *http.Client, upstreamBaseURL
 // and shares the supplied clock with the other limiters when its token limiter
 // is constructed by the caller.
 func NewHandlerWithAdminAndLimitersAndTokenConfig(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenConfig TokenAdmissionConfig, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return NewHandlerWithAdminAndLimitersAndTokenConfigAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, concurrencyLimiter, completionLogger, tokenConfig, nil, tokenModes...)
+}
+
+// NewHandlerWithAdminAndLimitersAndTokenConfigAndUsageObservationWorker is the
+// process-wiring form of the admin/public constructor. The supplied worker is
+// owned by the caller and is never shut down by the handler.
+func NewHandlerWithAdminAndLimitersAndTokenConfigAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, tokenModes ...auth.TokenMode) (http.Handler, error) {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
@@ -99,6 +106,7 @@ func NewHandlerWithAdminAndLimitersAndTokenConfig(upstreamClient *http.Client, u
 		concurrencyLimiter = limiter.NewConcurrencyLimiter()
 	}
 	proxy := newProxyHandlerWithLimitersAndTokenConfig(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenConfig)
+	proxy.usageObservationWorker = usageWorker
 	service, err := newAdminKeyService(repository, []byte(authPepper), tokenModes...)
 	if err != nil {
 		return nil, err
@@ -132,13 +140,26 @@ func NewHandlerWithAuthenticatorAndLimiters(upstreamClient *http.Client, upstrea
 // NewHandlerWithAuthenticatorAndLimitersAndTokenConfig is the configured form
 // of NewHandlerWithAuthenticatorAndLimiters.
 func NewHandlerWithAuthenticatorAndLimitersAndTokenConfig(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenConfig TokenAdmissionConfig) http.Handler {
-	return NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, nil, tokenConfig)
+	return NewHandlerWithAuthenticatorAndLimitersAndTokenConfigAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, tokenConfig, nil)
+}
+
+// NewHandlerWithAuthenticatorAndLimitersAndTokenConfigAndUsageObservationWorker
+// wires a caller-owned usage-observation worker into the public handler.
+func NewHandlerWithAuthenticatorAndLimitersAndTokenConfigAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker) http.Handler {
+	return NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, nil, tokenConfig, usageWorker)
 }
 
 // NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter is the test and
 // embedding form that supplies the process-owned token limiter (notably for an
 // injectable clock). A nil limiter creates the normal wall-clock limiter.
 func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig) http.Handler {
+	return NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, tokenLimiter, tokenConfig, nil)
+}
+
+// NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker
+// is the fully injectable public constructor. The token limiter and usage
+// worker are both process-owned by the caller.
+func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker) http.Handler {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
@@ -146,6 +167,7 @@ func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(upstreamClient *http.
 		concurrencyLimiter = limiter.NewConcurrencyLimiter()
 	}
 	proxy := newProxyHandlerWithLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenLimiter, tokenConfig)
+	proxy.usageObservationWorker = usageWorker
 	router := routeWithAuthenticator(proxy, nil, authenticator)
 	return newHandlerWithCompletionLogger(completionLogger, router)
 }
@@ -200,15 +222,16 @@ func routeWithAuthenticator(proxy http.Handler, admin http.Handler, authenticato
 }
 
 type proxyHandler struct {
-	client             *http.Client
-	baseURL            *url.URL
-	apiKey             string
-	requestLimiter     *limiter.RequestLimiter
-	concurrencyLimiter *limiter.ConcurrencyLimiter
-	tokenLimiter       *limiter.TokenLimiter
-	tokenConfig        TokenAdmissionConfig
-	leaseCoordinator   *limiter.ResourceLeaseCoordinator
-	responseDispatch   responseDispatchFunc
+	client                 *http.Client
+	baseURL                *url.URL
+	apiKey                 string
+	requestLimiter         *limiter.RequestLimiter
+	concurrencyLimiter     *limiter.ConcurrencyLimiter
+	tokenLimiter           *limiter.TokenLimiter
+	tokenConfig            TokenAdmissionConfig
+	leaseCoordinator       *limiter.ResourceLeaseCoordinator
+	usageObservationWorker *UsageObservationWorker
+	responseDispatch       responseDispatchFunc
 }
 
 type responseDispatchFunc func(http.ResponseWriter, *http.Response, *openai.RequestMetadata)

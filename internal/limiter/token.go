@@ -417,6 +417,29 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 	return ticket.finalErr
 }
 
+// Invalidate consumes a deferred adjustment ticket without changing its
+// conservative committed amount. It is used when a best-effort observation
+// cannot be handed to its bounded worker or is discarded during shutdown.
+// Invalidation is safe to call repeatedly and concurrently with Adjust; the
+// first terminal operation wins.
+func (ticket *TokenAdjustmentTicket) Invalidate() {
+	if ticket == nil {
+		return
+	}
+	ticket.once.Do(func() {
+		// Do not retain the limiter or bucket identities after a dropped ticket.
+		// The conservative amount was already committed by CommitDeferred.
+		ticket.limiter = nil
+		ticket.buckets = nil
+		ticket.reserved = 0
+	})
+}
+
+// Discard is an explicit lifecycle alias for Invalidate.
+func (ticket *TokenAdjustmentTicket) Discard() {
+	ticket.Invalidate()
+}
+
 // Commit is an alias for Adjust on a deferred ticket.
 func (ticket *TokenAdjustmentTicket) Commit(actual int64) error {
 	return ticket.Adjust(actual)

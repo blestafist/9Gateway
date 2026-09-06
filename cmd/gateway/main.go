@@ -53,12 +53,20 @@ func run() error {
 			log.Printf("completion logger shutdown: %v", err)
 		}
 	}()
+	usageObservationWorker := httpserver.NewUsageObservationWorker(httpserver.UsageObservationWorkerOptions{})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := usageObservationWorker.Shutdown(ctx); err != nil {
+			log.Printf("usage observation worker shutdown: %v", err)
+		}
+	}()
 
-	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfig(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), nil, nil, completionLogger, httpserver.TokenAdmissionConfig{
+	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndUsageObservationWorker(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), nil, nil, completionLogger, httpserver.TokenAdmissionConfig{
 		MaxInspectedRequestBytes:   cfg.Tokenizer.MaxInspectedRequestBytes,
 		FallbackUnknownInputTokens: cfg.Tokenizer.FallbackUnknownInputTokens,
 		FallbackMaxOutputTokens:    cfg.Tokenizer.FallbackMaxOutputTokens,
-	}, auth.TokenMode(cfg.Tokenizer.Mode))
+	}, usageObservationWorker, auth.TokenMode(cfg.Tokenizer.Mode))
 	if err != nil {
 		return err
 	}
