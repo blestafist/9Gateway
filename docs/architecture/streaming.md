@@ -70,6 +70,13 @@ OpenAI-compatible JSON response.
 Support multiple choices, role/content deltas, finish reason, usage, and indexed
 tool calls. Concatenate fragmented function arguments before any JSON decoding.
 
+The conversion path bounds decoded representation bytes and, independently, the
+compressed wire bytes consumed from upstream. The wire bound uses the existing
+8 MiB observation ceiling and remains active through the post-`[DONE]` drain,
+so gzip trailers and concatenated members cannot turn a small decoded response
+into an unbounded read. Transparent SSE and non-gzip conversion are not subject
+to this compressed-wire bound.
+
 Aggregation completes on `[DONE]` or valid EOF without `[DONE]`. EOF before any
 meaningful response is a protocol/upstream error. Usage can arrive after a
 terminal content chunk, so `finish_reason` alone does not complete aggregation.

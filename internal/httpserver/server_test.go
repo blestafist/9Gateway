@@ -13,9 +13,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/transport"
 )
 
@@ -741,6 +743,136 @@ func TestDecodedRepresentationReaderAcceptsExactLimitAndRejectsOneByteOver(t *te
 			}
 		})
 	}
+}
+
+func TestCompressedWireReaderAcceptsExactLimitAndRejectsOneByteOver(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want error
+	}{
+		{name: "exact limit", body: strings.Repeat("x", int(aggregationMaxWireBytes))},
+		{name: "one byte over", body: strings.Repeat("x", int(aggregationMaxWireBytes)+1), want: errCompressedWireTooLarge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &compressedWireReader{
+				reader:    strings.NewReader(test.body),
+				remaining: aggregationMaxWireBytes,
+			}
+			got, err := io.ReadAll(reader)
+			if test.want != nil {
+				if !errors.Is(err, test.want) {
+					t.Fatalf("read error = %v, want errors.Is(..., %v)", err, test.want)
+				}
+				if len(got) != int(aggregationMaxWireBytes) {
+					t.Fatalf("wire bytes = %d, want %d before overflow", len(got), aggregationMaxWireBytes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read exact-limit representation: %v", err)
+			}
+			if len(got) != int(aggregationMaxWireBytes) {
+				t.Fatalf("wire bytes = %d, want %d", len(got), aggregationMaxWireBytes)
+			}
+		})
+	}
+}
+
+func TestProxyRejectsExcessiveCompressedWireAfterSSEDONEAndReusesCapacity(t *testing.T) {
+	const stream = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"
+	firstMember := gzipMember(t, []byte(stream), nil)
+	// Large valid gzip headers carry no decoded payload. Appending these as
+	// concatenated members exercises the post-DONE drain without reaching the
+	// independent decoded representation bound first.
+	extra := bytes.Repeat([]byte("x"), 65535)
+	var wire bytes.Buffer
+	wire.Write(firstMember)
+	for wire.Len() <= int(aggregationMaxWireBytes) {
+		wire.Write(gzipMember(t, nil, extra))
+	}
+
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	key, authenticator := requestLimitTestAuthenticator(t, []byte("compressed-wire-limit"), "compressed-wire", `{"token_windows":[{"amount":8,"duration":"1m"}],"max_concurrent_requests":1}`, clock)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			response.Header().Set("Content-Type", "text/event-stream")
+			response.Header().Set("Content-Encoding", "gzip")
+			_, _ = response.Write(wire.Bytes())
+			return
+		}
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":4,\"total_tokens\":4}}\n\ndata: [DONE]\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(
+		transport.NewClient(), upstream.URL, "upstream-secret", authenticator,
+		limiter.NewRequestLimiter(clock.Now), limiter.NewConcurrencyLimiter(), nil,
+		limiter.NewTokenLimiter(clock.Now), TokenAdmissionConfig{FallbackUnknownInputTokens: 2, FallbackMaxOutputTokens: 2},
+	))
+	t.Cleanup(gateway.Close)
+
+	request := func() *http.Response {
+		req, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","stream":false}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+key.RawKey)
+		req.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	first := request()
+	firstBody, err := io.ReadAll(first.Body)
+	first.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.StatusCode != http.StatusBadGateway || bytes.Contains(firstBody, []byte(`"choices"`)) {
+		t.Fatalf("excessive wire response = %d/%q, want controlled failure without generated JSON", first.StatusCode, firstBody)
+	}
+
+	second := request()
+	secondBody, err := io.ReadAll(second.Body)
+	second.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.StatusCode != http.StatusOK || !json.Valid(secondBody) || calls.Load() != 2 {
+		t.Fatalf("capacity reuse response = %d/%q, upstream calls %d", second.StatusCode, secondBody, calls.Load())
+	}
+	third := request()
+	third.Body.Close()
+	fourth := request()
+	fourthBody, err := io.ReadAll(fourth.Body)
+	fourth.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fourth.StatusCode != http.StatusTooManyRequests || !bytes.Contains(fourthBody, []byte(`"code":"token_limit_exceeded"`)) || calls.Load() != 3 {
+		t.Fatalf("conservative token settlement = %d/%q, upstream calls %d", fourth.StatusCode, fourthBody, calls.Load())
+	}
+}
+
+func gzipMember(t *testing.T, body, extra []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	writer.Header.Extra = extra
+	if len(body) != 0 {
+		if _, err := writer.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
 }
 
 func TestProxyConvertsChatSSEWithExactAccumulatedPayloadLimit(t *testing.T) {

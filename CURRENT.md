@@ -38,3 +38,6 @@ critical path. Pricing, budgets, request-history/body persistence, metrics,
 `/ready`, CLI, tool-call execution/validation, and Web UI remain out of scope.
 Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
 completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion.
+
+The focused T091-T100 review fix independently bounds compressed wire bytes
+during gzip SSE-to-JSON conversion, including the post-[DONE] validation drain.

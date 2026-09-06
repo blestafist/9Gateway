@@ -267,9 +267,15 @@ const (
 	// Keep it above the accumulated payload limit so a normal 4 MiB result can
 	// still be represented without making the decoder an unbounded work sink.
 	aggregationMaxDecodedBytes int64 = 8 * 1024 * 1024
+	// Compressed conversion input is bounded independently of its decoded
+	// representation. This uses the existing observation-size ceiling rather
+	// than adding another public setting; it also covers bytes read while
+	// draining gzip trailers and subsequent members after [DONE].
+	aggregationMaxWireBytes int64 = DefaultUsageObservationMaxBytes
 )
 
 var errDecodedRepresentationTooLarge = errors.New("decoded representation exceeds limit")
+var errCompressedWireTooLarge = errors.New("compressed wire representation exceeds limit")
 
 func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler {
 	return newProxyHandlerWithRequestLimiter(client, baseURL, apiKey, nil)
@@ -638,7 +644,11 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
 			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
-			settleConvertedLease(lease, aggregation)
+			if errors.Is(err, errCompressedWireTooLarge) {
+				finalizeConvertedLeaseConservatively(lease)
+			} else {
+				settleConvertedLease(lease, aggregation)
+			}
 			return err
 		}
 		body, done := aggregation.JSON, aggregation.Done
@@ -648,7 +658,11 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 		if !done || requiresDrain {
 			if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
 				writeGatewayError(response, gatewayErrorUpstreamConnection, "")
-				settleConvertedLease(lease, aggregation)
+				if errors.Is(err, errCompressedWireTooLarge) {
+					finalizeConvertedLeaseConservatively(lease)
+				} else {
+					settleConvertedLease(lease, aggregation)
+				}
 				return err
 			}
 		} else {
@@ -734,6 +748,15 @@ func aggregationReaderWithDrain(upstreamResponse *http.Response) (io.Reader, fun
 	reader := io.Reader(upstreamResponse.Body)
 	closers := make([]io.Closer, 0, len(codings))
 	requiresDrain := false
+	compressed := false
+	for _, coding := range codings {
+		if strings.EqualFold(coding, "gzip") {
+			compressed = true
+		}
+	}
+	if compressed {
+		reader = &compressedWireReader{reader: reader, remaining: aggregationMaxWireBytes}
+	}
 	for index := len(codings) - 1; index >= 0; index-- {
 		if strings.EqualFold(codings[index], "identity") {
 			continue
@@ -761,6 +784,38 @@ func aggregationReaderWithDrain(upstreamResponse *http.Response) (io.Reader, fun
 type decodedRepresentationReader struct {
 	reader    io.Reader
 	remaining int64
+}
+
+// compressedWireReader bounds bytes consumed from the upstream wire before
+// gzip decoding. Its one-byte probe after the exact limit distinguishes an
+// exact-size representation from a representation with more compressed bytes.
+// Because the same reader remains underneath gzip during the post-[DONE] drain,
+// trailer validation and concatenated-member reads are covered as well.
+type compressedWireReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (reader *compressedWireReader) Read(destination []byte) (int, error) {
+	if len(destination) == 0 {
+		return 0, nil
+	}
+	if reader.remaining == 0 {
+		var probe [1]byte
+		read, err := reader.reader.Read(probe[:])
+		if read > 0 {
+			return 0, errCompressedWireTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(destination)) > reader.remaining {
+		destination = destination[:reader.remaining]
+	}
+	read, err := reader.reader.Read(destination)
+	if read > 0 {
+		reader.remaining -= int64(read)
+	}
+	return read, err
 }
 
 func (reader *decodedRepresentationReader) Read(destination []byte) (int, error) {
