@@ -54,7 +54,11 @@ func run() error {
 		}
 	}()
 
-	gatewayHandler, err := httpserver.NewHandlerWithAdminAndCompletionLogger(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), completionLogger, auth.TokenMode(cfg.Tokenizer.Mode))
+	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfig(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, storage.NewAPIKeyRepository(database), nil, nil, completionLogger, httpserver.TokenAdmissionConfig{
+		MaxInspectedRequestBytes:   cfg.Tokenizer.MaxInspectedRequestBytes,
+		FallbackUnknownInputTokens: cfg.Tokenizer.FallbackUnknownInputTokens,
+		FallbackMaxOutputTokens:    cfg.Tokenizer.FallbackMaxOutputTokens,
+	}, auth.TokenMode(cfg.Tokenizer.Mode))
 	if err != nil {
 		return err
 	}

@@ -2,15 +2,17 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T090`.
+Done: `T001`-`T091`.
 
-Current: `T091` - enforce token preflight admission.
+Current: `T092` - add bounded usage-observation handoff.
 
-Queued: `T092`-`T100` in dependency order from `TASKS.md`.
+Queued: `T093`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
-Important: transparent SSE remains byte-preserving and independent from the
+Important: T091 now performs bounded token preflight for configured keys,
+conservatively completing admitted reservations after transport; response usage
+observation remains for T092-T095. Transparent SSE remains byte-preserving and independent from the
 bounded generic parser. T061-T080 completed transport hardening, SQLite-backed
 gateway keys, minimal admin bootstrap, hot-path authentication, model policy,
 generic request windows, and per-key concurrency. T081-T100 add token usage,

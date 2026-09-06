@@ -15,14 +15,38 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/auth"
+	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/protocol/openai"
 )
 
 const requestIDHeader = "X-Gateway-Request-ID"
 
-const requestInspectionLimit int64 = 64 * 1024
+const requestInspectionLimit int64 = config.DefaultMaxInspectedRequestBytes
+
+// TokenAdmissionConfig contains the bounded, deployment-wide settings used by
+// token preflight. The key's effective token mode is already compiled into its
+// authentication policy; these values are intentionally not per-key.
+type TokenAdmissionConfig struct {
+	MaxInspectedRequestBytes   int64
+	FallbackUnknownInputTokens int64
+	FallbackMaxOutputTokens    int64
+}
+
+func (configuration TokenAdmissionConfig) withDefaults() TokenAdmissionConfig {
+	if configuration.MaxInspectedRequestBytes == 0 {
+		configuration.MaxInspectedRequestBytes = config.DefaultMaxInspectedRequestBytes
+	}
+	if configuration.FallbackUnknownInputTokens == 0 {
+		configuration.FallbackUnknownInputTokens = config.DefaultFallbackUnknownInputTokens
+	}
+	if configuration.FallbackMaxOutputTokens == 0 {
+		configuration.FallbackMaxOutputTokens = config.DefaultFallbackMaxOutputTokens
+	}
+	return configuration
+}
 
 type requestIDContextKey struct{}
 
@@ -60,13 +84,21 @@ func NewHandlerWithAdminAndRequestLimiter(upstreamClient *http.Client, upstreamB
 // limiters are process-local and may be shared by handlers when an application
 // needs one policy domain across more than one listener.
 func NewHandlerWithAdminAndLimiters(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return NewHandlerWithAdminAndLimitersAndTokenConfig(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, concurrencyLimiter, completionLogger, TokenAdmissionConfig{}, tokenModes...)
+}
+
+// NewHandlerWithAdminAndLimitersAndTokenConfig is the fully configured form of
+// the administration/public constructor. Token admission remains process-local
+// and shares the supplied clock with the other limiters when its token limiter
+// is constructed by the caller.
+func NewHandlerWithAdminAndLimitersAndTokenConfig(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenConfig TokenAdmissionConfig, tokenModes ...auth.TokenMode) (http.Handler, error) {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
 	if concurrencyLimiter == nil {
 		concurrencyLimiter = limiter.NewConcurrencyLimiter()
 	}
-	proxy := newProxyHandlerWithLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter)
+	proxy := newProxyHandlerWithLimitersAndTokenConfig(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenConfig)
 	service, err := newAdminKeyService(repository, []byte(authPepper), tokenModes...)
 	if err != nil {
 		return nil, err
@@ -94,13 +126,26 @@ func NewHandlerWithAuthenticatorAndRequestLimiter(upstreamClient *http.Client, u
 // NewHandlerWithAuthenticatorAndLimiters builds an authenticated public
 // handler with explicitly owned request-window and concurrency limiters.
 func NewHandlerWithAuthenticatorAndLimiters(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger) http.Handler {
+	return NewHandlerWithAuthenticatorAndLimitersAndTokenConfig(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, TokenAdmissionConfig{})
+}
+
+// NewHandlerWithAuthenticatorAndLimitersAndTokenConfig is the configured form
+// of NewHandlerWithAuthenticatorAndLimiters.
+func NewHandlerWithAuthenticatorAndLimitersAndTokenConfig(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenConfig TokenAdmissionConfig) http.Handler {
+	return NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, nil, tokenConfig)
+}
+
+// NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter is the test and
+// embedding form that supplies the process-owned token limiter (notably for an
+// injectable clock). A nil limiter creates the normal wall-clock limiter.
+func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig) http.Handler {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
 	if concurrencyLimiter == nil {
 		concurrencyLimiter = limiter.NewConcurrencyLimiter()
 	}
-	proxy := newProxyHandlerWithLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter)
+	proxy := newProxyHandlerWithLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenLimiter, tokenConfig)
 	router := routeWithAuthenticator(proxy, nil, authenticator)
 	return newHandlerWithCompletionLogger(completionLogger, router)
 }
@@ -160,6 +205,9 @@ type proxyHandler struct {
 	apiKey             string
 	requestLimiter     *limiter.RequestLimiter
 	concurrencyLimiter *limiter.ConcurrencyLimiter
+	tokenLimiter       *limiter.TokenLimiter
+	tokenConfig        TokenAdmissionConfig
+	leaseCoordinator   *limiter.ResourceLeaseCoordinator
 	responseDispatch   responseDispatchFunc
 }
 
@@ -188,9 +236,17 @@ func newProxyHandlerWithRequestLimiter(client *http.Client, baseURL, apiKey stri
 }
 
 func newProxyHandlerWithLimiters(client *http.Client, baseURL, apiKey string, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter) *proxyHandler {
+	return newProxyHandlerWithLimitersAndTokenConfig(client, baseURL, apiKey, requestLimiter, concurrencyLimiter, TokenAdmissionConfig{})
+}
+
+func newProxyHandlerWithLimitersAndTokenConfig(client *http.Client, baseURL, apiKey string, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, tokenConfig TokenAdmissionConfig) *proxyHandler {
+	return newProxyHandlerWithLimitersAndTokenLimiter(client, baseURL, apiKey, requestLimiter, concurrencyLimiter, nil, tokenConfig)
+}
+
+func newProxyHandlerWithLimitersAndTokenLimiter(client *http.Client, baseURL, apiKey string, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig) *proxyHandler {
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
-		return &proxyHandler{client: client, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
+		return &proxyHandler{client: client, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, tokenConfig: tokenConfig.withDefaults(), responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
 			writeGatewayError(response, gatewayErrorInternal, "")
 		}}
 	}
@@ -198,7 +254,11 @@ func newProxyHandlerWithLimiters(client *http.Client, baseURL, apiKey string, re
 	// A nil responseDispatch selects the built-in dispatcher. Keeping the
 	// injectable legacy-shaped callback available is useful to transport tests
 	// and avoids making request classification part of that callback's API.
-	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter}
+	tokenConfig = tokenConfig.withDefaults()
+	if tokenLimiter == nil {
+		tokenLimiter = limiter.NewTokenLimiter(nil)
+	}
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, tokenLimiter: tokenLimiter, tokenConfig: tokenConfig, leaseCoordinator: limiter.NewResourceLeaseCoordinator(concurrencyLimiter, tokenLimiter)}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -214,14 +274,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 
 	principal, authenticated := PrincipalFromContext(request.Context())
 	var inspectionLease *limiter.Lease
-	var concurrencyLease *limiter.Lease
 	var upstreamResponse *http.Response
+	var lifecycleLease *limiter.ResourceLease
+	var tokenAdmission bool
 	proxyContext, cancelUpstream := context.WithCancel(request.Context())
-	// Restricted model inspection may block while reading a client body. Reserve
-	// a slot for that phase, but do not retain it as the full-lifecycle lease:
-	// inspection must finish and release its provisional reservation before the
-	// request window is consumed. The lifecycle lease is acquired only after
-	// that admission, so a rate-rejected request never retains a slot.
+	// Restricted inspection may block while reading a client body. Reserve a
+	// provisional slot for that phase and promote it into the full lifecycle
+	// lease only after model/request/token admission. A rejected request never
+	// retains a lifecycle slot or token reservation.
 	defer func() {
 		cancelUpstream()
 		if upstreamResponse != nil && upstreamResponse.Body != nil {
@@ -231,7 +291,13 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			_ = request.Body.Close()
 		}
 		inspectionLease.Release()
-		concurrencyLease.Release()
+		if lifecycleLease != nil {
+			if tokenAdmission {
+				_, _ = lifecycleLease.TransportComplete()
+			} else {
+				lifecycleLease.ReleaseBeforeUpstream()
+			}
+		}
 	}()
 	if authenticated && handler.concurrencyLimiter != nil && shouldInspectRequestMetadata(request) {
 		inspectionLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
@@ -242,15 +308,11 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 
 	requestBody, metadata := request.Body, (*openai.RequestMetadata)(nil)
+	var inspected []byte
+	var inspectionAvailable bool
 	if shouldInspectRequestMetadata(request) {
-		requestBody, metadata = inspectChatRequest(request)
+		requestBody, metadata, inspected, inspectionAvailable = inspectRequest(request, handler.tokenConfig.MaxInspectedRequestBytes)
 	}
-	// End the potentially blocking inspection phase before evaluating the model
-	// decision and, importantly, before request-window admission. A later
-	// lifecycle acquisition may race with another inspection reservation and
-	// reject; consumed request capacity is intentionally not refunded.
-	inspectionLease.Release()
-	inspectionLease = nil
 	if metadata != nil && metadata.Model != "" {
 		if authenticated && !principal.Policy.AllowsModel(metadata.Model) {
 			writeGatewayError(response, gatewayErrorModelNotAllowed, "model")
@@ -269,13 +331,35 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			}
 		}
 	}
-	if handler.concurrencyLimiter != nil {
-		if authenticated {
-			concurrencyLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
-			if concurrencyLease == nil {
-				writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
-				return
-			}
+	var tokenPlan *accounting.ReservationPlan
+	if authenticated && len(principal.Policy.TokenWindows()) != 0 {
+		tokenAdmission = true
+		var err error
+		tokenPlan, err = handler.tokenPlan(request, principal, metadata, inspected, inspectionAvailable)
+		if err != nil {
+			writeGatewayError(response, gatewayErrorInternal, "")
+			return
+		}
+		if tokenPlan == nil {
+			tokenAdmission = false
+		}
+	}
+	if authenticated {
+		options := limiter.ResourceLeaseOptions{KeyID: principal.ID, MaxConcurrency: principal.Policy.MaxConcurrency()}
+		if tokenPlan != nil {
+			options.TokenWindows = principal.Policy.TokenWindows()
+			options.TokenAmount = tokenPlan.Total.Int64()
+		}
+		var admissionErr *limiter.AdmissionError
+		if inspectionLease != nil {
+			lifecycleLease, admissionErr = handler.leaseCoordinator.AcquireWithProvisional(inspectionLease, options)
+			inspectionLease = nil
+		} else {
+			lifecycleLease, admissionErr = handler.leaseCoordinator.Acquire(options)
+		}
+		if admissionErr != nil {
+			handler.writeAdmissionError(response, admissionErr)
+			return
 		}
 	}
 	upstreamRequest, err := http.NewRequestWithContext(proxyContext, request.Method, targetURL.String(), requestBody)
@@ -299,40 +383,106 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	dispatchResponse(response, upstreamResponse, metadata, request.WithContext(proxyContext))
 }
 
+func (handler *proxyHandler) writeAdmissionError(response http.ResponseWriter, rejection *limiter.AdmissionError) {
+	if rejection != nil && rejection.Resource == limiter.AdmissionTokens {
+		retryAfter := 0
+		if !rejection.ResetAt.IsZero() {
+			retryAfter = handler.tokenLimiter.RetryAfterSeconds(rejection.ResetAt)
+		}
+		if retryAfter <= 0 {
+			retryAfter = 1
+		}
+		writeGatewayErrorRetryAfter(response, gatewayErrorTokenLimit, "", retryAfter)
+		return
+	}
+	writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
+}
+
+func (handler *proxyHandler) tokenPlan(request *http.Request, principal auth.Principal, metadata *openai.RequestMetadata, inspected []byte, available bool) (*accounting.ReservationPlan, error) {
+	if request.Method == http.MethodGet && request.URL.Path == "/v1/models" {
+		return nil, nil
+	}
+	responses := request.URL.Path == "/v1/responses"
+	input := accounting.UnknownInputTokens()
+	quality := accounting.EstimateQualityUnknown
+	if principal.Policy.TokenMode() == auth.TokenModeEstimate && available && eligibleTokenRequest(request) {
+		estimator := accounting.NewApproximateEstimator(handler.tokenConfig.FallbackUnknownInputTokens)
+		var err error
+		model := ""
+		if metadata != nil {
+			model = metadata.Model
+		}
+		input, quality, err = estimator.EstimateInputTokens(model, inspected)
+		if err != nil && !errors.Is(err, accounting.ErrEstimateMalformed) {
+			// Estimator failures use the configured conservative fallback.
+			quality = accounting.EstimateQualityUnknown
+		}
+	}
+	reservationMetadata := accounting.ReservationMetadata{}
+	if metadata != nil {
+		reservationMetadata = accounting.ReservationMetadata{MaxTokens: metadata.MaxTokens, MaxCompletionTokens: metadata.MaxCompletionTokens, MaxOutputTokens: metadata.MaxOutputTokens}
+	}
+	plan, err := accounting.PlanReservation(accounting.ReservationOptions{
+		Mode:                    accounting.ReservationMode(principal.Policy.TokenMode()),
+		UnknownInputFallback:    handler.tokenConfig.FallbackUnknownInputTokens,
+		FallbackMaxOutputTokens: handler.tokenConfig.FallbackMaxOutputTokens,
+		ResponsesEndpoint:       responses,
+		Metadata:                reservationMetadata,
+		Input:                   input,
+		Quality:                 quality,
+	})
+	if err != nil {
+		if errors.Is(err, accounting.ErrReservationUnavailable) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &plan, nil
+}
+
 func shouldInspectRequestMetadata(request *http.Request) bool {
-	if request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" || !isJSONMediaType(request.Header) {
+	if request.Method != http.MethodPost || (request.URL.Path != "/v1/chat/completions" && request.URL.Path != "/v1/responses") || !isJSONMediaType(request.Header) {
 		return false
 	}
 	principal, authenticated := PrincipalFromContext(request.Context())
 	if !authenticated {
 		return true
 	}
-	// An unrestricted policy has no model decision to make. Avoid touching the
-	// body in that common case, in particular before a request-count rejection.
-	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0
+	// An unrestricted policy has no model decision to make. Token-window keys
+	// still inspect eligible bodies for admission; all other requests remain
+	// byte-transparent and are not read solely to discover their size.
+	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0
+}
+
+func eligibleTokenRequest(request *http.Request) bool {
+	return request.Method == http.MethodPost && (request.URL.Path == "/v1/chat/completions" || request.URL.Path == "/v1/responses") && isJSONMediaType(request.Header)
+}
+
+func inspectRequest(request *http.Request, limit int64) (io.ReadCloser, *openai.RequestMetadata, []byte, bool) {
+	if request.Body == nil || request.Body == http.NoBody || request.ContentLength == 0 {
+		return request.Body, nil, nil, false
+	}
+	inspected, replacement, available, _ := openai.InspectRequestBody(request.Body, limit)
+	if replacement == nil {
+		return request.Body, nil, nil, false
+	}
+	body := &replayedRequestBody{Reader: replacement, source: request.Body}
+	if !available {
+		return body, nil, nil, false
+	}
+	metadata, err := openai.ParseRequestMetadata(inspected)
+	if err != nil {
+		return body, nil, inspected, true
+	}
+	return body, &metadata, inspected, true
 }
 
 func inspectChatRequest(request *http.Request) (io.ReadCloser, *openai.RequestMetadata) {
 	if request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" || !isJSONMediaType(request.Header) {
 		return request.Body, nil
 	}
-	if request.Body == nil || request.Body == http.NoBody || request.ContentLength == 0 {
-		return nil, nil
-	}
-
-	inspected, replacement, available, _ := openai.InspectRequestBody(request.Body, requestInspectionLimit)
-	if replacement == nil {
-		return request.Body, nil
-	}
-	body := &replayedRequestBody{Reader: replacement, source: request.Body}
-	if !available {
-		return body, nil
-	}
-	metadata, err := openai.ParseRequestMetadata(inspected)
-	if err != nil {
-		return body, nil
-	}
-	return body, &metadata
+	body, metadata, _, _ := inspectRequest(request, requestInspectionLimit)
+	return body, metadata
 }
 
 func isJSONMediaType(header http.Header) bool {

@@ -183,6 +183,17 @@ func (limiter *TokenLimiter) TryReserve(keyID string, windows []TokenWindow, amo
 	return limiter.Reserve(keyID, windows, amount)
 }
 
+// RetryAfterSeconds returns a positive rounded-up delay from the limiter clock
+// to a token-window reset. A due reset still reports one second.
+func (limiter *TokenLimiter) RetryAfterSeconds(resetAt time.Time) int {
+	if limiter == nil || resetAt.IsZero() {
+		return 0
+	}
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	return RetryAfterSecondsAt(limiter.currentTimeLocked(), resetAt)
+}
+
 // Commit replaces the active reservation with actual total usage in every
 // captured bucket. Actual usage may be lower or higher than the estimate; an
 // over-estimate refund and an over-capacity debt are both intentional. Calls
