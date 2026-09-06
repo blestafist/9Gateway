@@ -139,10 +139,10 @@ type UsageObservationWorker struct {
 	parse        func([]byte, ContentCoding) (int64, error)
 	beforeAdjust func()
 
-	mu           sync.Mutex
-	accepting    bool
-	suppressLate bool
-	stopOnce     sync.Once
+	mu        sync.Mutex
+	accepting bool
+	stopOnce  sync.Once
+	phase     atomic.Uint32
 
 	submitted atomic.Uint64
 	processed atomic.Uint64
@@ -254,17 +254,18 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	if worker.beforeAdjust != nil {
 		worker.beforeAdjust()
 	}
-	// Serialize the terminal decision with Shutdown's timeout invalidation.
-	// Once Shutdown marks suppressLate, no in-flight job can pass this gate and
-	// subsequently adjust its ticket.
-	worker.mu.Lock()
-	defer worker.mu.Unlock()
-	stopping := worker.suppressLate
-	if stopping {
+	// Claim the one terminal adjustment slot atomically. Shutdown changes queue
+	// acceptance without taking this lifecycle state, so an already in-flight
+	// job may finish normally while Shutdown waits. If the wait times out, the
+	// terminal state prevents any unclaimed ticket from adjusting later.
+	// A claimed slot is explicit terminal ownership: it may finish after a
+	// timed-out Shutdown, but no unclaimed ticket can adjust after that point.
+	if !worker.beginAdjust() {
 		job.Ticket.Invalidate()
 		worker.failed.Add(1)
 		return
 	}
+	defer worker.finishAdjust()
 	if err := job.Ticket.Adjust(actual); err != nil {
 		worker.failed.Add(1)
 		return
@@ -415,11 +416,27 @@ func (worker *UsageObservationWorker) Shutdown(ctx context.Context) error {
 	case <-worker.done:
 		return nil
 	case <-ctx.Done():
-		worker.mu.Lock()
-		worker.suppressLate = true
-		worker.mu.Unlock()
+		// An adjustment that already claimed the slot is explicit terminal
+		// ownership and may finish without blocking this caller. Otherwise make
+		// timeout the terminal decision atomically with the claim.
+		worker.phase.CompareAndSwap(usageObservationIdle, usageObservationTerminal)
+		worker.phase.CompareAndSwap(usageObservationAdjusting, usageObservationTerminal)
 		return ctx.Err()
 	}
+}
+
+const (
+	usageObservationIdle uint32 = iota
+	usageObservationAdjusting
+	usageObservationTerminal
+)
+
+func (worker *UsageObservationWorker) beginAdjust() bool {
+	return worker.phase.CompareAndSwap(usageObservationIdle, usageObservationAdjusting)
+}
+
+func (worker *UsageObservationWorker) finishAdjust() {
+	worker.phase.CompareAndSwap(usageObservationAdjusting, usageObservationIdle)
 }
 
 func (worker *UsageObservationWorker) releaseSlot() {

@@ -21,8 +21,9 @@ type CommittedTokenBucket struct {
 	CommittedTokens int64
 }
 
-// CommittedTokenDelta identifies one synchronous committed change. A sink is
-// best-effort persistence plumbing only; admission never waits for it.
+// CommittedTokenDelta identifies one committed change. A sink is best-effort
+// persistence plumbing only; admission never waits for it. Deferred ticket
+// adjustment publishes limiter state before delivering its notification.
 type CommittedTokenDelta struct {
 	KeyID          string
 	BucketStart    time.Time
@@ -121,7 +122,10 @@ type TokenAdjustmentTicket struct {
 	buckets  []tokenBucketKey
 	reserved int64
 	once     sync.Once
+	notify   sync.Once
 	finalErr error
+	deltas   []CommittedTokenDelta
+	sink     func(CommittedTokenDelta)
 }
 
 // NewTokenLimiter creates an empty token limiter. A nil clock uses UTC wall
@@ -131,8 +135,10 @@ func NewTokenLimiter(now Clock) *TokenLimiter {
 }
 
 // SetCommittedDeltaSink installs process-owned persistence notification. The
-// callback is deliberately narrow so the limiter remains synchronous and
-// storage remains off the transport path.
+// callback is deliberately narrow. Deferred ticket adjustment invokes it only
+// after publishing state and releasing the limiter mutex; sinks must remain
+// nonblocking for transport latency, but lifecycle correctness does not depend
+// on them being able to acquire the limiter mutex.
 func (limiter *TokenLimiter) SetCommittedDeltaSink(sink func(CommittedTokenDelta)) {
 	if limiter == nil {
 		return
@@ -265,7 +271,11 @@ func (limiter *TokenLimiter) emitDeltaLocked(key tokenBucketKey, delta int64) {
 	if limiter.deltaSink == nil || delta == 0 {
 		return
 	}
-	limiter.deltaSink(CommittedTokenDelta{KeyID: key.keyID, BucketStart: key.start, Window: TokenWindow{Amount: key.window.amount, Duration: key.window.duration}, CommittedDelta: delta})
+	limiter.deltaSink(committedTokenDelta(key, delta))
+}
+
+func committedTokenDelta(key tokenBucketKey, delta int64) CommittedTokenDelta {
+	return CommittedTokenDelta{KeyID: key.keyID, BucketStart: key.start, Window: TokenWindow{Amount: key.window.amount, Duration: key.window.duration}, CommittedDelta: delta}
 }
 
 // Reserve atomically reserves amount in every configured window. A nil
@@ -532,6 +542,9 @@ func (reservation *TokenReservation) finalize(usage int64, actual bool) error {
 // Adjust replaces the conservative charge with actual usage. It never
 // recreates an expired bucket and never affects a bucket created after
 // admission. A failed adjustment leaves the conservative charge in place.
+// Committed state is published before persistence notifications are delivered,
+// and notifications run after releasing limiter.mu so a sink cannot extend
+// the limiter's critical section.
 func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 	if ticket == nil {
 		return nil
@@ -546,12 +559,12 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 		}
 		limiter := ticket.limiter
 		limiter.mu.Lock()
-		defer limiter.mu.Unlock()
 		var delta int64
 		if actual >= ticket.reserved {
 			increase := actual - ticket.reserved
 			if increase < 0 { // defensive: both operands are non-negative.
 				ticket.finalErr = ErrTokenAccountingOverflow
+				limiter.mu.Unlock()
 				return
 			}
 			delta = increase
@@ -566,6 +579,7 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 				}
 				if _, ok := checkedNonNegativeAdd(bucket.committed, delta); !ok {
 					ticket.finalErr = ErrTokenAccountingOverflow
+					limiter.mu.Unlock()
 					return
 				}
 			}
@@ -575,6 +589,7 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 				bucket, exists := limiter.buckets[key]
 				if exists && bucket.committed < refund {
 					ticket.finalErr = ErrTokenReservationState
+					limiter.mu.Unlock()
 					return
 				}
 			}
@@ -588,6 +603,7 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 				updated, ok := checkedSignedAdd(bucket.committed, delta)
 				if !ok {
 					ticket.finalErr = ErrTokenAccountingOverflow
+					limiter.mu.Unlock()
 					return
 				}
 				bucket.committed = updated
@@ -597,9 +613,20 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 			} else {
 				limiter.buckets[key] = bucket
 			}
-			limiter.emitDeltaLocked(key, delta)
+			if delta != 0 {
+				ticket.deltas = append(ticket.deltas, committedTokenDelta(key, delta))
+			}
 		}
 		limiter.discardExpiredLocked(limiter.currentTimeLocked())
+		ticket.sink = limiter.deltaSink
+		limiter.mu.Unlock()
+	})
+	ticket.notify.Do(func() {
+		for _, delta := range ticket.deltas {
+			if ticket.sink != nil {
+				ticket.sink(delta)
+			}
+		}
 	})
 	return ticket.finalErr
 }

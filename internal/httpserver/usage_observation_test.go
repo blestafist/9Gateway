@@ -206,6 +206,72 @@ func TestUsageObservationShutdownTimeoutWinsAtPreAdjustGate(t *testing.T) {
 	}
 }
 
+func TestUsageObservationShutdownTimeoutDoesNotWaitForCommittedDeltaSink(t *testing.T) {
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	tokens := limiter.NewTokenLimiter(clock.Now)
+	coordinator := limiter.NewResourceLeaseCoordinator(nil, tokens)
+	lease := mustObservationLease(t, coordinator, []limiter.TokenWindow{{Amount: 100, Duration: time.Minute}}, 40)
+	ticket, err := lease.TransportComplete()
+	if err != nil || ticket == nil {
+		t.Fatalf("transport completion = (%v, %v)", ticket, err)
+	}
+	sinkEntered := make(chan struct{})
+	sinkReturned := make(chan struct{})
+	releaseSink := make(chan struct{})
+	var persisted limiter.CommittedTokenDelta
+	tokens.SetCommittedDeltaSink(func(delta limiter.CommittedTokenDelta) {
+		if delta.CommittedDelta != -30 {
+			return
+		}
+		persisted = delta
+		close(sinkEntered)
+		<-releaseSink
+		close(sinkReturned)
+	})
+	worker := NewUsageObservationWorker(UsageObservationWorkerOptions{
+		Capacity: 1,
+		Parse:    func([]byte, ContentCoding) (int64, error) { return 10, nil },
+	})
+	if !worker.Submit(NewUsageObservationJob([]byte("x"), ContentCodingIdentity, ticket)) {
+		t.Fatal("observation was dropped")
+	}
+	select {
+	case <-sinkEntered:
+	case <-time.After(time.Second):
+		t.Fatal("adjustment did not reach committed-delta sink")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = worker.Shutdown(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second/2 {
+		t.Fatalf("shutdown waited for blocked sink for %s", elapsed)
+	}
+	// The adjustment committed limiter state before entering the blocked sink;
+	// Shutdown need not wait for notification delivery to observe that state.
+	if got := bucketForObservationTest(t, tokens, "key"); got != 10 {
+		t.Fatalf("committed adjustment after timed-out shutdown = %d, want 10", got)
+	}
+	// The terminal adjustment owns completion, so release the test sink before
+	// waiting for the worker or inspecting limiter state.
+	close(releaseSink)
+	select {
+	case <-sinkReturned:
+	case <-time.After(time.Second):
+		t.Fatal("committed-delta sink did not return")
+	}
+	shutdownObservationWorker(t, worker)
+	// The adjustment won the terminal decision before the deadline. Its
+	// in-memory state was committed before the worker completed, while the sink
+	// remained the explicit owner of the already-issued persistence notification.
+	if persisted.KeyID != "key" || persisted.CommittedDelta != -30 {
+		t.Fatalf("persisted adjustment = %+v, want key delta -30", persisted)
+	}
+}
+
 func TestUsageObservationAcceptedJobOwnsOneImmutableCopy(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
