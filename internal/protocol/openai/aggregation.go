@@ -88,9 +88,9 @@ func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadB
 				return aggregationResult(accumulator, false)
 			}
 			if errors.Is(err, streaming.ErrEventIncomplete) {
-				return AggregationResult{}, fmt.Errorf("%w: %w", ErrStreamIncomplete, err)
+				return partialAggregationResult(accumulator), fmt.Errorf("%w: %w", ErrStreamIncomplete, err)
 			}
-			return AggregationResult{}, err
+			return partialAggregationResult(accumulator), err
 		}
 
 		if event.Data == "[DONE]" {
@@ -99,12 +99,16 @@ func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadB
 			if events == 0 {
 				return AggregationResult{}, fmt.Errorf("%w: DONE arrived without response data", ErrInvalidAccumulatorState)
 			}
-			return aggregationResult(accumulator, true)
+			result, renderErr := aggregationResult(accumulator, true)
+			if renderErr != nil {
+				return partialAggregationResult(accumulator), renderErr
+			}
+			return result, nil
 		}
 
 		previousChoices := len(observer.state.Choices)
 		if err := observer.Observe(event); err != nil {
-			return AggregationResult{}, err
+			return partialAggregationResult(accumulator), err
 		}
 		events++
 
@@ -119,7 +123,7 @@ func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadB
 			result.State.Choices = nil
 		}
 		if err := accumulator.Accumulate(result); err != nil {
-			return AggregationResult{}, err
+			return partialAggregationResult(accumulator), err
 		}
 	}
 }
@@ -136,6 +140,18 @@ func aggregationResult(accumulator *ChatAccumulator, done bool) (AggregationResu
 		Observed: usageObservationKnown(state.Usage),
 		Done:     done,
 	}, nil
+}
+
+// partialAggregationResult preserves usage observed before a conversion error.
+// The rendered JSON is intentionally omitted: callers must not forward a
+// partially converted response, but a valid upstream total remains safe for
+// reconciliation.
+func partialAggregationResult(accumulator *ChatAccumulator) AggregationResult {
+	if accumulator == nil {
+		return AggregationResult{}
+	}
+	usage := accumulator.State().Usage.Usage
+	return AggregationResult{Usage: usage, Observed: usageObservationKnown(accumulator.State().Usage)}
 }
 
 func usageObservationKnown(usage UsageObservation) bool {

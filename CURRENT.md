@@ -2,15 +2,20 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T095`.
+Done: `T001`-`T096`.
 
-Current: `T096` - persist response usage aggregates.
+Current: `T097`.
 
-Queued: `T097`-`T100` in dependency order from `TASKS.md`.
+Queued: `T098`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
-Important: T095 observes transparent SSE only from successfully written and
+Important: T096 makes lease cleanup deterministic at the upstream-start
+boundary: pre-start exits release zero usage, while every post-start ambiguity
+conservatively settles exactly once. Compatibility conversion commits a valid
+already-observed total even when later downstream/drain work fails; transparent
+JSON/SSE observation remains conservative-first and asynchronous. T095 observes
+transparent SSE only from successfully written and
 flushed wire bytes, then hands a bounded immutable copy to the T092 worker at
 physical EOF. T094 now carries canonical usage directly from bounded SSE-to-JSON
 conversion into synchronous lease finalization, without reparsing the rendered

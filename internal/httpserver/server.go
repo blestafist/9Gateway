@@ -312,6 +312,11 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var tokenAdmission bool
 	var responseObservation *responseObservation
 	var dispatchErr error
+	// client.Do owns the ambiguous boundary. Before it is called, cleanup can
+	// prove that no upstream work was possible and release the reservation at
+	// zero. Once it starts, even an upload, header, or cancellation error may
+	// have reached upstream, so the reservation must be settled conservatively.
+	upstreamStarted := false
 	proxyContext, cancelUpstream := context.WithCancel(request.Context())
 	// Restricted inspection may block while reading a client body. Reserve a
 	// provisional slot for that phase and promote it into the full lifecycle
@@ -327,14 +332,17 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		}
 		inspectionLease.Release()
 		if lifecycleLease != nil {
-			if tokenAdmission {
-				if responseObservation != nil {
-					responseObservation.settle(lifecycleLease, handler.usageObservationWorker)
-				} else {
-					_, _ = lifecycleLease.TransportComplete()
-				}
-			} else {
+			switch {
+			case !upstreamStarted:
+				// Admission and request construction completed, but client.Do
+				// was never entered. No upstream work is possible.
 				lifecycleLease.ReleaseBeforeUpstream()
+			case tokenAdmission && responseObservation != nil:
+				responseObservation.settle(lifecycleLease, handler.usageObservationWorker)
+			case tokenAdmission:
+				_, _ = lifecycleLease.TransportComplete()
+			default:
+				_ = lifecycleLease.CompleteConservative()
 			}
 		}
 	}()
@@ -410,6 +418,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
 
+	upstreamStarted = true
 	upstreamResponse, err = handler.client.Do(upstreamRequest)
 	if err != nil {
 		writeGatewayError(response, gatewayErrorUpstreamConnection, "")
@@ -618,7 +627,7 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
 			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
-			finalizeConvertedLeaseConservatively(lease)
+			settleConvertedLease(lease, aggregation)
 			return err
 		}
 		body, done := aggregation.JSON, aggregation.Done
@@ -628,7 +637,7 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 		if !done || requiresDrain {
 			if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
 				writeGatewayError(response, gatewayErrorUpstreamConnection, "")
-				finalizeConvertedLeaseConservatively(lease)
+				settleConvertedLease(lease, aggregation)
 				return err
 			}
 		} else {
@@ -646,13 +655,7 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 		if writeErr == nil && written != len(body) {
 			writeErr = io.ErrShortWrite
 		}
-		if lease != nil {
-			if writeErr == nil && aggregation.Observed && aggregation.Usage.Total().Known() {
-				_ = lease.CommitKnown(aggregation.Usage.Total().Int64())
-			} else {
-				finalizeConvertedLeaseConservatively(lease)
-			}
-		}
+		settleConvertedLease(lease, aggregation)
 		return writeErr
 	}
 
@@ -673,6 +676,21 @@ func finalizeConvertedLeaseConservatively(lease *limiter.ResourceLease) {
 	if lease != nil {
 		_ = lease.CompleteConservative()
 	}
+}
+
+// settleConvertedLease commits a canonical total as soon as the compatibility
+// decoder has observed one. Downstream write, flush, or bounded-drain errors do
+// not erase valid upstream usage that was already observed; without a valid
+// total the lease remains conservatively charged.
+func settleConvertedLease(lease *limiter.ResourceLease, aggregation openai.AggregationResult) {
+	if lease == nil {
+		return
+	}
+	if aggregation.Observed && aggregation.Usage.Total().Known() {
+		_ = lease.CommitKnown(aggregation.Usage.Total().Int64())
+		return
+	}
+	finalizeConvertedLeaseConservatively(lease)
 }
 
 // aggregationReader returns the decoded representation needed by the bounded
