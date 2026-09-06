@@ -116,6 +116,141 @@ func TestOpenCreatesExpectedAPIKeySchema(t *testing.T) {
 	}
 }
 
+func TestOpenCreatesExpectedUsageBucketSchema(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer database.Close()
+
+	assertSchemaVersion(t, database.DB, CurrentSchemaVersion)
+	var tableSQL string
+	if err := database.QueryRow(`SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'usage_buckets'`).Scan(&tableSQL); err != nil {
+		t.Fatalf("inspect usage_buckets table: %v", err)
+	}
+	for _, column := range []string{"api_key_id", "bucket_start", "bucket_seconds", "committed_tokens", "created_at", "updated_at"} {
+		var found int
+		if err := database.QueryRow(`SELECT count(*) FROM pragma_table_info('usage_buckets') WHERE name = ?`, column).Scan(&found); err != nil {
+			t.Fatalf("inspect %s column: %v", column, err)
+		}
+		if found != 1 {
+			t.Errorf("column %q missing from usage_buckets", column)
+		}
+	}
+	for _, index := range []string{"idx_usage_buckets_key_window", "idx_usage_buckets_expiration"} {
+		var found int
+		if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?`, index).Scan(&found); err != nil {
+			t.Fatalf("inspect %s index: %v", index, err)
+		}
+		if found != 1 {
+			t.Errorf("index %q missing", index)
+		}
+	}
+	assertIndexColumns(t, database.DB, "idx_usage_buckets_key_window", []string{"api_key_id", "bucket_seconds", "bucket_start"})
+	assertIndexColumns(t, database.DB, "idx_usage_buckets_expiration", []string{"bucket_start", "bucket_seconds"})
+	if !strings.Contains(tableSQL, "REFERENCES api_keys(id)") {
+		t.Fatalf("usage_buckets foreign key missing from table SQL: %q", tableSQL)
+	}
+	var foreignKeyTarget string
+	if err := database.QueryRow(`SELECT "table" FROM pragma_foreign_key_list('usage_buckets') WHERE "from" = 'api_key_id'`).Scan(&foreignKeyTarget); err != nil {
+		t.Fatalf("inspect usage_buckets foreign key: %v", err)
+	}
+	if foreignKeyTarget != "api_keys" {
+		t.Fatalf("usage_buckets foreign key target = %q, want api_keys", foreignKeyTarget)
+	}
+	for _, forbidden := range []string{"prompt", "response", "body", "raw_key", "pepper", "credential", "estimate", "lease", "sse"} {
+		if strings.Contains(strings.ToLower(tableSQL), forbidden) {
+			t.Errorf("forbidden usage data column %q found in table SQL %q", forbidden, tableSQL)
+		}
+	}
+
+	if _, err := database.Exec(`INSERT INTO api_keys (id, name, prefix, key_hash, enabled, created_at, updated_at, policy_json) VALUES ('bucket-key', 'name', 'prefix', zeroblob(32), 1, 1, 1, '{}')`); err != nil {
+		t.Fatalf("insert api key: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO usage_buckets (api_key_id, bucket_start, bucket_seconds, committed_tokens, created_at, updated_at) VALUES ('bucket-key', 3600, 60, 12, 1, 2)`); err != nil {
+		t.Fatalf("insert valid bucket: %v", err)
+	}
+	constraints := []struct {
+		name  string
+		query string
+	}{
+		{"negative committed tokens", `INSERT INTO usage_buckets VALUES ('bucket-key', 3660, 60, -1, 1, 1)`},
+		{"zero duration", `INSERT INTO usage_buckets VALUES ('bucket-key', 3600, 0, 1, 1, 1)`},
+		{"negative duration", `INSERT INTO usage_buckets VALUES ('bucket-key', 3600, -60, 1, 1, 1)`},
+		{"unaligned start", `INSERT INTO usage_buckets VALUES ('bucket-key', 3601, 60, 1, 1, 1)`},
+		{"negative start", `INSERT INTO usage_buckets VALUES ('bucket-key', -60, 60, 1, 1, 1)`},
+		{"orphan key", `INSERT INTO usage_buckets VALUES ('missing-key', 3600, 60, 1, 1, 1)`},
+		{"duplicate identity", `INSERT INTO usage_buckets VALUES ('bucket-key', 3600, 60, 1, 1, 1)`},
+		{"non-integer count", `INSERT INTO usage_buckets VALUES ('bucket-key', 3660, 60, 1.5, 1, 1)`},
+		{"updated before created", `INSERT INTO usage_buckets VALUES ('bucket-key', 3660, 60, 1, 2, 1)`},
+	}
+	for _, test := range constraints {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := database.Exec(test.query); err == nil {
+				t.Fatalf("constraint unexpectedly accepted %s", test.name)
+			}
+		})
+	}
+}
+
+func TestUsageBucketMigrationUpgradesExistingDatabase(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TABLE api_keys (id TEXT PRIMARY KEY); PRAGMA user_version = 1`); err != nil {
+		t.Fatalf("create version one schema: %v", err)
+	}
+	if err := runMigrations(context.Background(), database, mustEmbeddedMigrations(t)); err != nil {
+		t.Fatalf("upgrade migration: %v", err)
+	}
+	assertSchemaVersion(t, database, CurrentSchemaVersion)
+	if _, err := database.Exec(`INSERT INTO api_keys(id) VALUES ('key')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO usage_buckets VALUES ('key', 0, 60, 0, 0, 0)`); err != nil {
+		t.Fatalf("insert upgraded bucket: %v", err)
+	}
+}
+
+func TestUsageBucketMigrationRollsBackOnFailure(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	migrations := []migration{{version: 1, name: "001_existing.sql", sql: "CREATE TABLE existing (id INTEGER);"}, {version: 2, name: "002_usage_buckets.sql", sql: "CREATE TABLE usage_buckets (id INTEGER); INSERT INTO missing_table VALUES (1);"}}
+	if err := runMigrations(context.Background(), database, migrations); err == nil {
+		t.Fatal("failed migration unexpectedly succeeded")
+	}
+	assertSchemaVersion(t, database, 0)
+	for _, table := range []string{"existing", "usage_buckets"} {
+		var count int
+		if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("failed migration left %s behind", table)
+		}
+	}
+}
+
+func mustEmbeddedMigrations(t *testing.T) []migration {
+	t.Helper()
+	migrations, err := embeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return migrations
+}
+
 func TestMigrationsAreIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gateway.db")
 	ctx := context.Background()
@@ -391,5 +526,28 @@ func assertSchemaVersion(t *testing.T, database *sql.DB, want int) {
 	}
 	if got != want {
 		t.Fatalf("schema version = %d, want %d", got, want)
+	}
+}
+
+func assertIndexColumns(t *testing.T, database *sql.DB, index string, want []string) {
+	t.Helper()
+	rows, err := database.Query(`SELECT name FROM pragma_index_info(?) ORDER BY seqno`, index)
+	if err != nil {
+		t.Fatalf("inspect %s columns: %v", index, err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan %s columns: %v", index, err)
+		}
+		got = append(got, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read %s columns: %v", index, err)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("%s columns = %v, want %v", index, got, want)
 	}
 }

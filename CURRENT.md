@@ -2,11 +2,11 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T097`.
+Done: `T001`-`T098`.
 
-Current: `T098`.
+Current: `T099`.
 
-Queued: `T099`-`T100` in dependency order from `TASKS.md`.
+Queued: `T100` in dependency order from `TASKS.md`.
 
 Known issues: none. T097 added real-HTTP lifecycle/redaction/contention coverage and
 made the focused SSE-to-JSON timing regression deterministic by waiting for
