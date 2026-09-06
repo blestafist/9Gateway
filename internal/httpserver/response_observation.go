@@ -8,8 +8,8 @@ import (
 )
 
 // responseObservation is a post-forwarding side channel for one transparent
-// JSON representation. It owns only bytes that were accepted by the
-// downstream writer; it never participates in response buffering.
+// JSON or SSE representation. It owns only bytes that were accepted by the
+// downstream writer and flushed; it never participates in response buffering.
 type responseObservation struct {
 	maxBytes int64
 	coding   ContentCoding

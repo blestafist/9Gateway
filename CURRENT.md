@@ -2,15 +2,17 @@
 
 Current milestone: token accounting and limits (`T081`-`T100`).
 
-Done: `T001`-`T094`.
+Done: `T001`-`T095`.
 
-Current: `T095` - observe transparent SSE without blocking.
+Current: `T096` - persist response usage aggregates.
 
-Queued: `T096`-`T100` in dependency order from `TASKS.md`.
+Queued: `T097`-`T100` in dependency order from `TASKS.md`.
 
 Known issues: none.
 
-Important: T094 now carries canonical usage directly from bounded SSE-to-JSON
+Important: T095 observes transparent SSE only from successfully written and
+flushed wire bytes, then hands a bounded immutable copy to the T092 worker at
+physical EOF. T094 now carries canonical usage directly from bounded SSE-to-JSON
 conversion into synchronous lease finalization, without reparsing the rendered
 response. T093 attaches bounded transparent JSON response observation to
 the T092 process handoff: transport

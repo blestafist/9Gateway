@@ -49,6 +49,14 @@ func ObserveStream(input io.Reader, maxEventSize int, reportError func(error)) (
 				reportError(err)
 			}
 		}
+		// [DONE] is observation metadata, but it is also the end of the
+		// representation relevant to usage. Do not wait for or inspect bytes
+		// after it; transparent transport has its own physical EOF lifetime.
+		if observer.state.DoneObserved {
+			result.State = observer.State()
+			result.Metadata = observer.Metadata()
+			return result, nil
+		}
 	}
 }
 

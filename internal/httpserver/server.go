@@ -419,13 +419,16 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		handler.responseDispatch(response, upstreamResponse, metadata)
 		return
 	}
-	if tokenAdmission && classifyResponseHeader(upstreamResponse.Header) == ResponseModeJSON {
+	responseMode := classifyResponseHeader(upstreamResponse.Header)
+	if tokenAdmission && (responseMode == ResponseModeJSON || responseMode == ResponseModeSSE) {
 		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
 			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding)
-			response = responseObservation.wrap(response)
+			if responseMode == ResponseModeJSON {
+				response = responseObservation.wrap(response)
+			}
 		}
 	}
-	dispatchErr = dispatchResponseResultWithLease(response, upstreamResponse, metadata, lifecycleLease, request.WithContext(proxyContext))
+	dispatchErr = dispatchResponseResultWithLeaseAndObservation(response, upstreamResponse, metadata, lifecycleLease, responseObservation, request.WithContext(proxyContext))
 	if responseObservation != nil {
 		responseObservation.finish(dispatchErr)
 	}
@@ -570,6 +573,10 @@ func dispatchResponseResult(response http.ResponseWriter, upstreamResponse *http
 }
 
 func dispatchResponseResultWithLease(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, lease *limiter.ResourceLease, requests ...*http.Request) error {
+	return dispatchResponseResultWithLeaseAndObservation(response, upstreamResponse, metadata, lease, nil, requests...)
+}
+
+func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, lease *limiter.ResourceLease, observation *responseObservation, requests ...*http.Request) error {
 	var request *http.Request
 	if len(requests) != 0 {
 		request = requests[0]
@@ -634,7 +641,7 @@ func dispatchResponseResultWithLease(response http.ResponseWriter, upstreamRespo
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
 	if responseMode == ResponseModeSSE {
-		return streamResponseBody(response, upstreamResponse.Body)
+		return streamResponseBody(response, upstreamResponse.Body, observation)
 	}
 	_, err := io.Copy(response, upstreamResponse.Body)
 	return err
@@ -766,9 +773,13 @@ func closeReaders(closers []io.Closer) {
 	}
 }
 
-func streamResponseBody(response http.ResponseWriter, body io.Reader) error {
+func streamResponseBody(response http.ResponseWriter, body io.Reader, observations ...*responseObservation) error {
 	controller := http.NewResponseController(response)
 	buffer := make([]byte, 32*1024)
+	var observation *responseObservation
+	if len(observations) != 0 {
+		observation = observations[0]
+	}
 	for {
 		read, readErr := body.Read(buffer)
 		if read > 0 {
@@ -781,6 +792,12 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader) error {
 			}
 			if flushErr := controller.Flush(); flushErr != nil {
 				return flushErr
+			}
+			// Capture only after both the downstream write and its flush have
+			// succeeded. The read buffer is reused on the next iteration, so
+			// ownership is copied at this point rather than handed to a worker.
+			if observation != nil {
+				observation.record(buffer[:read])
 			}
 		}
 
