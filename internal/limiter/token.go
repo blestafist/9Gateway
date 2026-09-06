@@ -51,9 +51,14 @@ type CommittedTokenDelta struct {
 // materially different from Bifrost's post-use asynchronous mutable counters,
 // so this is an independent implementation.
 type TokenLimiter struct {
-	now     Clock
-	mu      sync.Mutex
-	buckets map[tokenBucketKey]tokenBucket
+	now      Clock
+	mu       sync.Mutex
+	policyMu sync.RWMutex
+	buckets  map[tokenBucketKey]tokenBucket
+	// policyWindows is the last successfully published token identity for each
+	// key. It rejects reservations made from a principal snapshot that raced a
+	// changing replacement after that replacement's commit point.
+	policyWindows map[string]map[tokenWindowKey]struct{}
 	// lastNow is guarded by mu. Holding time steady on a backwards clock move
 	// prevents a new earlier bucket from replacing an active reservation.
 	lastNow time.Time
@@ -72,7 +77,8 @@ var (
 	// ErrTokenReservationState means that a reservation's internal bucket was
 	// not in the state established by admission. It is deliberately separate
 	// from arithmetic errors so callers can report an internal accounting fault.
-	ErrTokenReservationState = errors.New("invalid token reservation state")
+	ErrTokenReservationState          = errors.New("invalid token reservation state")
+	ErrTokenPolicyReplacementConflict = errors.New("token policy replacement conflicts with active usage")
 )
 
 type tokenWindowKey struct {
@@ -121,7 +127,7 @@ type TokenAdjustmentTicket struct {
 // NewTokenLimiter creates an empty token limiter. A nil clock uses UTC wall
 // time; callers and tests may inject a clock through the existing Clock type.
 func NewTokenLimiter(now Clock) *TokenLimiter {
-	return &TokenLimiter{now: now, buckets: make(map[tokenBucketKey]tokenBucket)}
+	return &TokenLimiter{now: now, buckets: make(map[tokenBucketKey]tokenBucket), policyWindows: make(map[string]map[tokenWindowKey]struct{})}
 }
 
 // SetCommittedDeltaSink installs process-owned persistence notification. The
@@ -147,6 +153,9 @@ func (limiter *TokenLimiter) LoadCommitted(now time.Time, buckets []CommittedTok
 	defer limiter.mu.Unlock()
 	if limiter.buckets == nil {
 		limiter.buckets = make(map[tokenBucketKey]tokenBucket)
+	}
+	if limiter.policyWindows == nil {
+		limiter.policyWindows = make(map[string]map[tokenWindowKey]struct{})
 	}
 	for _, persisted := range buckets {
 		if persisted.KeyID == "" || persisted.BucketStart.Nanosecond() != 0 || persisted.BucketStart.Before(time.Unix(0, 0)) || persisted.CommittedTokens < 0 || persisted.Window.Amount <= 0 || persisted.Window.Duration <= 0 {
@@ -178,8 +187,14 @@ func (limiter *TokenLimiter) AllowsPolicyReplacement(keyID string, oldWindows, n
 	if limiter == nil {
 		return true
 	}
+	limiter.policyMu.RLock()
+	defer limiter.policyMu.RUnlock()
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
+	return limiter.allowsPolicyReplacementLocked(keyID, oldWindows, newWindows)
+}
+
+func (limiter *TokenLimiter) allowsPolicyReplacementLocked(keyID string, oldWindows, newWindows []TokenWindow) bool {
 	now := limiter.currentTimeLocked()
 	limiter.discardExpiredLocked(now)
 	newSet := make(map[tokenWindowKey]struct{}, len(newWindows))
@@ -198,6 +213,52 @@ func (limiter *TokenLimiter) AllowsPolicyReplacement(keyID string, oldWindows, n
 		}
 	}
 	return true
+}
+
+// ReplacePolicy holds out old-policy token admission while the caller performs
+// its durable update and publishes the prepared replacement.
+func (limiter *TokenLimiter) ReplacePolicy(keyID string, oldWindows, newWindows []TokenWindow, commit func() error) error {
+	if limiter == nil {
+		if commit == nil {
+			return nil
+		}
+		return commit()
+	}
+	limiter.policyMu.Lock()
+	defer limiter.policyMu.Unlock()
+	limiter.mu.Lock()
+	allowed := limiter.allowsPolicyReplacementLocked(keyID, oldWindows, newWindows)
+	limiter.mu.Unlock()
+	if !allowed {
+		return ErrTokenPolicyReplacementConflict
+	}
+	if commit == nil {
+		return nil
+	}
+	if err := commit(); err != nil {
+		return err
+	}
+	current := make(map[tokenWindowKey]struct{}, len(newWindows))
+	for _, window := range newWindows {
+		current[tokenWindowKey{amount: window.Amount, duration: window.Duration}] = struct{}{}
+	}
+	limiter.policyWindows[keyID] = current
+	return nil
+}
+
+// RegisterPolicy seeds the admission generation for an identity loaded before
+// serving requests.
+func (limiter *TokenLimiter) RegisterPolicy(keyID string, windows []TokenWindow) {
+	if limiter == nil {
+		return
+	}
+	limiter.policyMu.Lock()
+	defer limiter.policyMu.Unlock()
+	current := make(map[tokenWindowKey]struct{}, len(windows))
+	for _, window := range windows {
+		current[tokenWindowKey{amount: window.Amount, duration: window.Duration}] = struct{}{}
+	}
+	limiter.policyWindows[keyID] = current
 }
 
 func (limiter *TokenLimiter) emitDeltaLocked(key tokenBucketKey, delta int64) {
@@ -225,6 +286,11 @@ func (limiter *TokenLimiter) Reserve(keyID string, windows []TokenWindow, amount
 		return &TokenReservation{amount: amount}, true, time.Time{}
 	}
 
+	limiter.policyMu.RLock()
+	defer limiter.policyMu.RUnlock()
+	if configured, ok := limiter.policyWindows[keyID]; ok && !sameTokenWindowSet(configured, normalized) {
+		return nil, false, time.Time{}
+	}
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 	now := limiter.currentTimeLocked()
@@ -279,6 +345,18 @@ func (limiter *TokenLimiter) Reserve(keyID string, windows []TokenWindow, amount
 		limiter.buckets[key] = updated[index]
 	}
 	return &TokenReservation{limiter: limiter, buckets: keys, amount: amount}, true, time.Time{}
+}
+
+func sameTokenWindowSet(configured map[tokenWindowKey]struct{}, windows []tokenWindowKey) bool {
+	if len(configured) != len(windows) {
+		return false
+	}
+	for _, window := range windows {
+		if _, ok := configured[window]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // TryReserve is an explicit spelling of Reserve for callers that prefer a

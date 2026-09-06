@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -408,6 +409,95 @@ func TestAdminTokenPolicyReplacementRejectsActiveIdentity(t *testing.T) {
 	if err != nil || !strings.Contains(record.PolicyJSON, "token_windows") {
 		t.Fatalf("policy changed: %#v/%v", record, err)
 	}
+}
+
+func TestAdminPolicyReplacementBlocksStaleHTTPAdmission(t *testing.T) {
+	pepper := []byte("replacement-race-pepper")
+	key := generatedForAdmin(t, pepper)
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	base := storage.NewAPIKeyRepository(database)
+	if err := base.Insert(context.Background(), storage.APIKeyRecord{ID: "race", Name: "race", DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(), PolicyJSON: `{"allowed_models":["old"],"token_windows":[{"amount":100,"duration":"1m"}]}`}); err != nil {
+		t.Fatal(err)
+	}
+	repository := &blockingPolicyRecordRepository{APIKeyRepository: base, entered: make(chan struct{}), release: make(chan struct{})}
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"usage":{"total_tokens":1}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	tokens := limiter.NewTokenLimiter(nil)
+	handler, err := NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(transport.NewClient(), upstream.URL, "upstream", "admin", string(pepper), repository, nil, nil, nil, tokens, TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1}, nil, auth.TokenModeEstimate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	adminRequest := newPolicyRequest(t, server.URL, "race", `{"enabled":true,"policy":{"allowed_models":["new"],"token_windows":[{"amount":200,"duration":"1m"}]}}`, "admin")
+	adminRequest.Method = http.MethodPut
+	adminDone := make(chan *http.Response, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(adminRequest)
+		if requestErr != nil {
+			t.Errorf("admin request: %v", requestErr)
+			return
+		}
+		adminDone <- response
+	}()
+	<-repository.entered
+	publicRequest, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"old"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicRequest.Header.Set("Authorization", "Bearer "+key.RawKey)
+	publicRequest.Header.Set("Content-Type", "application/json")
+	publicDone := make(chan *http.Response, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(publicRequest)
+		if requestErr != nil {
+			t.Errorf("public request: %v", requestErr)
+			return
+		}
+		publicDone <- response
+	}()
+	select {
+	case response := <-publicDone:
+		response.Body.Close()
+		t.Fatal("stale request admitted before policy commit")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(repository.release)
+	adminResponse := <-adminDone
+	adminBody, _ := io.ReadAll(adminResponse.Body)
+	adminResponse.Body.Close()
+	if adminResponse.StatusCode != http.StatusOK {
+		t.Fatalf("policy update = %d/%s", adminResponse.StatusCode, adminBody)
+	}
+	publicResponse := <-publicDone
+	publicBody, _ := io.ReadAll(publicResponse.Body)
+	publicResponse.Body.Close()
+	if publicResponse.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("stale admission response = %d/%s, want token rejection", publicResponse.StatusCode, publicBody)
+	}
+	if _, err := base.GetByID(context.Background(), "race"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type blockingPolicyRecordRepository struct {
+	*storage.APIKeyRepository
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (repository *blockingPolicyRecordRepository) UpdatePolicyRecord(ctx context.Context, id string, enabled bool, policy string) (storage.APIKeyRecord, error) {
+	repository.once.Do(func() { close(repository.entered) })
+	<-repository.release
+	return repository.APIKeyRepository.UpdatePolicyRecord(ctx, id, enabled, policy)
 }
 
 func TestAdminUpdatePolicyHTTPTokenWindowsModesAndReopen(t *testing.T) {

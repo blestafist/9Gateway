@@ -309,6 +309,47 @@ func TestTokenAdjustmentConcurrentCallsRemainOneShot(t *testing.T) {
 	}
 }
 
+func TestTokenPolicyReplacementExcludesStaleAdmissionDuringCommit(t *testing.T) {
+	clock := &testClock{now: time.Unix(60, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	oldWindows := []TokenWindow{{Amount: 100, Duration: time.Minute}}
+	newWindows := []TokenWindow{{Amount: 200, Duration: time.Minute}}
+	limiter.RegisterPolicy("key", oldWindows)
+	started := make(chan struct{})
+	continueCommit := make(chan struct{})
+	replacementDone := make(chan error, 1)
+	go func() {
+		replacementDone <- limiter.ReplacePolicy("key", oldWindows, newWindows, func() error {
+			close(started)
+			<-continueCommit
+			return nil
+		})
+	}()
+	<-started
+	reserveDone := make(chan bool, 1)
+	go func() {
+		_, allowed, _ := limiter.Reserve("key", oldWindows, 1)
+		reserveDone <- allowed
+	}()
+	select {
+	case <-reserveDone:
+		t.Fatal("stale old-policy reservation began before replacement commit")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(continueCommit)
+	if err := <-replacementDone; err != nil {
+		t.Fatal(err)
+	}
+	if <-reserveDone {
+		t.Fatal("stale old-policy reservation admitted after replacement")
+	}
+	reservation, allowed, _ := limiter.Reserve("key", newWindows, 1)
+	if !allowed || reservation == nil {
+		t.Fatal("new-policy reservation rejected")
+	}
+	reservation.ReleaseBeforeUpstream()
+}
+
 func TestTokenReservationBoundaryAdjustmentCannotTouchNewBucket(t *testing.T) {
 	clock := &testClock{now: time.Unix(59, 0).UTC()}
 	limiter := NewTokenLimiter(clock.Now)

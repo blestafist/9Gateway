@@ -1,6 +1,7 @@
--- A database that already ran the original 003 migration has a fabricated
--- identity alongside its authoritative v2 row. Remove only those paired rows;
--- startup will resolve the source row against the current policy.
+-- Version 3 copied v2 rows into a fabricated identity using duration as the
+-- amount. Remove every paired identity here: the source row is the only
+-- unambiguous v2 value, while v4's paired rows are merely compatibility
+-- checkpoints and are consumed without addition by PromoteLegacy.
 DELETE FROM usage_bucket_identities
 WHERE EXISTS (
     SELECT 1 FROM usage_buckets

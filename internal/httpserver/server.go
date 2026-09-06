@@ -131,6 +131,24 @@ func NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 		service.allowTokenPolicyReplacement = func(id string, oldWindows, newWindows []auth.TokenWindow) bool {
 			return tokenLimiter.AllowsPolicyReplacement(id, oldWindows, newWindows)
 		}
+		service.replaceTokenPolicy = func(id string, oldWindows, newWindows []auth.TokenWindow, commit func() error) error {
+			if err := tokenLimiter.ReplacePolicy(id, oldWindows, newWindows, commit); errors.Is(err, limiter.ErrTokenPolicyReplacementConflict) {
+				return errPolicyConflict
+			} else {
+				return err
+			}
+		}
+		if records, listErr := repository.List(context.Background()); listErr != nil {
+			return nil, errAdminKeyCreation
+		} else {
+			for _, record := range records {
+				policy, parseErr := auth.ParsePolicyJSON([]byte(record.PolicyJSON))
+				if parseErr != nil {
+					return nil, errAdminKeyCreation
+				}
+				tokenLimiter.RegisterPolicy(record.ID, policy.TokenWindows())
+			}
+		}
 	}
 	admin := &adminHandler{credential: adminCredential, service: service}
 	router := routeWithAdmin(proxy, admin, service.auth)

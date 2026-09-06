@@ -148,6 +148,7 @@ func TestUsageObservationShutdownDiscardsQueuedTicketsAndIsIdempotent(t *testing
 		t.Fatal("queued observation dropped")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
 	if err := worker.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("blocked shutdown error = %v, want deadline exceeded", err)
 	}
@@ -168,6 +169,40 @@ func TestUsageObservationShutdownDiscardsQueuedTicketsAndIsIdempotent(t *testing
 	}
 	if _, admitted, _ := tokens.Reserve("key", []limiter.TokenWindow{{Amount: 100, Duration: time.Minute}}, 71); admitted {
 		t.Fatal("queued shutdown ticket did not retain conservative charge")
+	}
+}
+
+func TestUsageObservationShutdownTimeoutWinsAtPreAdjustGate(t *testing.T) {
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	tokens := limiter.NewTokenLimiter(clock.Now)
+	entered := make(chan struct{})
+	continueAdjust := make(chan struct{})
+	worker := NewUsageObservationWorker(UsageObservationWorkerOptions{
+		Capacity: 1,
+		Parse: func([]byte, ContentCoding) (int64, error) {
+			return 10, nil
+		},
+		beforeAdjust: func() {
+			close(entered)
+			<-continueAdjust
+		},
+	})
+	lease := mustObservationLease(t, limiter.NewResourceLeaseCoordinator(nil, tokens), []limiter.TokenWindow{{Amount: 100, Duration: time.Minute}}, 40)
+	if !worker.CompleteAndSubmit(lease, []byte("x"), ContentCodingIdentity) {
+		t.Fatal("observation was dropped")
+	}
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	errCh := make(chan error, 1)
+	go func() { errCh <- worker.Shutdown(ctx) }()
+	if err := <-errCh; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v", err)
+	}
+	cancel()
+	close(continueAdjust)
+	shutdownObservationWorker(t, worker)
+	if got := bucketForObservationTest(t, tokens, "key"); got != 40 {
+		t.Fatalf("late parser adjusted after timeout: got %d, want conservative 40", got)
 	}
 }
 

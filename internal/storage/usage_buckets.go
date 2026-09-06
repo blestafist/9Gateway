@@ -130,35 +130,9 @@ func (repository *UsageBucketRepository) UpsertCommittedDeltas(ctx context.Conte
 				return ErrUsageBucketUnderflow
 			}
 		}
-		// Keep the T098 shape current as a conservative compatibility
-		// checkpoint. The identity table above is authoritative when a window
-		// amount matters; this row lets older tooling and databases reopen.
-		if delta.CommittedDelta < 0 {
-			result, execErr = tx.ExecContext(ctx, `
-				UPDATE usage_buckets SET committed_tokens = committed_tokens + ?, updated_at = ?
-				WHERE api_key_id = ? AND bucket_start = ? AND bucket_seconds = ?
-				  AND committed_tokens >= ?`, delta.CommittedDelta, now, delta.APIKeyID, delta.BucketStart.Unix(), delta.BucketSeconds, -delta.CommittedDelta)
-			if execErr != nil {
-				return ErrUsageBucketUnderflow
-			}
-			rows, rowsErr := result.RowsAffected()
-			if rowsErr != nil || rows != 1 {
-				return ErrUsageBucketUnderflow
-			}
-		} else if _, execErr = tx.ExecContext(ctx, `
-			INSERT INTO usage_buckets (api_key_id, bucket_start, bucket_seconds, committed_tokens, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?)
-			ON CONFLICT(api_key_id, bucket_start, bucket_seconds) DO UPDATE SET
-				committed_tokens = usage_buckets.committed_tokens + excluded.committed_tokens,
-				updated_at = excluded.updated_at`, delta.APIKeyID, delta.BucketStart.Unix(), delta.BucketSeconds, delta.CommittedDelta, now, now); execErr != nil {
-			return errors.New("upsert usage buckets: compatibility write failed")
-		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM usage_bucket_identities WHERE committed_tokens = 0`); err != nil {
 		return errors.New("upsert usage buckets: cleanup failed")
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM usage_buckets WHERE committed_tokens = 0`); err != nil {
-		return errors.New("upsert usage buckets: compatibility cleanup failed")
 	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("upsert usage buckets: commit failed")
@@ -225,6 +199,13 @@ func (repository *UsageBucketRepository) LoadLegacyUnexpired(ctx context.Context
 	if repository == nil || repository.database == nil {
 		return nil, ErrUsageBucketUnavailable
 	}
+	var pending int
+	if err := repository.database.QueryRowContext(ctx, `SELECT legacy_rows_present FROM usage_bucket_migration_state WHERE id = 1`).Scan(&pending); err != nil {
+		return nil, errors.New("load legacy usage buckets: state query failed")
+	}
+	if pending != 1 {
+		return nil, nil
+	}
 	rows, err := repository.database.QueryContext(ctx, `SELECT api_key_id, bucket_start, bucket_seconds, committed_tokens FROM usage_buckets WHERE bucket_start + bucket_seconds > ?`, now.UTC().Unix())
 	if err != nil {
 		return nil, errors.New("load legacy usage buckets: query failed")
@@ -249,6 +230,36 @@ func (repository *UsageBucketRepository) LoadLegacyUnexpired(ctx context.Context
 	return result, nil
 }
 
+// CompleteLegacyMigration consumes the one-time v2 source table after every
+// legacy row has been resolved. New versions never write this compatibility
+// table, so subsequent restarts cannot reinterpret checkpoints as v2 deltas.
+func (repository *UsageBucketRepository) CompleteLegacyMigration(ctx context.Context) error {
+	if ctx == nil || repository == nil || repository.database == nil || repository.beginner == nil {
+		return ErrUsageBucketUnavailable
+	}
+	tx, err := repository.beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.New("complete legacy migration: begin failed")
+	}
+	rollback := true
+	defer func() {
+		if rollback {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM usage_buckets`); err != nil {
+		return errors.New("complete legacy migration: cleanup failed")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE usage_bucket_migration_state SET legacy_rows_present = 0 WHERE id = 1`); err != nil {
+		return errors.New("complete legacy migration: mark failed")
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("complete legacy migration: commit failed")
+	}
+	rollback = false
+	return nil
+}
+
 // PromoteLegacy atomically records a uniquely-resolved v2 bucket identity and
 // removes its source row. It is deliberately not exposed as a generic write.
 func (repository *UsageBucketRepository) PromoteLegacy(ctx context.Context, bucket UsageBucket, amount int64) error {
@@ -269,11 +280,25 @@ func (repository *UsageBucketRepository) PromoteLegacy(ctx context.Context, buck
 		}
 	}()
 	now := time.Now().UTC().Unix()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO usage_bucket_identities (api_key_id,bucket_start,bucket_seconds,bucket_amount,committed_tokens,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(api_key_id,bucket_start,bucket_seconds,bucket_amount) DO UPDATE SET committed_tokens=committed_tokens+excluded.committed_tokens, updated_at=excluded.updated_at`, bucket.APIKeyID, bucket.BucketStart.Unix(), bucket.BucketSeconds, amount, bucket.CommittedTokens, now, now); err != nil {
-		return errors.New("promote legacy usage bucket: identity write failed")
+	var existing int64
+	queryErr := tx.QueryRowContext(ctx, `SELECT committed_tokens FROM usage_bucket_identities WHERE api_key_id=? AND bucket_start=? AND bucket_seconds=? AND bucket_amount=?`, bucket.APIKeyID, bucket.BucketStart.Unix(), bucket.BucketSeconds, amount).Scan(&existing)
+	if errors.Is(queryErr, sql.ErrNoRows) {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO usage_bucket_identities (api_key_id,bucket_start,bucket_seconds,bucket_amount,committed_tokens,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`, bucket.APIKeyID, bucket.BucketStart.Unix(), bucket.BucketSeconds, amount, bucket.CommittedTokens, now, now); err != nil {
+			return errors.New("promote legacy usage bucket: identity write failed")
+		}
+	} else if queryErr != nil {
+		return errors.New("promote legacy usage bucket: identity query failed")
+	} else if bucket.CommittedTokens != existing {
+		// A paired row with a different value cannot be classified as a
+		// checkpoint versus an independent legacy total. Never guess.
+		return ErrInvalidUsageBucket
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM usage_buckets WHERE api_key_id=? AND bucket_start=? AND bucket_seconds=?`, bucket.APIKeyID, bucket.BucketStart.Unix(), bucket.BucketSeconds); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM usage_buckets WHERE api_key_id=? AND bucket_start=? AND bucket_seconds=?`, bucket.APIKeyID, bucket.BucketStart.Unix(), bucket.BucketSeconds)
+	if err != nil {
 		return errors.New("promote legacy usage bucket: source delete failed")
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+		return errors.New("promote legacy usage bucket: source disappeared")
 	}
 	if err = tx.Commit(); err != nil {
 		return errors.New("promote legacy usage bucket: commit failed")

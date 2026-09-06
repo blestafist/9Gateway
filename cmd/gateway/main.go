@@ -85,6 +85,9 @@ func run() error {
 			return err
 		}
 	}
+	if err := usageRepository.CompleteLegacyMigration(context.Background()); err != nil {
+		return err
+	}
 	persisted, err := usageRepository.LoadUnexpired(context.Background(), now)
 	if err != nil {
 		return err

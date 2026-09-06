@@ -61,6 +61,7 @@ type adminKeyService struct {
 	generator                   gatewayKeyGenerator
 	auth                        *auth.Authenticator
 	allowTokenPolicyReplacement func(string, []auth.TokenWindow, []auth.TokenWindow) bool
+	replaceTokenPolicy          func(string, []auth.TokenWindow, []auth.TokenWindow, func() error) error
 	refreshMu                   sync.Mutex
 }
 
@@ -248,6 +249,7 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 	var replacement storage.APIKeyRecord
 	found := false
 	unchanged := false
+	var oldWindows, newWindows []auth.TokenWindow
 	for index := range records {
 		if records[index].ID != id {
 			continue
@@ -258,7 +260,8 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		if policyErr != nil || newPolicyErr != nil {
 			return updatedAdminKey{}, errInvalidAdminRequest
 		}
-		if service.allowTokenPolicyReplacement != nil && !service.allowTokenPolicyReplacement(id, oldPolicy.TokenWindows(), newPolicy.TokenWindows()) {
+		oldWindows, newWindows = oldPolicy.TokenWindows(), newPolicy.TokenWindows()
+		if service.allowTokenPolicyReplacement != nil && !service.allowTokenPolicyReplacement(id, oldWindows, newWindows) {
 			return updatedAdminKey{}, errPolicyConflict
 		}
 		unchanged = records[index].Enabled == enabled && records[index].PolicyJSON == string(policyJSON)
@@ -282,14 +285,24 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		return updatedAdminKeyFromRecord(replacement, policyJSON), nil
 	}
 	var persisted storage.APIKeyRecord
-	if recordUpdater, ok := service.repository.(apiKeyPolicyRecordUpdater); ok {
-		// The snapshot has already been prepared and the mutation is now the
-		// commit point. Finish that operation independently of the request's
-		// cancellation so a database commit cannot succeed without publishing its
-		// returned record.
-		persisted, err = recordUpdater.UpdatePolicyRecord(context.WithoutCancel(ctx), id, enabled, string(policyJSON))
+	commit := func() error {
+		if recordUpdater, ok := service.repository.(apiKeyPolicyRecordUpdater); ok {
+			// The snapshot has already been prepared and the mutation is now the
+			// commit point. Finish independently of request cancellation.
+			persisted, err = recordUpdater.UpdatePolicyRecord(context.WithoutCancel(ctx), id, enabled, string(policyJSON))
+		} else {
+			err = updater.UpdatePolicy(context.WithoutCancel(ctx), id, enabled, string(policyJSON))
+		}
+		if err != nil {
+			return err
+		}
+		service.auth.Publish(prepared)
+		return nil
+	}
+	if service.replaceTokenPolicy != nil {
+		err = service.replaceTokenPolicy(id, oldWindows, newWindows, commit)
 	} else {
-		err = updater.UpdatePolicy(context.WithoutCancel(ctx), id, enabled, string(policyJSON))
+		err = commit()
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -304,7 +317,6 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		// The prepared replacement is sufficient for authentication publication;
 		// do not perform a cancelable read after a known durable update.
 	}
-	service.auth.Publish(prepared)
 	return updatedAdminKeyFromRecord(replacement, policyJSON), nil
 }
 

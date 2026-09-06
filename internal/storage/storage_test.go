@@ -234,6 +234,61 @@ func TestUsageBucketMigrationUpgradesExistingDatabase(t *testing.T) {
 	}
 }
 
+func TestLegacyPromotionConsumesDuplicateCompatibilityCheckpoint(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO api_keys (id,name,prefix,key_hash,enabled,created_at,updated_at,policy_json) VALUES ('key','n','p',zeroblob(32),1,1,1,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO usage_bucket_identities VALUES ('key',0,60,100,7,1,1); INSERT INTO usage_buckets VALUES ('key',0,60,7,1,1); UPDATE usage_bucket_migration_state SET legacy_rows_present=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewUsageBucketRepository(database)
+	legacy, err := repository.LoadLegacyUnexpired(context.Background(), time.Unix(1, 0).UTC())
+	if err != nil || len(legacy) != 1 {
+		t.Fatalf("legacy rows = %v/%d", err, len(legacy))
+	}
+	if err := repository.PromoteLegacy(context.Background(), legacy[0], 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.CompleteLegacyMigration(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	buckets, err := repository.Load(context.Background(), time.Unix(1, 0).UTC())
+	if err != nil || len(buckets) != 1 || buckets[0].CommittedTokens != 7 {
+		t.Fatalf("promoted checkpoint = %#v/%v, want one row charged 7", buckets, err)
+	}
+}
+
+func TestLegacyPromotionUsesPolicyAmountForGenuineV2Row(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO api_keys (id,name,prefix,key_hash,enabled,created_at,updated_at,policy_json) VALUES ('key','n','p',zeroblob(32),1,1,1,'{}'); INSERT INTO usage_buckets VALUES ('key',0,60,9,1,1); UPDATE usage_bucket_migration_state SET legacy_rows_present=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewUsageBucketRepository(database)
+	legacy, err := repository.LoadLegacyUnexpired(context.Background(), time.Unix(1, 0).UTC())
+	if err != nil || len(legacy) != 1 {
+		t.Fatalf("legacy rows = %v/%d", err, len(legacy))
+	}
+	if err := repository.PromoteLegacy(context.Background(), legacy[0], 123); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.CompleteLegacyMigration(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	buckets, err := repository.Load(context.Background(), time.Unix(1, 0).UTC())
+	if err != nil || len(buckets) != 1 || buckets[0].BucketAmount != 123 || buckets[0].CommittedTokens != 9 {
+		t.Fatalf("genuine v2 promotion = %#v/%v", buckets, err)
+	}
+}
+
 func TestUsageBucketMigrationRollsBackOnFailure(t *testing.T) {
 	database, err := sql.Open("sqlite", dataSource(":memory:", true))
 	if err != nil {
@@ -284,6 +339,41 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	}
 	defer reopened.Close()
 	assertSchemaVersion(t, reopened.DB, CurrentSchemaVersion)
+}
+
+func TestCurrentUsageCommitSurvivesRepeatedRestartExactlyOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-restart.db")
+	ctx := context.Background()
+	for restart := 0; restart < 3; restart++ {
+		database, err := Open(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restart == 0 {
+			if _, err := database.Exec(`INSERT INTO api_keys (id,name,prefix,key_hash,enabled,created_at,updated_at,policy_json) VALUES ('key','n','p',zeroblob(32),1,1,1,'{}')`); err != nil {
+				database.Close()
+				t.Fatal(err)
+			}
+			repository := NewUsageBucketRepository(database)
+			if err := repository.UpsertCommittedDelta(ctx, UsageBucketDelta{APIKeyID: "key", BucketStart: time.Unix(0, 0).UTC(), BucketSeconds: 60, BucketAmount: 100, CommittedDelta: 7}); err != nil {
+				database.Close()
+				t.Fatal(err)
+			}
+			var legacy int
+			if err := database.QueryRow(`SELECT count(*) FROM usage_buckets`).Scan(&legacy); err != nil || legacy != 0 {
+				database.Close()
+				t.Fatalf("current commit legacy rows = %d/%v", legacy, err)
+			}
+		}
+		buckets, err := NewUsageBucketRepository(database).Load(ctx, time.Unix(1, 0).UTC())
+		if err != nil || len(buckets) != 1 || buckets[0].CommittedTokens != 7 {
+			database.Close()
+			t.Fatalf("restart %d usage = %#v/%v", restart, buckets, err)
+		}
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestConcurrentFileOpensMigrateAtomically(t *testing.T) {

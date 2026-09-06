@@ -121,6 +121,9 @@ type UsageObservationWorkerOptions struct {
 	Capacity int
 	MaxBytes int64
 	Parse    func([]byte, ContentCoding) (int64, error)
+	// beforeAdjust is test-only lifecycle instrumentation; production callers
+	// leave it nil. It runs after parsing and before the terminal gate.
+	beforeAdjust func()
 }
 
 // UsageObservationWorker performs best-effort usage reconciliation on one
@@ -132,8 +135,9 @@ type UsageObservationWorker struct {
 	stop  chan struct{}
 	done  chan struct{}
 
-	maxBytes int64
-	parse    func([]byte, ContentCoding) (int64, error)
+	maxBytes     int64
+	parse        func([]byte, ContentCoding) (int64, error)
+	beforeAdjust func()
 
 	mu           sync.Mutex
 	accepting    bool
@@ -159,14 +163,15 @@ func NewUsageObservationWorker(options UsageObservationWorkerOptions) *UsageObse
 		options.MaxBytes = DefaultUsageObservationMaxBytes
 	}
 	worker := &UsageObservationWorker{
-		queue:     make(chan UsageObservationJob, options.Capacity),
-		slots:     make(chan struct{}, options.Capacity),
-		wake:      make(chan struct{}, 1),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		maxBytes:  options.MaxBytes,
-		parse:     options.Parse,
-		accepting: true,
+		queue:        make(chan UsageObservationJob, options.Capacity),
+		slots:        make(chan struct{}, options.Capacity),
+		wake:         make(chan struct{}, 1),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+		maxBytes:     options.MaxBytes,
+		parse:        options.Parse,
+		beforeAdjust: options.beforeAdjust,
+		accepting:    true,
 	}
 	for index := 0; index < options.Capacity; index++ {
 		worker.slots <- struct{}{}
@@ -246,9 +251,15 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 		worker.failed.Add(1)
 		return
 	}
+	if worker.beforeAdjust != nil {
+		worker.beforeAdjust()
+	}
+	// Serialize the terminal decision with Shutdown's timeout invalidation.
+	// Once Shutdown marks suppressLate, no in-flight job can pass this gate and
+	// subsequently adjust its ticket.
 	worker.mu.Lock()
+	defer worker.mu.Unlock()
 	stopping := worker.suppressLate
-	worker.mu.Unlock()
 	if stopping {
 		job.Ticket.Invalidate()
 		worker.failed.Add(1)
