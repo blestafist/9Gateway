@@ -33,6 +33,10 @@ type TokenAdmissionConfig struct {
 	MaxInspectedRequestBytes   int64
 	FallbackUnknownInputTokens int64
 	FallbackMaxOutputTokens    int64
+	// MaxObservedResponseBytes bounds the wire representation retained for
+	// deferred JSON usage observation. Transparent responses are never buffered
+	// in full, and the worker applies its own decoded-representation bound.
+	MaxObservedResponseBytes int64
 }
 
 func (configuration TokenAdmissionConfig) withDefaults() TokenAdmissionConfig {
@@ -44,6 +48,12 @@ func (configuration TokenAdmissionConfig) withDefaults() TokenAdmissionConfig {
 	}
 	if configuration.FallbackMaxOutputTokens == 0 {
 		configuration.FallbackMaxOutputTokens = config.DefaultFallbackMaxOutputTokens
+	}
+	if configuration.MaxObservedResponseBytes <= 0 {
+		configuration.MaxObservedResponseBytes = DefaultUsageObservationMaxBytes
+	}
+	if configuration.MaxObservedResponseBytes > DefaultUsageObservationMaxBytes {
+		configuration.MaxObservedResponseBytes = DefaultUsageObservationMaxBytes
 	}
 	return configuration
 }
@@ -300,6 +310,8 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var upstreamResponse *http.Response
 	var lifecycleLease *limiter.ResourceLease
 	var tokenAdmission bool
+	var responseObservation *responseObservation
+	var dispatchErr error
 	proxyContext, cancelUpstream := context.WithCancel(request.Context())
 	// Restricted inspection may block while reading a client body. Reserve a
 	// provisional slot for that phase and promote it into the full lifecycle
@@ -316,7 +328,11 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		inspectionLease.Release()
 		if lifecycleLease != nil {
 			if tokenAdmission {
-				_, _ = lifecycleLease.TransportComplete()
+				if responseObservation != nil {
+					responseObservation.settle(lifecycleLease, handler.usageObservationWorker)
+				} else {
+					_, _ = lifecycleLease.TransportComplete()
+				}
 			} else {
 				lifecycleLease.ReleaseBeforeUpstream()
 			}
@@ -403,7 +419,16 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		handler.responseDispatch(response, upstreamResponse, metadata)
 		return
 	}
-	dispatchResponse(response, upstreamResponse, metadata, request.WithContext(proxyContext))
+	if tokenAdmission && classifyResponseHeader(upstreamResponse.Header) == ResponseModeJSON {
+		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
+			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding)
+			response = responseObservation.wrap(response)
+		}
+	}
+	dispatchErr = dispatchResponseResult(response, upstreamResponse, metadata, request.WithContext(proxyContext))
+	if responseObservation != nil {
+		responseObservation.finish(dispatchErr)
+	}
 }
 
 func (handler *proxyHandler) writeAdmissionError(response http.ResponseWriter, rejection *limiter.AdmissionError) {
@@ -537,6 +562,10 @@ func (body *replayedRequestBody) Close() error {
 // for the one compatibility transformation; omitting it retains the original
 // direct-call behavior for callers that only need transparent dispatch.
 func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, requests ...*http.Request) {
+	_ = dispatchResponseResult(response, upstreamResponse, metadata, requests...)
+}
+
+func dispatchResponseResult(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, requests ...*http.Request) error {
 	var request *http.Request
 	if len(requests) != 0 {
 		request = requests[0]
@@ -549,7 +578,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 			// malformed representation. Fail before copying upstream headers or
 			// committing any downstream bytes.
 			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
-			return
+			return err
 		}
 		if closeAggregationBody != nil {
 			defer closeAggregationBody()
@@ -559,7 +588,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
 			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
-			return
+			return err
 		}
 		// AggregateSSEToJSON intentionally stops reading at [DONE]. Encodings
 		// with trailers still need a bounded drain to validate them; an identity
@@ -567,7 +596,7 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 		if !done || requiresDrain {
 			if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
 				writeGatewayError(response, gatewayErrorUpstreamConnection, "")
-				return
+				return err
 			}
 		} else {
 			// There is no decoder trailer to validate for an identity body. Close
@@ -581,16 +610,16 @@ func dispatchResponse(response http.ResponseWriter, upstreamResponse *http.Respo
 		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		response.WriteHeader(upstreamResponse.StatusCode)
 		_, _ = response.Write(body)
-		return
+		return nil
 	}
 
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
 	if responseMode == ResponseModeSSE {
-		_ = streamResponseBody(response, upstreamResponse.Body)
-		return
+		return streamResponseBody(response, upstreamResponse.Body)
 	}
-	_, _ = io.Copy(response, upstreamResponse.Body)
+	_, err := io.Copy(response, upstreamResponse.Body)
+	return err
 }
 
 // aggregationReader returns the decoded representation needed by the bounded
