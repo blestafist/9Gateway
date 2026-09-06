@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pestit/9gateway/internal/auth"
+	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/storage"
 	"github.com/pestit/9gateway/internal/transport"
 )
@@ -292,6 +293,8 @@ func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) 
 	}
 	for _, body := range []string{
 		`{"enabled":false,"policy":{"unknown":true}}`,
+		`{"enabled":false,"policy":{"token_windows":[{"amount":10,"duration":"500ms"}]}}`,
+		`{"enabled":false,"policy":{"token_windows":[{"amount":10,"duration":"1500ms"}]}}`,
 		`{"enabled":false,"policy":{}} trailing`,
 		`{"enabled":false,"enabled":true,"policy":{}}`,
 		`{"enabled":false,"policy":{"allowed_models":["[broken"]}}`,
@@ -372,6 +375,38 @@ func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) 
 	responseUpdatedAt, err := time.Parse(time.RFC3339, firstUpdatedAt)
 	if err != nil || !reopenedRecord.UpdatedAt.Equal(responseUpdatedAt) {
 		t.Fatalf("reopened timestamp = %v, response %q", reopenedRecord.UpdatedAt, firstUpdatedAt)
+	}
+}
+
+func TestAdminTokenPolicyReplacementRejectsActiveIdentity(t *testing.T) {
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := storage.NewAPIKeyRepository(database)
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	tokens := limiter.NewTokenLimiter(clock.Now)
+	service, err := newAdminKeyService(repository, []byte("pepper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.allowTokenPolicyReplacement = tokens.AllowsPolicyReplacement
+	key := auth.GeneratedGatewayKey{RawKey: "sk-gw-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", DisplayPrefix: "sk-gw-xxxx", Digest: make([]byte, storage.HMACDigestSize)}
+	if err := repository.Insert(context.Background(), storage.APIKeyRecord{ID: "id", Name: "n", DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(), PolicyJSON: `{"token_windows":[{"amount":10,"duration":"1m"}]}`}); err != nil {
+		t.Fatal(err)
+	}
+	reservation, allowed, _ := tokens.Reserve("id", []limiter.TokenWindow{{Amount: 10, Duration: time.Minute}}, 1)
+	if !allowed {
+		t.Fatal("reservation rejected")
+	}
+	defer reservation.AbortConservative()
+	if _, err := service.updatePolicy(context.Background(), "id", true, []byte(`{"token_windows":[]}`)); !errors.Is(err, errPolicyConflict) {
+		t.Fatalf("replacement error = %v", err)
+	}
+	record, err := repository.GetByID(context.Background(), "id")
+	if err != nil || !strings.Contains(record.PolicyJSON, "token_windows") {
+		t.Fatalf("policy changed: %#v/%v", record, err)
 	}
 }
 

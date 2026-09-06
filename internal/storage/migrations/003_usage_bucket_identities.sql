@@ -12,10 +12,6 @@ CREATE TABLE usage_bucket_identities (
 CREATE INDEX idx_usage_bucket_identities_expiration
     ON usage_bucket_identities(bucket_start, bucket_seconds);
 
--- T098 rows did not retain the policy amount. Preserve their committed usage
--- conservatively under a distinct identity; startup validates it against the
--- current policy before importing it into the live limiter.
-INSERT INTO usage_bucket_identities
-    (api_key_id, bucket_start, bucket_seconds, bucket_amount, committed_tokens, created_at, updated_at)
-SELECT api_key_id, bucket_start, bucket_seconds, bucket_seconds, committed_tokens, created_at, updated_at
-FROM usage_buckets;
+-- Version 2 rows do not contain bucket_amount. They remain in usage_buckets
+-- until startup can match their duration to exactly one current policy window.
+-- Never fabricate an amount here: doing so creates a false bucket identity.

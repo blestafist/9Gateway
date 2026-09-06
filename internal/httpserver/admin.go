@@ -24,6 +24,7 @@ const adminRequestBodyLimit int64 = 16 * 1024
 var (
 	errInvalidAdminRequest = errors.New("invalid admin request")
 	errAdminKeyCreation    = errors.New("admin key creation failed")
+	errPolicyConflict      = errors.New("token policy conflicts with active usage")
 )
 
 // apiKeyInserter is the only storage capability needed by key creation. SQL
@@ -55,11 +56,12 @@ type gatewayKeyGenerator interface {
 }
 
 type adminKeyService struct {
-	repository apiKeyRepository
-	pepper     []byte
-	generator  gatewayKeyGenerator
-	auth       *auth.Authenticator
-	refreshMu  sync.Mutex
+	repository                  apiKeyRepository
+	pepper                      []byte
+	generator                   gatewayKeyGenerator
+	auth                        *auth.Authenticator
+	allowTokenPolicyReplacement func(string, []auth.TokenWindow, []auth.TokenWindow) bool
+	refreshMu                   sync.Mutex
 }
 
 func newAdminKeyService(repository apiKeyRepository, pepper []byte, tokenModes ...auth.TokenMode) (*adminKeyService, error) {
@@ -251,6 +253,14 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 			continue
 		}
 		found = true
+		oldPolicy, policyErr := auth.ParsePolicyJSON([]byte(records[index].PolicyJSON))
+		newPolicy, newPolicyErr := auth.ParsePolicyJSON(policyJSON)
+		if policyErr != nil || newPolicyErr != nil {
+			return updatedAdminKey{}, errInvalidAdminRequest
+		}
+		if service.allowTokenPolicyReplacement != nil && !service.allowTokenPolicyReplacement(id, oldPolicy.TokenWindows(), newPolicy.TokenWindows()) {
+			return updatedAdminKey{}, errPolicyConflict
+		}
 		unchanged = records[index].Enabled == enabled && records[index].PolicyJSON == string(policyJSON)
 		replacement = records[index]
 		replacement.Enabled = enabled
@@ -392,6 +402,8 @@ func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request 
 			writeAdminError(response, http.StatusNotFound, gatewayErrorNotFound, "")
 		case errors.Is(err, errInvalidAdminRequest), errors.Is(err, auth.ErrInvalidPolicy):
 			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request body")
+		case errors.Is(err, errPolicyConflict):
+			writeAdminError(response, http.StatusConflict, "conflict", "active token usage prevents this policy change")
 		default:
 			writeAdminError(response, http.StatusInternalServerError, "internal_error", "key policy update failed")
 		}

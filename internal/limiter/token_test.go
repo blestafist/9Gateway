@@ -167,7 +167,7 @@ func bucketForTest(t *testing.T, limiter *TokenLimiter, key string) tokenBucket 
 }
 
 func TestTokenReservationCommitRefundExactAndDebt(t *testing.T) {
-	clock := &testClock{now: time.Unix(60, 0).UTC()}
+	clock := &testClock{now: time.Unix(30, 0).UTC()}
 	limiter := NewTokenLimiter(clock.Now)
 	refund, allowed, _ := limiter.Reserve("refund", tokenWindowForTest(), 40)
 	if !allowed || refund.Commit(10) != nil {
@@ -366,5 +366,20 @@ func TestTokenLimiterClockForwardRollbackAndRecovery(t *testing.T) {
 		t.Fatalf("clock recovery reservation = (%v, %v), want admitted", recovered, allowed)
 	} else {
 		recovered.ReleaseBeforeUpstream()
+	}
+}
+
+func TestTokenLimiterRestoresCommittedDebtAboveWindow(t *testing.T) {
+	clock := &testClock{now: time.Unix(30, 0).UTC()}
+	limiter := NewTokenLimiter(clock.Now)
+	if err := limiter.LoadCommitted(clock.Now(), []CommittedTokenBucket{{KeyID: "debt", BucketStart: time.Unix(0, 0).UTC(), Window: TokenWindow{Amount: 10, Duration: time.Minute}, CommittedTokens: 25}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, allowed, _ := limiter.Reserve("debt", []TokenWindow{{Amount: 10, Duration: time.Minute}}, 1); allowed {
+		t.Fatal("debt bucket admitted before reset")
+	}
+	clock.Set(time.Unix(60, 0).UTC())
+	if _, allowed, _ := limiter.Reserve("debt", []TokenWindow{{Amount: 10, Duration: time.Minute}}, 1); !allowed {
+		t.Fatal("debt bucket did not recover at reset")
 	}
 }

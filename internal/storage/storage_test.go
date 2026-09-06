@@ -193,6 +193,23 @@ func TestOpenCreatesExpectedUsageBucketSchema(t *testing.T) {
 	}
 }
 
+func TestUsageBucketRejectsMissingOrNonpositiveAmount(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO api_keys (id,name,prefix,key_hash,enabled,created_at,updated_at,policy_json) VALUES ('k','n','p',zeroblob(32),1,1,1,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewUsageBucketRepository(database)
+	for _, amount := range []int64{0, -1} {
+		if err := repository.UpsertCommittedDelta(context.Background(), UsageBucketDelta{APIKeyID: "k", BucketStart: time.Unix(0, 0).UTC(), BucketSeconds: 60, BucketAmount: amount, CommittedDelta: 1}); !errors.Is(err, ErrInvalidUsageBucket) {
+			t.Fatalf("amount %d error = %v, want ErrInvalidUsageBucket", amount, err)
+		}
+	}
+}
+
 func TestUsageBucketMigrationUpgradesExistingDatabase(t *testing.T) {
 	database, err := sql.Open("sqlite", dataSource(":memory:", true))
 	if err != nil {

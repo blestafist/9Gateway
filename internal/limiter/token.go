@@ -149,7 +149,7 @@ func (limiter *TokenLimiter) LoadCommitted(now time.Time, buckets []CommittedTok
 		limiter.buckets = make(map[tokenBucketKey]tokenBucket)
 	}
 	for _, persisted := range buckets {
-		if persisted.KeyID == "" || persisted.BucketStart.Nanosecond() != 0 || persisted.BucketStart.Before(time.Unix(0, 0)) || persisted.CommittedTokens < 0 || persisted.Window.Amount <= 0 || persisted.Window.Duration <= 0 || persisted.CommittedTokens > persisted.Window.Amount {
+		if persisted.KeyID == "" || persisted.BucketStart.Nanosecond() != 0 || persisted.BucketStart.Before(time.Unix(0, 0)) || persisted.CommittedTokens < 0 || persisted.Window.Amount <= 0 || persisted.Window.Duration <= 0 {
 			return ErrTokenReservationState
 		}
 		start, ok := fixedWindowStartChecked(persisted.BucketStart, persisted.Window.Duration)
@@ -169,6 +169,35 @@ func (limiter *TokenLimiter) LoadCommitted(now time.Time, buckets []CommittedTok
 	}
 	limiter.lastNow = now.UTC()
 	return nil
+}
+
+// AllowsPolicyReplacement rejects removal or mutation of a live identity that
+// still carries committed debt or an active reservation. Expired buckets are
+// discarded first, so stale rows do not pin a valid replacement.
+func (limiter *TokenLimiter) AllowsPolicyReplacement(keyID string, oldWindows, newWindows []TokenWindow) bool {
+	if limiter == nil {
+		return true
+	}
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	now := limiter.currentTimeLocked()
+	limiter.discardExpiredLocked(now)
+	newSet := make(map[tokenWindowKey]struct{}, len(newWindows))
+	for _, window := range newWindows {
+		newSet[tokenWindowKey{amount: window.Amount, duration: window.Duration}] = struct{}{}
+	}
+	for _, window := range oldWindows {
+		identity := tokenWindowKey{amount: window.Amount, duration: window.Duration}
+		if _, retained := newSet[identity]; retained {
+			continue
+		}
+		for key, bucket := range limiter.buckets {
+			if key.keyID == keyID && key.window == identity && (bucket.committed > 0 || bucket.active > 0) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (limiter *TokenLimiter) emitDeltaLocked(key tokenBucketKey, delta int64) {
@@ -477,10 +506,13 @@ func (ticket *TokenAdjustmentTicket) Adjust(actual int64) error {
 			if !exists {
 				continue
 			}
-			if delta > 0 {
-				bucket.committed += delta
-			} else if delta < 0 {
-				bucket.committed += delta
+			if delta != 0 {
+				updated, ok := checkedSignedAdd(bucket.committed, delta)
+				if !ok {
+					ticket.finalErr = ErrTokenAccountingOverflow
+					return
+				}
+				bucket.committed = updated
 			}
 			if bucket.active == 0 && bucket.committed == 0 {
 				delete(limiter.buckets, key)

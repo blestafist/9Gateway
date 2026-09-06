@@ -52,7 +52,40 @@ func run() error {
 	}
 	tokenLimiter := limiter.NewTokenLimiter(nil)
 	usageRepository := storage.NewUsageBucketRepository(database)
-	persisted, err := usageRepository.LoadUnexpired(context.Background(), time.Now().UTC())
+	now := time.Now().UTC()
+	if err := usageRepository.DeleteExpired(context.Background(), now); err != nil {
+		return err
+	}
+	legacy, err := usageRepository.LoadLegacyUnexpired(context.Background(), now)
+	if err != nil {
+		return err
+	}
+	for _, bucket := range legacy {
+		policyRecord, found := keyRecordByID(keyRecords, bucket.APIKeyID)
+		if !found {
+			return errors.New("startup: legacy persisted token bucket has unknown key")
+		}
+		policy, policyErr := auth.ParsePolicyJSONWithTokenMode([]byte(policyRecord.PolicyJSON), auth.TokenMode(cfg.Tokenizer.Mode))
+		if policyErr != nil {
+			return policyErr
+		}
+		var match auth.TokenWindow
+		for _, candidate := range policy.TokenWindows() {
+			if int64(candidate.Duration/time.Second) == bucket.BucketSeconds {
+				if match.Duration != 0 {
+					return errors.New("startup: legacy persisted token bucket has ambiguous policy duration")
+				}
+				match = candidate
+			}
+		}
+		if match.Duration == 0 {
+			return errors.New("startup: legacy persisted token bucket does not match key policy")
+		}
+		if err := usageRepository.PromoteLegacy(context.Background(), bucket, match.Amount); err != nil {
+			return err
+		}
+	}
+	persisted, err := usageRepository.LoadUnexpired(context.Background(), now)
 	if err != nil {
 		return err
 	}
@@ -89,7 +122,9 @@ func run() error {
 	if err := tokenLimiter.LoadCommitted(time.Now().UTC(), committed); err != nil {
 		return err
 	}
-	aggregateAccumulator := storage.NewUsageAggregateAccumulator(usageRepository)
+	processContext, processCancel := context.WithCancel(context.Background())
+	defer processCancel()
+	aggregateAccumulator := storage.NewUsageAggregateAccumulatorWithContext(processContext, usageRepository)
 	tokenLimiter.SetCommittedDeltaSink(aggregateAccumulator.Sink)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -169,4 +204,13 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+func keyRecordByID(records []storage.APIKeyRecord, id string) (storage.APIKeyRecord, bool) {
+	for _, record := range records {
+		if record.ID == id {
+			return record, true
+		}
+	}
+	return storage.APIKeyRecord{}, false
 }

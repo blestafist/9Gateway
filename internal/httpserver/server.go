@@ -127,6 +127,11 @@ func NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	if err != nil {
 		return nil, err
 	}
+	if tokenLimiter != nil {
+		service.allowTokenPolicyReplacement = func(id string, oldWindows, newWindows []auth.TokenWindow) bool {
+			return tokenLimiter.AllowsPolicyReplacement(id, oldWindows, newWindows)
+		}
+	}
 	admin := &adminHandler{credential: adminCredential, service: service}
 	router := routeWithAdmin(proxy, admin, service.auth)
 	return newHandlerWithCompletionLogger(completionLogger, router), nil

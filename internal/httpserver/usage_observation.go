@@ -135,9 +135,10 @@ type UsageObservationWorker struct {
 	maxBytes int64
 	parse    func([]byte, ContentCoding) (int64, error)
 
-	mu        sync.Mutex
-	accepting bool
-	stopOnce  sync.Once
+	mu           sync.Mutex
+	accepting    bool
+	suppressLate bool
+	stopOnce     sync.Once
 
 	submitted atomic.Uint64
 	processed atomic.Uint64
@@ -242,6 +243,14 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	// a parser failure never consumes the ticket or changes its conservative
 	// charge.
 	if err != nil {
+		worker.failed.Add(1)
+		return
+	}
+	worker.mu.Lock()
+	stopping := worker.suppressLate
+	worker.mu.Unlock()
+	if stopping {
+		job.Ticket.Invalidate()
 		worker.failed.Add(1)
 		return
 	}
@@ -395,6 +404,9 @@ func (worker *UsageObservationWorker) Shutdown(ctx context.Context) error {
 	case <-worker.done:
 		return nil
 	case <-ctx.Done():
+		worker.mu.Lock()
+		worker.suppressLate = true
+		worker.mu.Unlock()
 		return ctx.Err()
 	}
 }
