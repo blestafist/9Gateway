@@ -95,6 +95,7 @@ type Config struct {
 	AuthPepper      string          `yaml:"auth_pepper"`
 	AdminCredential string          `yaml:"admin_credential"`
 	Tokenizer       TokenizerConfig `yaml:"tokenizer"`
+	Pricing         PricingConfig   `yaml:"pricing"`
 }
 
 // ApplyDefaults fills omitted optional deployment settings. It is called by
@@ -110,6 +111,9 @@ func (c Config) Validate() error {
 	tokenizer.applyDefaults()
 	if err := tokenizer.validate(); err != nil {
 		return fmt.Errorf("tokenizer: %w", err)
+	}
+	if err := c.Pricing.validate(); err != nil {
+		return fmt.Errorf("pricing: %w", err)
 	}
 	if strings.TrimSpace(c.ListenAddr) == "" {
 		return fmt.Errorf("listen address is required")

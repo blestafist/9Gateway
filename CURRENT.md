@@ -1,15 +1,17 @@
 # Current Work
 
-Current milestone: pricing and budget enforcement (`T102`-`T120`).
+Current milestone: pricing and budget enforcement (`T103`-`T120`).
 
-Done: `T001`-`T101`.
+Done: `T001`-`T102`.
 
-Current: `T102` - validate pricing configuration.
+Current: `T103` - resolve model pricing deterministically.
 
-Queued: `T103`-`T120` in dependency order from `TASKS.md`.
+Queued: `T104`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
-values with checked arithmetic and canonical decimal conversion. T100 adds the
+values with checked arithmetic and canonical decimal conversion. T102 adds
+strict deployment pricing rules with compiled slash-aware selectors and ordered
+immutable accessors. T100 adds the
 complete persistent token-accounting lifecycle
 scenario, including process restart restoration, reconciliation, reset admission,
 transport/error/cancellation coverage, request/concurrency saturation, policy
@@ -36,7 +38,7 @@ gateway keys, minimal admin bootstrap, hot-path authentication, model policy,
 generic request windows, and per-key concurrency. T081-T100 add token usage,
 bounded estimation, reservation/reconciliation, token-window enforcement, and
 persistent token aggregates while keeping parsing and SQLite off the transport
-critical path. T101-T120 are planned for exact pricing, budget
+critical path. T103-T120 are planned for pricing resolution, budget
 reservation/reconciliation, persistent spend, and UTC day/calendar-month
 enforcement. Request-history/body persistence, metrics, `/ready`, CLI, tool-call
 execution/validation, and Web UI remain out of scope.
