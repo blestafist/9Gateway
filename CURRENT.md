@@ -1,14 +1,16 @@
 # Current Work
 
-Current milestone: complete.
+Current milestone: pricing and budget enforcement (`T102`-`T120`).
 
-Done: `T001`-`T100`.
+Done: `T001`-`T101`.
 
-Current: none.
+Current: `T102` - validate pricing configuration.
 
-Queued: none.
+Queued: `T103`-`T120` in dependency order from `TASKS.md`.
 
-Known issues: none. T100 adds the complete persistent token-accounting lifecycle
+Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
+values with checked arithmetic and canonical decimal conversion. T100 adds the
+complete persistent token-accounting lifecycle
 scenario, including process restart restoration, reconciliation, reset admission,
 transport/error/cancellation coverage, request/concurrency saturation, policy
 replacement, and structured-log redaction checks.
@@ -34,8 +36,10 @@ gateway keys, minimal admin bootstrap, hot-path authentication, model policy,
 generic request windows, and per-key concurrency. T081-T100 add token usage,
 bounded estimation, reservation/reconciliation, token-window enforcement, and
 persistent token aggregates while keeping parsing and SQLite off the transport
-critical path. Pricing, budgets, request-history/body persistence, metrics,
-`/ready`, CLI, tool-call execution/validation, and Web UI remain out of scope.
+critical path. T101-T120 are planned for exact pricing, budget
+reservation/reconciliation, persistent spend, and UTC day/calendar-month
+enforcement. Request-history/body persistence, metrics, `/ready`, CLI, tool-call
+execution/validation, and Web UI remain out of scope.
 Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
 completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion.
 
