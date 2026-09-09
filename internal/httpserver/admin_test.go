@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/storage"
@@ -256,7 +257,15 @@ func TestAdminBudgetPolicyHTTPIsAtomicImmediateAndPersistent(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := storage.NewAPIKeyRepository(database)
-	handler, err := NewHandlerWithAdmin(transport.NewClient(), upstream.URL, "upstream-secret", "admin-secret", "pepper", repository)
+	handler, err := NewHandlerWithAdminAndLimitersAndTokenConfig(
+		transport.NewClient(), upstream.URL, "upstream-secret", "admin-secret", "pepper", repository,
+		limiter.NewRequestLimiter(nil), limiter.NewConcurrencyLimiter(), nil,
+		TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, PricingResolver: accounting.NewPricingResolver(t110Pricing(t, `rules:
+  - model: budget-model
+    input_per_million_micros: 1
+    output_per_million_micros: 1
+`)), BudgetLimiter: limiter.NewBudgetLimiter()},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

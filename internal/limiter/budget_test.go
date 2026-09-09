@@ -357,6 +357,90 @@ func TestBudgetDeferredAdjustmentAndSinkOrdering(t *testing.T) {
 	}
 }
 
+func TestBudgetDeferredAdjustmentWithActiveSameKeyReservation(t *testing.T) {
+	t.Run("lower", func(t *testing.T) {
+		limiter := NewBudgetLimiter()
+		policy := LimitedBudgetPolicy(budgetMoney(t, 100))
+		deferred, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ticket, err := deferred.CommitDeferred()
+		if err != nil {
+			t.Fatal(err)
+		}
+		active, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ticket.Adjust(budgetMoney(t, 10)); err != nil {
+			t.Fatalf("adjust with active reservation = %v", err)
+		}
+		spent, currentActive := budgetStateForTest(t, limiter, "stable-key")
+		if spent != budgetMoney(t, 10) || currentActive != budgetMoney(t, 10) {
+			t.Fatalf("adjusted state = %v/%v, want 10/10", spent, currentActive)
+		}
+		fits, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 80))
+		if err != nil {
+			t.Fatalf("capacity after lower adjustment = %v", err)
+		}
+		if _, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 1)); !errors.Is(err, ErrBudgetCapacity) {
+			t.Fatalf("over-capacity after lower adjustment = %v", err)
+		}
+		if err := fits.Release(); err != nil {
+			t.Fatal(err)
+		}
+		if err := active.Release(); err != nil {
+			t.Fatal(err)
+		}
+		spent, currentActive = budgetStateForTest(t, limiter, "stable-key")
+		if spent != budgetMoney(t, 10) || !isZeroMoney(currentActive) {
+			t.Fatalf("cleaned lower state = %v/%v", spent, currentActive)
+		}
+	})
+
+	t.Run("higher", func(t *testing.T) {
+		limiter := NewBudgetLimiter()
+		policy := LimitedBudgetPolicy(budgetMoney(t, 100))
+		deferred, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ticket, err := deferred.CommitDeferred()
+		if err != nil {
+			t.Fatal(err)
+		}
+		active, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ticket.Adjust(budgetMoney(t, 60)); err != nil {
+			t.Fatalf("adjust with active reservation = %v", err)
+		}
+		spent, currentActive := budgetStateForTest(t, limiter, "stable-key")
+		if spent != budgetMoney(t, 60) || currentActive != budgetMoney(t, 10) {
+			t.Fatalf("adjusted state = %v/%v, want 60/10", spent, currentActive)
+		}
+		fits, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 30))
+		if err != nil {
+			t.Fatalf("capacity after higher adjustment = %v", err)
+		}
+		if _, err := limiter.Reserve("stable-key", policy, budgetMoney(t, 1)); !errors.Is(err, ErrBudgetCapacity) {
+			t.Fatalf("over-capacity after higher adjustment = %v", err)
+		}
+		if err := fits.Release(); err != nil {
+			t.Fatal(err)
+		}
+		if err := active.Release(); err != nil {
+			t.Fatal(err)
+		}
+		spent, currentActive = budgetStateForTest(t, limiter, "stable-key")
+		if spent != budgetMoney(t, 60) || !isZeroMoney(currentActive) {
+			t.Fatalf("cleaned higher state = %v/%v", spent, currentActive)
+		}
+	})
+}
+
 func TestBudgetDeferredConcurrentAdjustInvalidateIsOneShot(t *testing.T) {
 	limiter := NewBudgetLimiter()
 	reservation, err := limiter.Reserve("race-deferred", LimitedBudgetPolicy(budgetMoney(t, 100)), budgetMoney(t, 40))

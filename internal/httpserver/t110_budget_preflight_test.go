@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -102,6 +103,47 @@ func TestT110BudgetPreflightZeroRuleAndModelsAreSafe(t *testing.T) {
 	}
 }
 
+func TestT110BudgetPreflightMissingRuntimeDependencyFailsClosed(t *testing.T) {
+	pricing := t110Pricing(t, `rules:
+  - model: known
+    input_per_million_micros: 1
+    output_per_million_micros: 1
+`)
+	policy := `{"budget_limits":[{"amount_micros":100,"period":"total"}]}`
+	for _, test := range []struct {
+		name   string
+		config TokenAdmissionConfig
+	}{
+		{name: "budget limiter", config: TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, PricingResolver: accounting.NewPricingResolver(pricing)}},
+		{name: "pricing resolver", config: TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, BudgetLimiter: limiter.NewBudgetLimiter()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key, authenticator := t110Key(t, policy)
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				response.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(upstream.Close)
+			gateway := httptest.NewServer(NewHandlerWithAuthenticatorAndLimitersAndTokenConfig(
+				transport.NewClient(), upstream.URL, "upstream-secret", authenticator,
+				limiter.NewRequestLimiter(nil), limiter.NewConcurrencyLimiter(), nil, test.config,
+			))
+			t.Cleanup(gateway.Close)
+
+			response := t110Request(t, gateway.URL+"/v1/chat/completions", key.RawKey, http.MethodPost, []byte(`{"model":"known"}`), "application/json")
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusInternalServerError || !bytes.Contains(body, []byte(`"code":"gateway_internal_error"`)) {
+				t.Fatalf("missing dependency response = %d/%q", response.StatusCode, body)
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("missing dependency reached upstream: calls = %d", calls.Load())
+			}
+		})
+	}
+}
+
 func TestT110BudgetPreflightRejectsUnknownAndUninspectableBeforeUpstream(t *testing.T) {
 	pricing := t110Pricing(t, `rules:
   - model: known
@@ -148,6 +190,85 @@ func TestT110BudgetPreflightRejectsUnknownAndUninspectableBeforeUpstream(t *test
 	}
 }
 
+func TestT110BudgetPreflightConcurrentReservationsAndStableKeyIsolation(t *testing.T) {
+	pricing := t110Pricing(t, `rules:
+  - model: held
+    input_per_million_micros: 500000
+    output_per_million_micros: 500000
+`)
+	keys, authenticator := t110Keys(t,
+		`{"budget_limits":[{"amount_micros":1,"period":"total"}]}`,
+		`{"budget_limits":[{"amount_micros":1,"period":"total"}]}`,
+	)
+	var calls atomic.Int32
+	firstReached := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var firstOnce sync.Once
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.Header.Get("X-T110-Case") == "first" {
+			firstOnce.Do(func() { close(firstReached) })
+			<-releaseFirst
+		}
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	budget := limiter.NewBudgetLimiter()
+	gateway := httptest.NewServer(NewHandlerWithAuthenticatorAndLimitersAndTokenConfig(
+		transport.NewClient(), upstream.URL, "upstream-secret", authenticator,
+		limiter.NewRequestLimiter(nil), limiter.NewConcurrencyLimiter(), nil,
+		TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, PricingResolver: accounting.NewPricingResolver(pricing), BudgetLimiter: budget},
+	))
+	t.Cleanup(gateway.Close)
+
+	request := func(rawKey, caseName string) *http.Response {
+		req, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", bytes.NewBufferString(`{"model":"held"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-T110-Case", caseName)
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	firstResponse := make(chan *http.Response, 1)
+	go func() { firstResponse <- request(keys[0].RawKey, "first") }()
+	<-firstReached
+
+	second := request(keys[0].RawKey, "same-key-rejected")
+	secondBody, _ := io.ReadAll(second.Body)
+	second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests || second.Header.Get("Retry-After") != "" || !bytes.Contains(secondBody, []byte(`"code":"budget_exceeded"`)) {
+		t.Fatalf("overlapping same-key reservation = %d/retry %q/body %q", second.StatusCode, second.Header.Get("Retry-After"), secondBody)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("same-key rejection reached upstream: calls = %d", calls.Load())
+	}
+
+	independent := request(keys[1].RawKey, "independent")
+	independentBody, _ := io.ReadAll(independent.Body)
+	independent.Body.Close()
+	if independent.StatusCode != http.StatusNoContent {
+		t.Fatalf("independent key status = %d/body %q", independent.StatusCode, independentBody)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("independent key did not reach upstream: calls = %d", calls.Load())
+	}
+
+	close(releaseFirst)
+	first := <-firstResponse
+	firstBody, _ := io.ReadAll(first.Body)
+	first.Body.Close()
+	if first.StatusCode != http.StatusNoContent {
+		t.Fatalf("held request status = %d/body %q", first.StatusCode, firstBody)
+	}
+}
+
 func t110Pricing(t *testing.T, source string) config.PricingConfig {
 	t.Helper()
 	var pricing config.PricingConfig
@@ -158,20 +279,31 @@ func t110Pricing(t *testing.T, source string) config.PricingConfig {
 }
 
 func t110Key(t *testing.T, policy string) (auth.GeneratedGatewayKey, *auth.Authenticator) {
+	keys, authenticator := t110Keys(t, policy)
+	return keys[0], authenticator
+}
+
+func t110Keys(t *testing.T, policies ...string) ([]auth.GeneratedGatewayKey, *auth.Authenticator) {
 	t.Helper()
 	pepper := []byte("t110-budget-pepper")
-	key, err := auth.GenerateGatewayKey(pepper)
-	if err != nil {
-		t.Fatal(err)
+	keys := make([]auth.GeneratedGatewayKey, len(policies))
+	records := make([]auth.Record, len(policies))
+	for index, policy := range policies {
+		key, err := auth.GenerateGatewayKey(pepper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[index] = key
+		records[index] = auth.Record{ID: "t110-key-" + string(rune('a'+index)), DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, PolicyJSON: []byte(policy)}
 	}
 	authenticator, err := auth.NewAuthenticator(pepper, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := authenticator.Load([]auth.Record{{ID: "t110-key", DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, PolicyJSON: []byte(policy)}}); err != nil {
+	if err := authenticator.Load(records); err != nil {
 		t.Fatal(err)
 	}
-	return key, authenticator
+	return keys, authenticator
 }
 
 func t110Request(t *testing.T, url, key, method string, body []byte, contentType string) *http.Response {

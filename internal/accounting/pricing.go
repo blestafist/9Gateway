@@ -254,6 +254,14 @@ type PricingResolver struct {
 	globs []PricingRule
 }
 
+// Configured reports whether the resolver has at least one validated pricing
+// rule. A budget-governed admission path uses this to distinguish an absent
+// startup dependency from a configured resolver that simply has no matching
+// model.
+func (resolver PricingResolver) Configured() bool {
+	return len(resolver.exact) != 0 || len(resolver.globs) != 0
+}
+
 // NewPricingResolver constructs a resolver only from PricingConfig, the
 // validated representation produced by the configuration loader. It copies
 // the selected table, so later configuration values cannot affect lookups.

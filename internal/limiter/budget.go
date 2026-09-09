@@ -566,7 +566,7 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 	shard := limiter.shard(keyID)
 	shard.mu.Lock()
 	state := shard.states[keyID]
-	if state == nil || state.generation != generation || !validKnownMoney(state.spent) || !validKnownMoney(state.active) || !isZeroMoney(state.active) {
+	if state == nil || state.generation != generation || !validKnownMoney(state.spent) || !validKnownMoney(state.active) {
 		ticket.resultErr = ErrBudgetState
 		err := ticket.resultErr
 		shard.mu.Unlock()
@@ -605,12 +605,10 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 	}
 	if ticket.resultErr == nil && ok {
 		state.spent = newSpent
-		if delta != 0 {
-			if isZeroMoney(state.spent) {
-				delete(shard.states, keyID)
-			} else {
-				shard.states[keyID] = state
-			}
+		if isZeroMoney(state.spent) && isZeroMoney(state.active) {
+			delete(shard.states, keyID)
+		} else if delta != 0 {
+			shard.states[keyID] = state
 		}
 	}
 	err := ticket.resultErr

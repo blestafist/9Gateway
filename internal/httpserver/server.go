@@ -448,12 +448,18 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 	var budgetPlan *accounting.BudgetReservationPlan
 	if authenticated {
-		if total, limited := principal.Policy.TotalBudget(); limited && handler.tokenConfig.BudgetLimiter != nil {
+		if total, limited := principal.Policy.TotalBudget(); limited {
 			// Lifetime budget admission is intentionally restricted to known
 			// generation endpoints. Generic endpoints remain transparent only
 			// for keys without a budget policy.
 			if request.Method == http.MethodGet && request.URL.Path == "/v1/models" {
 				// This endpoint is non-generating and budget-free.
+			} else if handler.tokenConfig.BudgetLimiter == nil || !handler.pricingResolver.Configured() {
+				// A configured budget must never silently become unlimited when a
+				// startup dependency is absent. Keep the response deliberately
+				// generic so wiring details cannot escape the gateway.
+				writeGatewayError(response, gatewayErrorInternal, "")
+				return
 			} else if !eligibleTokenRequest(request) || !inspectionAvailable || metadata == nil {
 				writeGatewayError(response, gatewayErrorInvalidRequest, "")
 				return
