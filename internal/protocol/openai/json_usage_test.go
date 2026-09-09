@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/pestit/9gateway/internal/accounting"
+	"github.com/pestit/9gateway/internal/streaming"
+	"gopkg.in/yaml.v3"
 )
 
 func TestParseJSONUsageSupportsOpenAIAndResponsesNames(t *testing.T) {
@@ -29,6 +31,40 @@ func TestParseJSONUsageSupportsOpenAIAndResponsesNames(t *testing.T) {
 			}
 			assertUsageCounts(t, result.Usage, test.input, test.output, test.total, test.cached, test.reasoning)
 		})
+	}
+}
+
+func TestCanonicalJSONAndSSEUsageHaveIdenticalCost(t *testing.T) {
+	var config accounting.PricingConfig
+	if err := yaml.Unmarshal([]byte("rules:\n  - model: cost-model\n    input_per_million_micros: 500000\n    output_per_million_micros: 1500000\n"), &config); err != nil {
+		t.Fatal(err)
+	}
+	pricing := accounting.NewPricingResolver(config).Resolve("cost-model")
+	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+
+	jsonResult, err := ParseJSONUsage(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonCost, err := accounting.CalculateActualCost(jsonResult.Usage, pricing)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observer := NewObserver()
+	if err := observer.Observe(streaming.SSEEvent{Data: string(data)}); err != nil {
+		t.Fatal(err)
+	}
+	sseCost, err := accounting.CalculateActualCost(observer.State().Usage.Usage, pricing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal, err := jsonCost.Equal(sseCost)
+	if err != nil || !equal {
+		t.Fatalf("JSON/SSE costs differ: %v, %v", jsonCost, sseCost)
+	}
+	if string(data) != `{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` {
+		t.Fatal("canonical usage input was mutated")
 	}
 }
 

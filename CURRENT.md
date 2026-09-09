@@ -1,12 +1,12 @@
 # Current Work
 
-Current milestone: pricing and budget enforcement (`T103`-`T120`).
+Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T103`.
+Done: `T001`-`T104`.
 
-Current: `T104` - calculate usage and reservation cost.
+Current: `T105` - add total budget policy.
 
-Queued: `T105`-`T120` in dependency order from `TASKS.md`.
+Queued: `T106`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -38,8 +38,8 @@ gateway keys, minimal admin bootstrap, hot-path authentication, model policy,
 generic request windows, and per-key concurrency. T081-T100 add token usage,
 bounded estimation, reservation/reconciliation, token-window enforcement, and
 persistent token aggregates while keeping parsing and SQLite off the transport
-critical path. T104-T120 are planned for cost calculation, budget
-reservation/reconciliation, persistent spend, and UTC day/calendar-month
+critical path. T105-T120 are planned for budget reservation/reconciliation,
+persistent spend, and UTC day/calendar-month
 enforcement. Request-history/body persistence, metrics, `/ready`, CLI, tool-call
 execution/validation, and Web UI remain out of scope.
 Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
