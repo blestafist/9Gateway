@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T107`.
+Done: `T001`-`T108`.
 
-Current: `T108` - reconcile budget reservations once.
+Current: `T109` - compose budget into request lease.
 
-Queued: `T109`-`T120` in dependency order from `TASKS.md`.
+Queued: `T110`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

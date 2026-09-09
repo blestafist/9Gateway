@@ -257,3 +257,125 @@ func TestBudgetReservationIdentityIsCopySafe(t *testing.T) {
 		t.Fatalf("copy release did not release once: %v", err)
 	}
 }
+
+func budgetStateForTest(t *testing.T, limiter *BudgetLimiter, key string) (accounting.Money, accounting.Money) {
+	t.Helper()
+	shard := limiter.shard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	state := shard.states[key]
+	if state == nil {
+		return budgetMoney(t, 0), budgetMoney(t, 0)
+	}
+	return state.spent, state.active
+}
+
+func TestBudgetReservationTerminalOutcomesAndInvalidActual(t *testing.T) {
+	policy := LimitedBudgetPolicy(budgetMoney(t, 100))
+	limiter := NewBudgetLimiter()
+	refund, err := limiter.Reserve("refund", policy, budgetMoney(t, 40))
+	if err != nil || refund.CommitKnown(budgetMoney(t, 10)) != nil {
+		t.Fatalf("refund = %v, %v", refund, err)
+	}
+	spent, active := budgetStateForTest(t, limiter, "refund")
+	if spent != budgetMoney(t, 10) || !isZeroMoney(active) {
+		t.Fatalf("refund state = %v/%v", spent, active)
+	}
+	exact, err := limiter.Reserve("exact", policy, budgetMoney(t, 20))
+	if err != nil || exact.Commit(budgetMoney(t, 20)) != nil {
+		t.Fatalf("exact = %v, %v", exact, err)
+	}
+	zero, err := limiter.Reserve("zero", policy, budgetMoney(t, 20))
+	if err != nil || zero.Commit(budgetMoney(t, 0)) != nil {
+		t.Fatalf("zero = %v, %v", zero, err)
+	}
+	debt, err := limiter.Reserve("debt", policy, budgetMoney(t, 20))
+	if err != nil || debt.Commit(budgetMoney(t, 130)) != nil {
+		t.Fatalf("debt = %v, %v", debt, err)
+	}
+	if _, err := limiter.Reserve("debt", policy, budgetMoney(t, 1)); !errors.Is(err, ErrBudgetCapacity) {
+		t.Fatalf("debt admission = %v", err)
+	}
+	invalid, err := limiter.Reserve("invalid", policy, budgetMoney(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(invalid.Commit(accounting.UnknownMoney()), ErrBudgetInvalidActual) {
+		t.Fatal("unknown actual was not reported as typed safe error")
+	}
+	spent, active = budgetStateForTest(t, limiter, "invalid")
+	if spent != budgetMoney(t, 20) || !isZeroMoney(active) {
+		t.Fatalf("invalid conservative state = %v/%v", spent, active)
+	}
+}
+
+func TestBudgetDeferredAdjustmentAndSinkOrdering(t *testing.T) {
+	limiter := NewBudgetLimiter()
+	policy := LimitedBudgetPolicy(budgetMoney(t, 100))
+	var seen []CommittedBudgetDelta
+	var sinkMu sync.Mutex
+	expectedSpent := int64(40)
+	limiter.SetCommittedDeltaSink(func(delta CommittedBudgetDelta) {
+		sinkMu.Lock()
+		defer sinkMu.Unlock()
+		want := expectedSpent
+		if delta.Delta == -30 {
+			want = 10
+		}
+		spent, active := budgetStateForTest(t, limiter, delta.KeyID)
+		spentMicros, known := spent.Micros()
+		if !known || !isZeroMoney(active) || spentMicros != want {
+			t.Errorf("sink observed stale state: %v/%v for delta %d", spent, active, delta.Delta)
+		}
+		seen = append(seen, delta)
+		expectedSpent = want
+	})
+	reservation, err := limiter.Reserve("deferred", policy, budgetMoney(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := reservation.CommitDeferred()
+	if err != nil || ticket == nil {
+		t.Fatalf("deferred = %v, %v", ticket, err)
+	}
+	if spent, active := budgetStateForTest(t, limiter, "deferred"); spent != budgetMoney(t, 40) || !isZeroMoney(active) {
+		t.Fatalf("conservative state = %v/%v", spent, active)
+	}
+	if err := ticket.Adjust(budgetMoney(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if spent, active := budgetStateForTest(t, limiter, "deferred"); spent != budgetMoney(t, 10) || !isZeroMoney(active) {
+		t.Fatalf("adjusted state = %v/%v", spent, active)
+	}
+	sinkMu.Lock()
+	if len(seen) != 2 || seen[0].Delta != 40 || seen[1].Delta != -30 {
+		t.Fatalf("sink deltas = %+v", seen)
+	}
+	sinkMu.Unlock()
+	if ticket.Adjust(budgetMoney(t, 90)) != nil {
+		t.Fatal("repeated adjustment changed terminal result")
+	}
+}
+
+func TestBudgetDeferredConcurrentAdjustInvalidateIsOneShot(t *testing.T) {
+	limiter := NewBudgetLimiter()
+	reservation, err := limiter.Reserve("race-deferred", LimitedBudgetPolicy(budgetMoney(t, 100)), budgetMoney(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := reservation.CommitDeferred()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() { defer wait.Done(); <-start; _ = ticket.Adjust(budgetMoney(t, 10)) }()
+	go func() { defer wait.Done(); <-start; ticket.Invalidate() }()
+	close(start)
+	wait.Wait()
+	spent, active := budgetStateForTest(t, limiter, "race-deferred")
+	if !isZeroMoney(active) || (spent != budgetMoney(t, 40) && spent != budgetMoney(t, 10)) {
+		t.Fatalf("racing ticket state = %v/%v", spent, active)
+	}
+}
