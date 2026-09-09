@@ -131,6 +131,20 @@ func (pattern Pattern) Source() string { return pattern.source }
 
 func (pattern Pattern) IsExact() bool { return pattern.exact }
 
+// ExactValue returns the complete value represented by an exact pattern. The
+// value differs from Source when escaped metacharacters are present. It is
+// intended for exact-selector indexes; glob patterns return false.
+func (pattern Pattern) ExactValue() (string, bool) {
+	if !pattern.exact {
+		return "", false
+	}
+	var builder strings.Builder
+	for _, item := range pattern.tokens {
+		builder.WriteRune(item.literal)
+	}
+	return builder.String(), true
+}
+
 // Key identifies the normalized compiled selector. It is intended only for
 // duplicate detection at configuration load, not as a public matching API.
 func (pattern Pattern) Key() string { return pattern.key }

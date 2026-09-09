@@ -58,3 +58,14 @@ func TestCompileCanonicalizesEquivalentGlobSelectors(t *testing.T) {
 		t.Fatal("glob classified as exact")
 	}
 }
+
+func TestExactValueUnescapesLiteralMetacharacters(t *testing.T) {
+	pattern, err := Compile(`provider/literal\*`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := pattern.ExactValue()
+	if !ok || value != "provider/literal*" {
+		t.Fatalf("ExactValue() = %q, %t", value, ok)
+	}
+}

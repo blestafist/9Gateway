@@ -112,7 +112,7 @@ func (c Config) Validate() error {
 	if err := tokenizer.validate(); err != nil {
 		return fmt.Errorf("tokenizer: %w", err)
 	}
-	if err := c.Pricing.validate(); err != nil {
+	if err := c.Pricing.Validate(); err != nil {
 		return fmt.Errorf("pricing: %w", err)
 	}
 	if strings.TrimSpace(c.ListenAddr) == "" {
