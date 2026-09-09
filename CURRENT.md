@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T106`.
+Done: `T001`-`T107`.
 
-Current: `T107` - reserve lifetime budget atomically.
+Current: `T108` - reconcile budget reservations once.
 
-Queued: `T108`-`T120` in dependency order from `TASKS.md`.
+Queued: `T109`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
