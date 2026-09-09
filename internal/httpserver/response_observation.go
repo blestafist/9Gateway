@@ -65,12 +65,28 @@ func (observation *responseObservation) finish(err error) {
 	observation.eligible = err == nil && !observation.overflow
 }
 
-func (observation *responseObservation) settle(lease *limiter.ResourceLease, worker *UsageObservationWorker) {
+func (observation *responseObservation) settle(lease *limiter.ResourceLease, worker *UsageObservationWorker, budgetConservative ...bool) {
 	if observation == nil || lease == nil {
 		return
 	}
 	if observation.eligible {
-		worker.CompleteAndSubmit(lease, observation.bytes, observation.coding)
+		budgetSettled := len(budgetConservative) != 0 && budgetConservative[0]
+		if worker == nil {
+			// The convenience constructors do not own an observation worker. Keep
+			// transport completion conservative rather than dereferencing a nil
+			// optional dependency or delaying delivery for synchronous parsing.
+			if budgetSettled {
+				_, _ = lease.TransportCompleteTokenDeferredBudgetConservative()
+			} else {
+				_, _ = lease.TransportComplete()
+			}
+			return
+		}
+		if budgetSettled {
+			worker.CompleteAndSubmitTokenDeferredBudgetConservative(lease, observation.bytes, observation.coding)
+		} else {
+			worker.CompleteAndSubmit(lease, observation.bytes, observation.coding)
+		}
 		return
 	}
 	lease.TransportComplete()

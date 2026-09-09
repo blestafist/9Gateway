@@ -377,6 +377,20 @@ func (worker *UsageObservationWorker) CompleteAndSubmit(lease *limiter.ResourceL
 	return worker.Submit(NewUsageObservationJob(captured, coding, ticket))
 }
 
+// CompleteAndSubmitTokenDeferredBudgetConservative keeps token observation
+// asynchronous while charging any budget reservation conservatively. The
+// budget adjustment ticket is never handed to the observation worker.
+func (worker *UsageObservationWorker) CompleteAndSubmitTokenDeferredBudgetConservative(lease *limiter.ResourceLease, captured []byte, coding ContentCoding) bool {
+	if lease == nil {
+		return false
+	}
+	ticket, _ := lease.TransportCompleteTokenDeferredBudgetConservative()
+	if ticket == nil {
+		return false
+	}
+	return worker.Submit(NewUsageObservationJob(captured, coding, ticket))
+}
+
 // Stats returns only bounded scalar counters.
 func (worker *UsageObservationWorker) Stats() UsageObservationStats {
 	if worker == nil {

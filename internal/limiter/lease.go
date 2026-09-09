@@ -330,6 +330,7 @@ const (
 	outcomeConservative
 	outcomeRelease
 	outcomeDeferred
+	outcomeDeferredBudgetConservative
 )
 
 func (lease *ResourceLease) finish(outcome leaseOutcome, actual int64, actualKnown bool, cost accounting.Money) (error, LeaseAdjustmentTickets) {
@@ -390,6 +391,13 @@ func (lease *ResourceLease) finish(outcome leaseOutcome, actual int64, actualKno
 		}
 		if budget != nil {
 			tickets.Budget, budgetErr = budget.CommitDeferred()
+		}
+	case outcomeDeferredBudgetConservative:
+		if tokens != nil {
+			tickets.Token, tokenErr = tokens.CommitDeferred()
+		}
+		if budget != nil {
+			budgetErr = budget.CompleteConservative()
 		}
 	}
 	// A token finalization error must not strand concurrency. TokenLimiter's
@@ -502,6 +510,15 @@ func (lease *ResourceLease) TransportComplete() (*TokenAdjustmentTicket, error) 
 func (lease *ResourceLease) TransportCompleteWithAdjustments() (LeaseAdjustmentTickets, error) {
 	err, tickets := lease.finish(outcomeDeferred, 0, false, accounting.UnknownMoney())
 	return tickets, err
+}
+
+// TransportCompleteTokenDeferredBudgetConservative releases concurrency and
+// keeps token observation eligible while settling the budget reservation at
+// its conservative estimate. Budget reconciliation is intentionally deferred
+// to the later cost-reconciliation tasks.
+func (lease *ResourceLease) TransportCompleteTokenDeferredBudgetConservative() (*TokenAdjustmentTicket, error) {
+	err, tickets := lease.finish(outcomeDeferredBudgetConservative, 0, false, accounting.UnknownMoney())
+	return tickets.Token, err
 }
 
 // CompleteDeferredWithAdjustments is the explicit deferred-lifecycle spelling.

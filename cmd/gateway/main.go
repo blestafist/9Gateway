@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/httpserver"
@@ -36,6 +37,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	pricingResolver := accounting.NewPricingResolver(cfg.Pricing)
+	budgetLimiter := limiter.NewBudgetLimiter()
 	database, err := storage.Open(context.Background(), cfg.SQLitePath)
 	if err != nil {
 		return err
@@ -159,6 +162,8 @@ func run() error {
 		MaxInspectedRequestBytes:   cfg.Tokenizer.MaxInspectedRequestBytes,
 		FallbackUnknownInputTokens: cfg.Tokenizer.FallbackUnknownInputTokens,
 		FallbackMaxOutputTokens:    cfg.Tokenizer.FallbackMaxOutputTokens,
+		PricingResolver:            pricingResolver,
+		BudgetLimiter:              budgetLimiter,
 	}, usageObservationWorker, auth.TokenMode(cfg.Tokenizer.Mode))
 	if err != nil {
 		return err

@@ -37,7 +37,21 @@ type TokenAdmissionConfig struct {
 	// deferred JSON usage observation. Transparent responses are never buffered
 	// in full, and the worker applies its own decoded-representation bound.
 	MaxObservedResponseBytes int64
+	// PricingResolver and BudgetLimiter are process-owned startup dependencies.
+	// A zero resolver and nil limiter preserve the legacy unrestricted
+	// constructor behavior; budget-governed keys fail closed without both.
+	PricingResolver accounting.PricingResolver
+	BudgetLimiter   *limiter.BudgetLimiter
 }
+
+// Bifrost provenance review: commit 03ab391865710462302bbcf52dca2f32682b91b5
+// (branch dev), .references/bifrost/plugins/governance/resolver.go (limit
+// evaluation), .references/bifrost/plugins/governance/store.go (CheckBudget),
+// and .references/bifrost/plugins/governance/tracker.go (settlement) were
+// inspected for HTTP governance boundaries. The reference is Apache-2.0 under
+// .references/bifrost/LICENSE; its dependency/license chain was verified in
+// .references/bifrost/THIRD_PARTY_NOTICES.md. Nothing was copied or adapted,
+// and no dependency or import architecture was added.
 
 func (configuration TokenAdmissionConfig) withDefaults() TokenAdmissionConfig {
 	if configuration.MaxInspectedRequestBytes == 0 {
@@ -268,6 +282,7 @@ type proxyHandler struct {
 	concurrencyLimiter     *limiter.ConcurrencyLimiter
 	tokenLimiter           *limiter.TokenLimiter
 	tokenConfig            TokenAdmissionConfig
+	pricingResolver        accounting.PricingResolver
 	leaseCoordinator       *limiter.ResourceLeaseCoordinator
 	usageObservationWorker *UsageObservationWorker
 	responseDispatch       responseDispatchFunc
@@ -326,7 +341,7 @@ func newProxyHandlerWithLimitersAndTokenLimiter(client *http.Client, baseURL, ap
 	if tokenLimiter == nil {
 		tokenLimiter = limiter.NewTokenLimiter(nil)
 	}
-	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, tokenLimiter: tokenLimiter, tokenConfig: tokenConfig, leaseCoordinator: limiter.NewResourceLeaseCoordinator(concurrencyLimiter, tokenLimiter)}
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, tokenLimiter: tokenLimiter, tokenConfig: tokenConfig, leaseCoordinator: limiter.NewResourceLeaseCoordinator(concurrencyLimiter, tokenLimiter, tokenConfig.BudgetLimiter), pricingResolver: tokenConfig.PricingResolver}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -345,6 +360,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var upstreamResponse *http.Response
 	var lifecycleLease *limiter.ResourceLease
 	var tokenAdmission bool
+	var budgetAdmission bool
 	var responseObservation *responseObservation
 	var dispatchErr error
 	// client.Do owns the ambiguous boundary. Before it is called, cleanup can
@@ -372,10 +388,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				// Admission and request construction completed, but client.Do
 				// was never entered. No upstream work is possible.
 				lifecycleLease.ReleaseBeforeUpstream()
-			case tokenAdmission && responseObservation != nil:
-				responseObservation.settle(lifecycleLease, handler.usageObservationWorker)
-			case tokenAdmission:
-				_, _ = lifecycleLease.TransportComplete()
+			case (tokenAdmission || budgetAdmission) && responseObservation != nil:
+				responseObservation.settle(lifecycleLease, handler.usageObservationWorker, budgetAdmission)
+			case tokenAdmission || budgetAdmission:
+				if budgetAdmission {
+					_, _ = lifecycleLease.TransportCompleteTokenDeferredBudgetConservative()
+				} else {
+					_, _ = lifecycleLease.TransportComplete()
+				}
 			default:
 				_ = lifecycleLease.CompleteConservative()
 			}
@@ -426,11 +446,50 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			tokenAdmission = false
 		}
 	}
+	var budgetPlan *accounting.BudgetReservationPlan
+	if authenticated {
+		if total, limited := principal.Policy.TotalBudget(); limited && handler.tokenConfig.BudgetLimiter != nil {
+			// Lifetime budget admission is intentionally restricted to known
+			// generation endpoints. Generic endpoints remain transparent only
+			// for keys without a budget policy.
+			if request.Method == http.MethodGet && request.URL.Path == "/v1/models" {
+				// This endpoint is non-generating and budget-free.
+			} else if !eligibleTokenRequest(request) || !inspectionAvailable || metadata == nil {
+				writeGatewayError(response, gatewayErrorInvalidRequest, "")
+				return
+			} else {
+				if tokenPlan == nil {
+					var err error
+					tokenPlan, err = handler.tokenPlan(request, principal, metadata, inspected, inspectionAvailable)
+					if err != nil || tokenPlan == nil {
+						writeGatewayError(response, gatewayErrorInvalidRequest, "")
+						return
+					}
+				}
+				plan, err := accounting.PlanBudgetReservation(accounting.BudgetReservationOptions{
+					Required: true, Model: metadata.Model, MaxModelBytes: handler.tokenConfig.MaxInspectedRequestBytes,
+					Reservation: *tokenPlan, Resolver: handler.pricingResolver,
+				})
+				if err != nil {
+					writeGatewayError(response, gatewayErrorInvalidRequest, "")
+					return
+				}
+				budgetAdmission = true
+				budgetPlan = &plan
+				_ = total // the policy value is read again when building lease options
+			}
+		}
+	}
 	if authenticated {
 		options := limiter.ResourceLeaseOptions{KeyID: principal.ID, MaxConcurrency: principal.Policy.MaxConcurrency()}
 		if tokenPlan != nil {
 			options.TokenWindows = principal.Policy.TokenWindows()
 			options.TokenAmount = tokenPlan.Total.Int64()
+		}
+		if budgetPlan != nil {
+			total, _ := principal.Policy.TotalBudget()
+			options.BudgetPolicy = limiter.LimitedBudgetPolicy(total)
+			options.BudgetCandidate = budgetPlan.Reserved()
 		}
 		var admissionErr *limiter.AdmissionError
 		if inspectionLease != nil {
@@ -488,6 +547,14 @@ func (handler *proxyHandler) writeAdmissionError(response http.ResponseWriter, r
 			retryAfter = 1
 		}
 		writeGatewayErrorRetryAfter(response, gatewayErrorTokenLimit, "", retryAfter)
+		return
+	}
+	if rejection != nil && rejection.Resource == limiter.AdmissionBudget {
+		if rejection.Invalid {
+			writeGatewayError(response, gatewayErrorInternal, "")
+			return
+		}
+		writeGatewayError(response, gatewayErrorBudgetLimit, "")
 		return
 	}
 	writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
@@ -564,7 +631,8 @@ func shouldInspectRequestMetadata(request *http.Request) bool {
 	// An unrestricted policy has no model decision to make. Token-window keys
 	// still inspect eligible bodies for admission; all other requests remain
 	// byte-transparent and are not read solely to discover their size.
-	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0
+	_, budgetLimited := principal.Policy.TotalBudget()
+	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited
 }
 
 func eligibleTokenRequest(request *http.Request) bool {

@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T109`.
+Done: `T001`-`T110`.
 
-Current: `T110` - enforce budget preflight admission.
+Current: `T111` - reconcile transparent JSON cost.
 
-Queued: `T111`-`T120` in dependency order from `TASKS.md`.
+Queued: `T112`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -55,3 +55,13 @@ idempotent lease. Admission is ordered concurrency -> tokens -> budget, with
 reverse rollback on later rejection; known, conservative, pre-upstream, and
 deferred terminal paths settle token and budget independently. Deferred cleanup
 returns separate adjustment tickets and releases concurrency before returning.
+
+T110 wires one startup-built immutable pricing resolver and one process budget
+limiter into authenticated generation admission. Known chat-completions and
+Responses bodies are bounded-inspected once and replayed byte-for-byte; budget
+planning and reservation follow token planning in the composite lease. Total
+budget rejection is `429 budget_exceeded` without `Retry-After`; metadata,
+pricing, and planning failures fail closed before upstream. Admission remains
+conservative at the upstream-start boundary; actual monetary reconciliation is
+reserved for T111-T114. `/v1/models` and unrestricted generic traffic retain
+their budget-free transparent paths.
