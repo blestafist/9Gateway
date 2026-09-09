@@ -298,3 +298,114 @@ func TestAdmissionErrorUnwrapsDomain(t *testing.T) {
 		t.Fatal("token admission did not unwrap token domain error")
 	}
 }
+
+func TestResourceLeaseBudgetAcquisitionOrderAndRollback(t *testing.T) {
+	clock := &testClock{now: time.Unix(1, 0).UTC()}
+	concurrency := NewConcurrencyLimiter()
+	tokens := NewTokenLimiter(clock.Now)
+	budgets := NewBudgetLimiter()
+	policy := LimitedBudgetPolicy(budgetMoney(t, 1))
+	reservedBudget, err := budgets.Reserve("key", policy, budgetMoney(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservedBudget.ReleaseBeforeUpstream()
+	coordinator := NewResourceLeaseCoordinator(concurrency, tokens, budgets)
+	options := ResourceLeaseOptions{
+		KeyID: "key", MaxConcurrency: 1,
+		TokenWindows: tokenWindowForTest(), TokenAmount: 3,
+		BudgetPolicy: policy, BudgetCandidate: budgetMoney(t, 1),
+	}
+	lease, rejection := coordinator.Acquire(options)
+	if lease != nil || rejection == nil || rejection.Resource != AdmissionBudget {
+		t.Fatalf("budget rejection = (%v, %v)", lease, rejection)
+	}
+	if !errors.Is(rejection, ErrBudgetUnavailable) {
+		t.Fatal("budget rejection did not unwrap its domain error")
+	}
+	if concurrency.Len() != 0 {
+		t.Fatal("budget rejection retained concurrency")
+	}
+	// The token reservation was acquired before budget and must have been
+	// released before the rejection is returned.
+	token, allowed, _ := tokens.Reserve("key", tokenWindowForTest(), 3)
+	if !allowed || token == nil {
+		t.Fatal("budget rollback retained token capacity")
+	}
+	token.ReleaseBeforeUpstream()
+}
+
+func TestResourceLeaseComposesKnownBudgetAndTokenSettlementIndependently(t *testing.T) {
+	clock := &testClock{now: time.Unix(1, 0).UTC()}
+	concurrency := NewConcurrencyLimiter()
+	tokens := NewTokenLimiter(clock.Now)
+	budgets := NewBudgetLimiter()
+	policy := LimitedBudgetPolicy(budgetMoney(t, 100))
+	lease, rejection := NewResourceLeaseCoordinator(concurrency, tokens, budgets).Acquire(ResourceLeaseOptions{
+		KeyID: "key", MaxConcurrency: 1, TokenWindows: tokenWindowForTest(), TokenAmount: 40,
+		BudgetPolicy: policy, BudgetCandidate: budgetMoney(t, 40),
+	})
+	if rejection != nil || lease == nil {
+		t.Fatalf("acquire = (%v, %v)", lease, rejection)
+	}
+	if err := lease.CommitKnownWithCost(10, budgetMoney(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if concurrency.Len() != 0 || tokens.Len() != 1 || budgets.Len() != 1 {
+		t.Fatalf("settlement state = concurrency %d, tokens %d, budgets %d", concurrency.Len(), tokens.Len(), budgets.Len())
+	}
+	if spent, active := budgetStateForTest(t, budgets, "key"); spent != budgetMoney(t, 10) || !isZeroMoney(active) {
+		t.Fatalf("budget settlement = %v/%v", spent, active)
+	}
+	if got := lease.CommitKnownWithCost(99, budgetMoney(t, 99)); got != nil {
+		t.Fatalf("repeated settlement changed first result: %v", got)
+	}
+}
+
+func TestResourceLeaseDeferredTicketsAreIndependent(t *testing.T) {
+	clock := &testClock{now: time.Unix(1, 0).UTC()}
+	concurrency := NewConcurrencyLimiter()
+	tokens := NewTokenLimiter(clock.Now)
+	budgets := NewBudgetLimiter()
+	lease, rejection := NewResourceLeaseCoordinator(concurrency, tokens, budgets).Acquire(ResourceLeaseOptions{
+		KeyID: "key", MaxConcurrency: 1, TokenWindows: tokenWindowForTest(), TokenAmount: 40,
+		BudgetPolicy: LimitedBudgetPolicy(budgetMoney(t, 100)), BudgetCandidate: budgetMoney(t, 40),
+	})
+	if rejection != nil || lease == nil {
+		t.Fatalf("acquire = (%v, %v)", lease, rejection)
+	}
+	tickets, err := lease.TransportCompleteWithAdjustments()
+	if err != nil || tickets.Token == nil || tickets.Budget == nil {
+		t.Fatalf("deferred tickets = (%+v, %v)", tickets, err)
+	}
+	if concurrency.Len() != 0 {
+		t.Fatal("deferred lease retained concurrency")
+	}
+	if err := tickets.Token.Adjust(10); err != nil {
+		t.Fatal(err)
+	}
+	tickets.Budget.Invalidate()
+	if spent, active := budgetStateForTest(t, budgets, "key"); spent != budgetMoney(t, 40) || !isZeroMoney(active) {
+		t.Fatalf("budget invalidation affected conservative charge = %v/%v", spent, active)
+	}
+	if got := bucketForTest(t, tokens, "key").committed; got != 10 {
+		t.Fatalf("token adjustment = %d", got)
+	}
+}
+
+func TestResourceLeaseZeroBudgetCandidateIsNoOpOwnership(t *testing.T) {
+	budgets := NewBudgetLimiter()
+	zero := budgetMoney(t, 0)
+	lease, rejection := NewResourceLeaseCoordinator(nil, nil, budgets).Acquire(ResourceLeaseOptions{
+		KeyID: "key", BudgetPolicy: LimitedBudgetPolicy(zero), BudgetCandidate: zero,
+	})
+	if rejection != nil || lease == nil {
+		t.Fatalf("zero-price acquire = (%v, %v)", lease, rejection)
+	}
+	if err := lease.ReleaseBeforeUpstream(); err != nil {
+		t.Fatal(err)
+	}
+	if budgets.Len() != 0 {
+		t.Fatal("zero-price budget retained state")
+	}
+}

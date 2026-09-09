@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T108`.
+Done: `T001`-`T109`.
 
-Current: `T109` - compose budget into request lease.
+Current: `T110` - enforce budget preflight admission.
 
-Queued: `T110`-`T120` in dependency order from `TASKS.md`.
+Queued: `T111`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -49,3 +49,9 @@ The focused T091-T100 review fixes independently bound compressed wire bytes
 during gzip SSE-to-JSON conversion, prevent legacy token checkpoint promotion
 from double-counting after restart, serialize token-policy replacement against
 admission, and make observation timeout invalidation terminal.
+
+T109 composes concurrency, token, and optional lifetime-budget ownership in one
+idempotent lease. Admission is ordered concurrency -> tokens -> budget, with
+reverse rollback on later rejection; known, conservative, pre-upstream, and
+deferred terminal paths settle token and budget independently. Deferred cleanup
+returns separate adjustment tickets and releases concurrency before returning.
