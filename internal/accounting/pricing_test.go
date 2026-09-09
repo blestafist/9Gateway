@@ -83,6 +83,15 @@ func TestPricingResolverUnknownAndMatchedZeroAreDistinct(t *testing.T) {
 	}
 }
 
+func TestPricingResolverPresenceDistinguishesEmptyConstructionFromZeroValue(t *testing.T) {
+	if resolver := (PricingResolver{}); resolver.Present() {
+		t.Fatal("zero resolver is unexpectedly present")
+	}
+	if resolver := NewPricingResolver(PricingConfig{}); !resolver.Present() {
+		t.Fatal("resolver built from an empty validated table is absent")
+	}
+}
+
 func TestPricingResolverUsesEscapedExactSelector(t *testing.T) {
 	pricing := pricingForTest(t, ""+
 		"  - model: '*'\n"+

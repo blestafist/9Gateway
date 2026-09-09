@@ -144,6 +144,41 @@ func TestT110BudgetPreflightMissingRuntimeDependencyFailsClosed(t *testing.T) {
 	}
 }
 
+func TestT110BudgetPreflightConstructedEmptyPricingRejectsAsUnknown(t *testing.T) {
+	key, authenticator := t110Key(t, `{"budget_limits":[{"amount_micros":100,"period":"total"}]}`)
+	pricing := t110Pricing(t, "rules: []\n")
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	gateway := httptest.NewServer(NewHandlerWithAuthenticatorAndLimitersAndTokenConfig(
+		transport.NewClient(), upstream.URL, "upstream-secret", authenticator,
+		limiter.NewRequestLimiter(nil), limiter.NewConcurrencyLimiter(), nil,
+		TokenAdmissionConfig{
+			FallbackUnknownInputTokens: 1,
+			FallbackMaxOutputTokens:    1,
+			PricingResolver:            accounting.NewPricingResolver(pricing),
+			BudgetLimiter:              limiter.NewBudgetLimiter(),
+		},
+	))
+	t.Cleanup(gateway.Close)
+
+	response := t110Request(t, gateway.URL+"/v1/chat/completions", key.RawKey, http.MethodPost, []byte(`{"model":"known"}`), "application/json")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || !bytes.Contains(body, []byte(`"code":"invalid_request"`)) {
+		t.Fatalf("constructed empty pricing response = %d/%q, want controlled unknown-pricing 400", response.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte("pricing")) || bytes.Contains(body, []byte("known")) {
+		t.Fatalf("constructed empty pricing response leaked details: %q", body)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("constructed empty pricing reached upstream: calls = %d", calls.Load())
+	}
+}
+
 func TestT110BudgetPreflightRejectsUnknownAndUninspectableBeforeUpstream(t *testing.T) {
 	pricing := t110Pricing(t, `rules:
   - model: known

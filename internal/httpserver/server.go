@@ -454,7 +454,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			// for keys without a budget policy.
 			if request.Method == http.MethodGet && request.URL.Path == "/v1/models" {
 				// This endpoint is non-generating and budget-free.
-			} else if handler.tokenConfig.BudgetLimiter == nil || !handler.pricingResolver.Configured() {
+			} else if handler.tokenConfig.BudgetLimiter == nil || !handler.pricingResolver.Present() {
 				// A configured budget must never silently become unlimited when a
 				// startup dependency is absent. Keep the response deliberately
 				// generic so wiring details cannot escape the gateway.

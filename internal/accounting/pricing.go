@@ -250,23 +250,21 @@ func (resolution PricingResolution) Rule() PricingRule { return resolution.rule 
 // PricingResolver holds precompiled exact and ordered glob rules. It has no
 // mutable state after construction and can be copied or shared by lookups.
 type PricingResolver struct {
-	exact map[string]PricingRule
-	globs []PricingRule
+	present bool
+	exact   map[string]PricingRule
+	globs   []PricingRule
 }
 
-// Configured reports whether the resolver has at least one validated pricing
-// rule. A budget-governed admission path uses this to distinguish an absent
-// startup dependency from a configured resolver that simply has no matching
-// model.
-func (resolver PricingResolver) Configured() bool {
-	return len(resolver.exact) != 0 || len(resolver.globs) != 0
-}
+// Present reports whether this resolver was constructed from a validated
+// pricing configuration. An empty validated table is still present; only the
+// zero value represents an omitted startup dependency.
+func (resolver PricingResolver) Present() bool { return resolver.present }
 
 // NewPricingResolver constructs a resolver only from PricingConfig, the
 // validated representation produced by the configuration loader. It copies
 // the selected table, so later configuration values cannot affect lookups.
 func NewPricingResolver(pricing PricingConfig) PricingResolver {
-	resolver := PricingResolver{}
+	resolver := PricingResolver{present: true}
 	if pricing.table == nil || len(pricing.table.rules) == 0 {
 		return resolver
 	}

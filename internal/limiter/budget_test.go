@@ -358,6 +358,115 @@ func TestBudgetDeferredAdjustmentAndSinkOrdering(t *testing.T) {
 }
 
 func TestBudgetDeferredAdjustmentWithActiveSameKeyReservation(t *testing.T) {
+	t.Run("equal retains spent and active state without adjustment", func(t *testing.T) {
+		limiter := NewBudgetLimiter()
+		policy := LimitedBudgetPolicy(budgetMoney(t, 100))
+		var deltas []CommittedBudgetDelta
+		var sinkMu sync.Mutex
+		limiter.SetCommittedDeltaSink(func(delta CommittedBudgetDelta) {
+			sinkMu.Lock()
+			deltas = append(deltas, delta)
+			sinkMu.Unlock()
+		})
+		deferred, err := limiter.Reserve("equal-key", policy, budgetMoney(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ticket, err := deferred.CommitDeferred()
+		if err != nil {
+			t.Fatal(err)
+		}
+		active, err := limiter.Reserve("equal-key", policy, budgetMoney(t, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ticket.Adjust(budgetMoney(t, 40)); err != nil {
+			t.Fatalf("equal adjustment = %v", err)
+		}
+		if err := ticket.Adjust(budgetMoney(t, 60)); err != nil {
+			t.Fatalf("repeated equal adjustment = %v", err)
+		}
+		spent, currentActive := budgetStateForTest(t, limiter, "equal-key")
+		if spent != budgetMoney(t, 40) || currentActive != budgetMoney(t, 10) {
+			t.Fatalf("equal adjusted state = %v/%v, want 40/10", spent, currentActive)
+		}
+		sinkMu.Lock()
+		if len(deltas) != 1 || deltas[0].Delta != 40 {
+			t.Fatalf("equal adjustment deltas = %+v, want only initial +40", deltas)
+		}
+		sinkMu.Unlock()
+		if limiter.Len() != 1 {
+			t.Fatalf("equal active state count = %d, want 1", limiter.Len())
+		}
+		if err := active.Release(); err != nil {
+			t.Fatal(err)
+		}
+		spent, currentActive = budgetStateForTest(t, limiter, "equal-key")
+		if spent != budgetMoney(t, 40) || !isZeroMoney(currentActive) || limiter.Len() != 1 {
+			t.Fatalf("equal post-release state = %v/%v, len %d; nonzero spent must retain state", spent, currentActive, limiter.Len())
+		}
+	})
+
+	t.Run("zero refunds only after state update and cleans up after active release", func(t *testing.T) {
+		limiter := NewBudgetLimiter()
+		policy := LimitedBudgetPolicy(budgetMoney(t, 100))
+		var deltas []CommittedBudgetDelta
+		var sinkMu sync.Mutex
+		var observedSpent, observedActive accounting.Money
+		limiter.SetCommittedDeltaSink(func(delta CommittedBudgetDelta) {
+			sinkMu.Lock()
+			deltas = append(deltas, delta)
+			sinkMu.Unlock()
+			if delta.Delta == -40 {
+				observedSpent, observedActive = budgetStateForTest(t, limiter, "zero-key")
+			}
+		})
+		deferred, err := limiter.Reserve("zero-key", policy, budgetMoney(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ticket, err := deferred.CommitDeferred()
+		if err != nil {
+			t.Fatal(err)
+		}
+		active, err := limiter.Reserve("zero-key", policy, budgetMoney(t, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ticket.Adjust(budgetMoney(t, 0)); err != nil {
+			t.Fatalf("zero adjustment = %v", err)
+		}
+		if err := ticket.Adjust(budgetMoney(t, 10)); err != nil {
+			t.Fatalf("repeated zero adjustment = %v", err)
+		}
+		if observedSpent != budgetMoney(t, 0) || observedActive != budgetMoney(t, 10) {
+			t.Fatalf("zero sink observed %v/%v, want 0/10 after state update", observedSpent, observedActive)
+		}
+		sinkMu.Lock()
+		if len(deltas) != 2 || deltas[0].Delta != 40 || deltas[1].Delta != -40 {
+			t.Fatalf("zero adjustment deltas = %+v, want +40/-40", deltas)
+		}
+		sinkMu.Unlock()
+		spent, currentActive := budgetStateForTest(t, limiter, "zero-key")
+		if spent != budgetMoney(t, 0) || currentActive != budgetMoney(t, 10) || limiter.Len() != 1 {
+			t.Fatalf("zero active state = %v/%v, len %d; state must await active release", spent, currentActive, limiter.Len())
+		}
+		if err := active.Release(); err != nil {
+			t.Fatal(err)
+		}
+		spent, currentActive = budgetStateForTest(t, limiter, "zero-key")
+		if !isZeroMoney(spent) || !isZeroMoney(currentActive) || limiter.Len() != 0 {
+			t.Fatalf("zero cleaned state = %v/%v, len %d", spent, currentActive, limiter.Len())
+		}
+		capacity, err := limiter.Reserve("zero-key", policy, budgetMoney(t, 100))
+		if err != nil {
+			t.Fatalf("zero cleanup did not restore capacity: %v", err)
+		}
+		if err := capacity.Release(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("lower", func(t *testing.T) {
 		limiter := NewBudgetLimiter()
 		policy := LimitedBudgetPolicy(budgetMoney(t, 100))
