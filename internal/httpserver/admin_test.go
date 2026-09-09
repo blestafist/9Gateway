@@ -245,6 +245,114 @@ func TestAdminUpdateKeyPolicyHTTPIsAtomicAndTakesEffectImmediately(t *testing.T)
 	}
 }
 
+func TestAdminBudgetPolicyHTTPIsAtomicImmediateAndPersistent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	databasePath := filepath.Join(t.TempDir(), "budget-policy.db")
+	database, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := storage.NewAPIKeyRepository(database)
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), upstream.URL, "upstream-secret", "admin-secret", "pepper", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := httptest.NewServer(handler)
+	createdResponse, err := http.DefaultClient.Do(newAdminRequest(t, gateway.URL, `{"name":"budget"}`, "admin-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	decodeResponse(t, createdResponse, &created)
+	if createdResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", createdResponse.StatusCode)
+	}
+	policyJSON := `{"allowed_models":["budget-model"],"request_windows":[{"amount":2,"duration":"1m"}],"budget_limits":[{"amount_micros":1,"period":"total"}],"max_concurrent_requests":1}`
+	update := newPolicyRequest(t, gateway.URL, created.ID, `{"enabled":true,"policy":`+policyJSON+`}`, "admin-secret")
+	update.Method = http.MethodPut
+	updatedResponse, err := http.DefaultClient.Do(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated struct {
+		Policy json.RawMessage `json:"Policy"`
+	}
+	decodeResponse(t, updatedResponse, &updated)
+	if updatedResponse.StatusCode != http.StatusOK || string(updated.Policy) != policyJSON {
+		t.Fatalf("budget update response = %d/%s", updatedResponse.StatusCode, updated.Policy)
+	}
+	invalid := newPolicyRequest(t, gateway.URL, created.ID, `{"enabled":false,"policy":{"budget_limits":[{"amount_micros":0,"period":"total"}]}}`, "admin-secret")
+	invalid.Method = http.MethodPut
+	invalidResponse, err := http.DefaultClient.Do(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidResponse.Body.Close()
+	if invalidResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid budget replacement status = %d", invalidResponse.StatusCode)
+	}
+	unchanged, err := repository.GetByID(context.Background(), created.ID)
+	if err != nil || unchanged.Enabled != true || unchanged.PolicyJSON != policyJSON {
+		t.Fatalf("invalid budget replacement changed durable state = %#v/%v", unchanged, err)
+	}
+	call := func(model string) *http.Response {
+		t.Helper()
+		request, requestErr := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"`+model+`"}`))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		request.Header.Set("Authorization", "Bearer "+created.Key)
+		request.Header.Set("Content-Type", "application/json")
+		response, requestErr := http.DefaultClient.Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		return response
+	}
+	immediate := call("budget-model")
+	immediate.Body.Close()
+	if immediate.StatusCode != http.StatusNoContent {
+		t.Fatalf("immediate budget policy status = %d", immediate.StatusCode)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gateway.Close()
+	reopened, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenedRepository := storage.NewAPIKeyRepository(reopened)
+	reopenedRecord, err := reopenedRepository.GetByID(context.Background(), created.ID)
+	if err != nil || reopenedRecord.PolicyJSON != policyJSON {
+		t.Fatalf("reopened budget policy = %#v, error %v", reopenedRecord, err)
+	}
+	reopenedService, err := newAdminKeyService(reopenedRepository, []byte("pepper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := reopenedService.auth.Authenticate(created.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget, present := principal.Policy.TotalBudget()
+	if micros, known := budget.Micros(); !present || !known || micros != 1 {
+		t.Fatalf("reopened compiled budget = %v/%t", budget, present)
+	}
+	if _, err := reopenedService.updatePolicy(context.Background(), created.ID, true, []byte(policyJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) {
 	var upstreamCalls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

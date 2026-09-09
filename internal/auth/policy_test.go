@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/pestit/9gateway/internal/accounting"
 )
 
 func TestParsePolicy(t *testing.T) {
@@ -26,14 +28,15 @@ func TestParsePolicy(t *testing.T) {
 		},
 		{
 			name: "valid combined",
-			json: `{"allowed_models":["gpt-*","exact"],"denied_models":["gpt-bad"],"request_windows":[{"amount":10,"duration":"1m"},{"amount":100,"duration":"1h"}],"token_windows":[{"amount":1000,"duration":"1h"},{"amount":10000,"duration":"24h"}],"token_mode":"usage_only","max_concurrent_requests":3}`,
+			json: `{"allowed_models":["gpt-*","exact"],"denied_models":["gpt-bad"],"request_windows":[{"amount":10,"duration":"1m"},{"amount":100,"duration":"1h"}],"token_windows":[{"amount":1000,"duration":"1h"},{"amount":10000,"duration":"24h"}],"budget_limits":[{"amount_micros":1,"period":"total"}],"token_mode":"usage_only","max_concurrent_requests":3}`,
 			check: func(t *testing.T, policy EffectivePolicy) {
 				if !policy.AllowsModel("gpt-good") || !policy.AllowsModel("exact") || policy.AllowsModel("gpt-bad") || policy.AllowsModel("other") {
 					t.Fatal("combined model policy evaluated incorrectly")
 				}
 				want := []RequestWindow{{Amount: 10, Duration: time.Minute}, {Amount: 100, Duration: time.Hour}}
 				wantTokens := []TokenWindow{{Amount: 1000, Duration: time.Hour}, {Amount: 10000, Duration: 24 * time.Hour}}
-				if !reflect.DeepEqual(policy.RequestWindows(), want) || !reflect.DeepEqual(policy.TokenWindows(), wantTokens) || policy.TokenMode() != TokenModeUsageOnly || policy.MaxConcurrency() != 3 {
+				budget, present := policy.TotalBudget()
+				if micros, known := budget.Micros(); !present || !known || micros != 1 || !reflect.DeepEqual(policy.RequestWindows(), want) || !reflect.DeepEqual(policy.TokenWindows(), wantTokens) || policy.TokenMode() != TokenModeUsageOnly || policy.MaxConcurrency() != 3 {
 					t.Fatalf("compiled policy = %#v", policy)
 				}
 				if mode, ok := policy.TokenModeOverride(); !ok || mode != TokenModeUsageOnly {
@@ -58,6 +61,27 @@ func TestParsePolicy(t *testing.T) {
 		{name: "invalid window", json: `{"request_windows":[{"amount":0,"duration":"1m"}]}`, wantErr: true},
 		{name: "invalid duration", json: `{"request_windows":[{"amount":1,"duration":"nope"}]}`, wantErr: true},
 		{name: "null token windows", json: `{"token_windows":null}`, wantErr: true},
+		{name: "null budget limits", json: `{"budget_limits":null}`, wantErr: true},
+		{name: "budget day unsupported", json: `{"budget_limits":[{"amount_micros":1,"period":"day"}]}`, wantErr: true},
+		{name: "budget month unsupported", json: `{"budget_limits":[{"amount_micros":1,"period":"month"}]}`, wantErr: true},
+		{name: "budget unknown period", json: `{"budget_limits":[{"amount_micros":1,"period":"future"}]}`, wantErr: true},
+		{name: "budget duplicate period", json: `{"budget_limits":[{"amount_micros":1,"period":"total"},{"amount_micros":2,"period":"total"}]}`, wantErr: true},
+		{name: "budget zero", json: `{"budget_limits":[{"amount_micros":0,"period":"total"}]}`, wantErr: true},
+		{name: "budget negative", json: `{"budget_limits":[{"amount_micros":-1,"period":"total"}]}`, wantErr: true},
+		{name: "budget decimal", json: `{"budget_limits":[{"amount_micros":1.0,"period":"total"}]}`, wantErr: true},
+		{name: "budget string", json: `{"budget_limits":[{"amount_micros":"1","period":"total"}]}`, wantErr: true},
+		{name: "budget boolean", json: `{"budget_limits":[{"amount_micros":true,"period":"total"}]}`, wantErr: true},
+		{name: "budget overflow", json: `{"budget_limits":[{"amount_micros":9223372036854775808,"period":"total"}]}`, wantErr: true},
+		{name: "budget maximum", json: `{"budget_limits":[{"amount_micros":9223372036854775807,"period":"total"}]}`},
+		{name: "budget exponent", json: `{"budget_limits":[{"amount_micros":1e1,"period":"total"}]}`, wantErr: true},
+		{name: "budget missing amount", json: `{"budget_limits":[{"period":"total"}]}`, wantErr: true},
+		{name: "budget null amount", json: `{"budget_limits":[{"amount_micros":null,"period":"total"}]}`, wantErr: true},
+		{name: "budget missing period", json: `{"budget_limits":[{"amount_micros":1}]}`, wantErr: true},
+		{name: "budget null period", json: `{"budget_limits":[{"amount_micros":1,"period":null}]}`, wantErr: true},
+		{name: "budget unknown object field", json: `{"budget_limits":[{"amount_micros":1,"period":"total","future":true}]}`, wantErr: true},
+		{name: "budget scalar shape", json: `{"budget_limits":1}`, wantErr: true},
+		{name: "budget object shape", json: `{"budget_limits":{}}`, wantErr: true},
+		{name: "budget list null entry", json: `{"budget_limits":[null]}`, wantErr: true},
 		{name: "null token mode", json: `{"token_mode":null}`, wantErr: true},
 		{name: "invalid token mode", json: `{"token_mode":"other"}`, wantErr: true},
 		{name: "invalid token window amount", json: `{"token_windows":[{"amount":0,"duration":"1m"}]}`, wantErr: true},
@@ -74,6 +98,11 @@ func TestParsePolicy(t *testing.T) {
 		{name: "duplicate JSON field", json: `{"allowed_models":["x"],"allowed_models":["y"]}`, wantErr: true},
 		{name: "duplicate normalized window", json: `{"request_windows":[{"amount":1,"duration":"60s"},{"amount":1,"duration":"1m"}]}`, wantErr: true},
 		{name: "malformed document", json: `{"allowed_models":[]`, wantErr: true},
+		{name: "empty budget unrestricted", json: `{"budget_limits":[]}`, check: func(t *testing.T, policy EffectivePolicy) {
+			if _, present := policy.TotalBudget(); present {
+				t.Fatal("empty budget list is restricted")
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -95,7 +124,7 @@ func TestParsePolicy(t *testing.T) {
 }
 
 func TestEffectivePolicyAccessorCopiesPreventMutation(t *testing.T) {
-	policy, err := ParsePolicy([]byte(`{"allowed_models":["gpt-*"],"request_windows":[{"amount":2,"duration":"1m"}],"token_windows":[{"amount":20,"duration":"1m"}]}`))
+	policy, err := ParsePolicy([]byte(`{"allowed_models":["gpt-*"],"request_windows":[{"amount":2,"duration":"1m"}],"token_windows":[{"amount":20,"duration":"1m"}],"budget_limits":[{"amount_micros":42,"period":"total"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +136,10 @@ func TestEffectivePolicyAccessorCopiesPreventMutation(t *testing.T) {
 	tokenWindows[0].Amount = 999
 	if policy.AllowsModel("other") || policy.RequestWindows()[0].Amount != 2 || policy.TokenWindows()[0].Amount != 20 {
 		t.Fatal("policy accessor exposed mutable state")
+	}
+	budget, present := policy.TotalBudget()
+	if !present || budget == accounting.UnknownMoney() {
+		t.Fatal("budget was not compiled as an immutable known value")
 	}
 }
 

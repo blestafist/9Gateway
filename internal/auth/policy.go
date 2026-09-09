@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/modelmatch"
 )
 
@@ -44,20 +46,29 @@ type TokenWindow struct {
 	Duration time.Duration
 }
 
+// BudgetPeriod identifies the accounting period of a budget limit. T105 only
+// compiles the lifetime total period; other periods are deliberately rejected
+// until their runtime enforcement exists.
+type BudgetPeriod string
+
+const BudgetPeriodTotal BudgetPeriod = "total"
+
 // Bifrost provenance review: commit 03ab391865710462302bbcf52dca2f32682b91b5
-// (branch dev), framework/configstore/tables/ratelimit.go and
-// plugins/governance/ratelimitreset_test.go were inspected for token/request
-// limit fields, duration validation, and reset behavior. Bifrost is Apache-2.0
-// under LICENSE; THIRD_PARTY_NOTICES.md was also checked for file-level and
-// dependency obligations. No source is copied or adapted and no dependency is
-// added: this policy needs strict immutable JSON compilation, while Bifrost's
-// mutable provider-governance tables are a different boundary.
+// (branch dev), framework/configstore/tables/ratelimit.go,
+// plugins/governance/ratelimitreset_test.go, and plugins/governance/store.go
+// (CheckBudget) were inspected for policy/limit and budget representations.
+// Bifrost is Apache-2.0 under LICENSE; THIRD_PARTY_NOTICES.md was checked for
+// file-level and dependency obligations. No source is copied or adapted and no
+// dependency is added: Bifrost's mutable provider-governance budget tables and
+// float-based accounting are a different boundary from this strict immutable
+// JSON policy compiler.
 
 type policyDocument struct {
 	AllowedModels  []string                `json:"allowed_models"`
 	DeniedModels   []string                `json:"denied_models"`
 	RequestWindows []requestWindowDocument `json:"request_windows"`
 	TokenWindows   []tokenWindowDocument   `json:"token_windows"`
+	BudgetLimits   json.RawMessage         `json:"budget_limits"`
 	TokenMode      *TokenMode              `json:"token_mode"`
 	MaxConcurrency *int                    `json:"max_concurrent_requests"`
 }
@@ -83,6 +94,8 @@ type EffectivePolicy struct {
 	tokenMode      TokenMode
 	tokenModeSet   bool
 	maxConcurrency int
+	totalBudget    accounting.Money
+	totalBudgetSet bool
 }
 
 // ParsePolicy strictly validates and compiles one stored policy document.
@@ -123,7 +136,7 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return EffectivePolicy{}, ErrInvalidPolicy
 	}
-	for _, field := range []string{"allowed_models", "denied_models", "request_windows", "token_windows", "token_mode", "max_concurrent_requests"} {
+	for _, field := range []string{"allowed_models", "denied_models", "request_windows", "token_windows", "budget_limits", "token_mode", "max_concurrent_requests"} {
 		if value, present := fields[field]; present && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return EffectivePolicy{}, ErrInvalidPolicy
 		}
@@ -201,6 +214,16 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 		}
 		seenTokenWindows[normalized] = struct{}{}
 		policy.tokenWindows = append(policy.tokenWindows, normalized)
+	}
+	if len(document.BudgetLimits) != 0 {
+		budget, present, err := parseTotalBudget(document.BudgetLimits)
+		if err != nil {
+			return EffectivePolicy{}, ErrInvalidPolicy
+		}
+		if present {
+			policy.totalBudget = budget
+			policy.totalBudgetSet = true
+		}
 	}
 	if document.TokenMode != nil {
 		if *document.TokenMode != TokenModeUsageOnly && *document.TokenMode != TokenModeEstimate {
@@ -283,6 +306,13 @@ func (policy EffectivePolicy) MaxConcurrency() int {
 	return policy.maxConcurrency
 }
 
+// TotalBudget returns the configured lifetime budget and whether one was
+// explicitly configured. The Money value is immutable, and absence remains
+// distinct from a known numeric value.
+func (policy EffectivePolicy) TotalBudget() (accounting.Money, bool) {
+	return policy.totalBudget, policy.totalBudgetSet
+}
+
 // AllowsModel applies deny precedence and then the optional allow list.
 func (policy EffectivePolicy) AllowsModel(model string) bool {
 	for _, pattern := range policy.deniedModels {
@@ -307,6 +337,74 @@ func modelPatternStrings(patterns []modelmatch.Pattern) []string {
 		result[index] = pattern.Source()
 	}
 	return result
+}
+
+func parseTotalBudget(raw json.RawMessage) (accounting.Money, bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || trimmed[0] != '[' {
+		return accounting.Money{}, false, ErrInvalidPolicy
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(trimmed, &entries); err != nil || entries == nil {
+		return accounting.Money{}, false, ErrInvalidPolicy
+	}
+	var total accounting.Money
+	seenPeriods := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		object := bytes.TrimSpace(entry)
+		if len(object) == 0 || object[0] != '{' {
+			return accounting.Money{}, false, ErrInvalidPolicy
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(object, &fields); err != nil {
+			return accounting.Money{}, false, ErrInvalidPolicy
+		}
+		for field := range fields {
+			if field != "amount_micros" && field != "period" {
+				return accounting.Money{}, false, ErrInvalidPolicy
+			}
+		}
+		amountRaw, amountOK := fields["amount_micros"]
+		periodRaw, periodOK := fields["period"]
+		if !amountOK || !periodOK || bytes.Equal(bytes.TrimSpace(amountRaw), []byte("null")) || bytes.Equal(bytes.TrimSpace(periodRaw), []byte("null")) {
+			return accounting.Money{}, false, ErrInvalidPolicy
+		}
+		var period string
+		if err := json.Unmarshal(periodRaw, &period); err != nil || period == "" || period != string(BudgetPeriodTotal) {
+			return accounting.Money{}, false, ErrInvalidPolicy
+		}
+		if _, exists := seenPeriods[period]; exists {
+			return accounting.Money{}, false, ErrInvalidPolicy
+		}
+		seenPeriods[period] = struct{}{}
+		micros, err := parseBudgetMicros(amountRaw)
+		if err != nil {
+			return accounting.Money{}, false, ErrInvalidPolicy
+		}
+		value, err := accounting.NewMoneyMicros(micros)
+		if err != nil || micros == 0 {
+			return accounting.Money{}, false, ErrInvalidPolicy
+		}
+		total = value
+	}
+	return total, len(entries) != 0, nil
+}
+
+func parseBudgetMicros(raw json.RawMessage) (int64, error) {
+	value := bytes.TrimSpace(raw)
+	if len(value) == 0 || (len(value) > 1 && value[0] == '0') {
+		return 0, ErrInvalidPolicy
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, ErrInvalidPolicy
+		}
+	}
+	parsed, err := strconv.ParseInt(string(value), 10, 64)
+	if err != nil {
+		return 0, ErrInvalidPolicy
+	}
+	return parsed, nil
 }
 
 func rejectDuplicateJSONKeys(data []byte) error {
