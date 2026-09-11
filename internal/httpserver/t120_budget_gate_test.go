@@ -116,8 +116,12 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 	first := request(http.MethodPost, "/v1/chat/completions", keyA.RawKey, `{"model":"exact","max_tokens":2,"messages":[{"role":"user","content":"t120-unique-prompt-sentinel"}]}`, map[string]string{"Content-Type": "application/json", "X-T120-Case": "a-json"})
 	firstBody := read(first)
 	assertSafe(first, firstBody)
-	if first.StatusCode != http.StatusOK || !bytes.Contains(firstBody, []byte(`"total_tokens":1`)) || !bytes.Contains(firstBody, []byte(responseSentinel)) {
-		t.Fatalf("exact JSON lifecycle = %d/%q", first.StatusCode, firstBody)
+	exactJSONBody := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"body":"json-body","sentinel":"t120-unique-response-sentinel"}`)
+	if first.StatusCode != http.StatusOK || first.Header.Get("Content-Type") != "application/json" || first.Header.Get("X-T120-Upstream-Safe") != "exact-json" || !bytes.Equal(firstBody, exactJSONBody) {
+		t.Fatalf("exact JSON lifecycle = %d/content-type %q/safe %q/body %q, want exact transparent response", first.StatusCode, first.Header.Get("Content-Type"), first.Header.Get("X-T120-Upstream-Safe"), firstBody)
+	}
+	if got := upstream.body("a-json"); !bytes.Equal(got, []byte(`{"model":"exact","max_tokens":2,"messages":[{"role":"user","content":"t120-unique-prompt-sentinel"}]}`)) {
+		t.Fatalf("transparent request body = %q, want exact wire bytes", got)
 	}
 	t120WaitFor(t, func() bool { return process.worker.Stats().Succeeded >= 1 })
 
@@ -159,8 +163,11 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 		response := request(http.MethodPost, "/v1/chat/completions", keyB.RawKey, test.body, map[string]string{"Content-Type": "application/json", "X-T120-Case": test.content})
 		body := read(response)
 		assertSafe(response, body)
-		if test.content == "error" && !bytes.Contains(body, []byte(responseSentinel)) {
-			t.Fatalf("%s did not preserve transparent upstream response sentinel: %q", test.name, body)
+		if test.content == "error" {
+			wantBody := []byte(`{"error":"t120-unique-response-sentinel"}`)
+			if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Content-Type") != "application/json" || response.Header.Get("X-T120-Upstream-Safe") != "upstream-error" || !bytes.Equal(body, wantBody) {
+				t.Fatalf("%s transparent error = %d/content-type %q/safe %q/body %q, want exact status/headers/body", test.name, response.StatusCode, response.Header.Get("Content-Type"), response.Header.Get("X-T120-Upstream-Safe"), body)
+			}
 		}
 		if response.StatusCode != test.status || !bytes.Contains(body, []byte(test.want)) {
 			t.Fatalf("%s = %d/%q, want %d containing %q", test.name, response.StatusCode, body, test.status, test.want)
@@ -180,8 +187,13 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 		response := request(http.MethodPost, test.path, test.key, test.body, map[string]string{"Content-Type": "application/json"})
 		body := read(response)
 		assertSafe(response, body)
+		for name, values := range response.Header {
+			if bytes.Contains([]byte(name+strings.Join(values, "|")), []byte(promptSentinel)) || bytes.Contains([]byte(name+strings.Join(values, "|")), []byte(responseSentinel)) {
+				t.Fatalf("%s gateway-generated response header leaked a sentinel: %s=%q", test.name, name, values)
+			}
+		}
 		if bytes.Contains(body, []byte(promptSentinel)) || bytes.Contains(body, []byte(responseSentinel)) {
-			t.Fatalf("%s gateway-generated response leaked a sentinel: %q", test.name, body)
+			t.Fatalf("%s gateway-generated response body leaked a sentinel: %q", test.name, body)
 		}
 		if response.StatusCode != http.StatusBadRequest && response.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s = %d/%q", test.name, response.StatusCode, body)
@@ -433,7 +445,7 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := `{"allowed_models":["exact"],"token_windows":[{"amount":100,"duration":"1m"}],"token_mode":"usage_only","max_concurrent_requests":1,"budget_limits":[{"amount_micros":100,"period":"total"},{"amount_micros":100,"period":"day"},{"amount_micros":100,"period":"month"}]}`
+	policy := `{"allowed_models":["exact"],"token_windows":[{"amount":5,"duration":"1m"}],"token_mode":"usage_only","max_concurrent_requests":1,"budget_limits":[{"amount_micros":3,"period":"total"},{"amount_micros":3,"period":"day"},{"amount_micros":3,"period":"month"}]}`
 	databasePath := filepath.Join(t.TempDir(), "cancel.db")
 	database, err := storage.Open(context.Background(), databasePath)
 	if err != nil {
@@ -449,6 +461,8 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 	cancelSeen := make(chan struct{})
 	var cancelOnce sync.Once
 	var calls atomic.Int32
+	settlementSeen := make(chan struct{})
+	settlementError := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
 		if request.Header.Get("Authorization") != "Bearer cancel-upstream" {
@@ -463,11 +477,29 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 			cancelOnce.Do(func() { close(cancelSeen) })
 		case "a-json":
 			response.Header().Set("Content-Type", "application/json")
+			response.Header().Set("X-T120-Upstream-Safe", "exact-json")
 			_, _ = io.WriteString(response, `{"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"body":"reused"}`)
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	process := t120StartProcess(t, databasePath, clock, t120Pricing(t), upstream.URL, "cancel-upstream", "cancel-admin", string(pepper), io.Discard)
+	process := t120StartProcessWithBudgetSink(t, databasePath, clock, t120Pricing(t), upstream.URL, "cancel-upstream", "cancel-admin", string(pepper), io.Discard, func(delta limiter.CommittedBudgetDelta) {
+		if delta.Delta == 0 {
+			return
+		}
+		select {
+		case <-cancelSeen:
+			select {
+			case <-settlementSeen:
+			default:
+				close(settlementSeen)
+			}
+		default:
+			select {
+			case settlementError <- "budget settlement arrived before upstream cancellation was observed":
+			default:
+			}
+		}
+	})
 	client := transport.NewClient()
 	ctx, cancel := context.WithCancel(context.Background())
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact","messages":[{"role":"user","content":"cancel prompt sentinel"}],"stream":true}`))
@@ -488,9 +520,19 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 	cancel()
 	response.Body.Close()
 	select {
-	case <-cancelSeen:
+	case <-settlementSeen:
+	case errText := <-settlementError:
+		t.Fatal(errText)
 	case <-time.After(time.Second):
-		t.Fatal("upstream did not observe client cancellation")
+		t.Fatal("upstream cancellation and subsequent budget settlement were not observed")
+	}
+	t120WaitFor(t, func() bool { return t120BudgetTotal(t, databasePath, "cancel-key") == 1 })
+	t120WaitFor(t, func() bool { return t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key") == 2 })
+	if got := t120BudgetTotal(t, databasePath, "cancel-key"); got != 1 {
+		t.Fatalf("cancellation persisted budget = %d, want exact conservative 1", got)
+	}
+	if got := t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key"); got != 2 {
+		t.Fatalf("cancellation persisted tokens = %d, want exact conservative 2", got)
 	}
 
 	// Upstream cancellation must release the in-memory lease before the
@@ -509,19 +551,20 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 	if body := readT120Body(t, reusedResponse); reusedResponse.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("reused")) {
 		t.Fatalf("post-cancellation reuse = %d/%q", reusedResponse.StatusCode, body)
 	}
-	t120WaitFor(t, func() bool { return t120BudgetTotal(t, databasePath, "cancel-key") > 0 })
-	t120WaitFor(t, func() bool { return t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key") > 0 })
+	t120WaitFor(t, func() bool { return t120BudgetTotal(t, databasePath, "cancel-key") == 2 })
+	t120WaitFor(t, func() bool { return t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key") == 3 })
 	t120StopProcess(t, process)
-	if got := t120BudgetTotal(t, databasePath, "cancel-key"); got <= 0 {
-		t.Fatalf("cancellation did not persist conservative budget settlement: %d", got)
+	if got := t120BudgetTotal(t, databasePath, "cancel-key"); got != 2 {
+		t.Fatalf("cancellation plus immediate reuse persisted budget = %d, want exact 2", got)
 	}
-	if got := t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key"); got <= 0 {
-		t.Fatalf("cancellation did not persist conservative token settlement: %d", got)
+	if got := t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key"); got != 3 {
+		t.Fatalf("cancellation plus immediate reuse persisted tokens = %d, want exact 3", got)
 	}
 
 	// Restart restores committed spend, but no active lease. A fresh request
 	// remains below the generous budget and proves the old lease was not loaded.
 	process = t120StartProcess(t, databasePath, clock, t120Pricing(t), upstream.URL, "cancel-upstream", "cancel-admin", string(pepper), io.Discard)
+	beforeRestart := calls.Load()
 	restarted, err := http.NewRequest(http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -535,6 +578,17 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 	}
 	if body := readT120Body(t, restartedResponse); restartedResponse.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("reused")) {
 		t.Fatalf("post-restart reuse = %d/%q", restartedResponse.StatusCode, body)
+	}
+	if got := calls.Load(); got != beforeRestart+1 {
+		t.Fatalf("post-restart request calls = %d, want exactly one upstream call (before %d)", got, beforeRestart)
+	}
+	t120WaitFor(t, func() bool { return t120BudgetTotal(t, databasePath, "cancel-key") == 3 })
+	t120WaitFor(t, func() bool { return t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key") == 4 })
+	if got := t120BudgetTotal(t, databasePath, "cancel-key"); got != 3 {
+		t.Fatalf("restart settlement persisted budget = %d, want exact 3", got)
+	}
+	if got := t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key"); got != 4 {
+		t.Fatalf("restart settlement persisted tokens = %d, want exact 4", got)
 	}
 	t120StopProcess(t, process)
 }
@@ -745,17 +799,24 @@ type t120Upstream struct {
 	mu         sync.Mutex
 	started    map[string]chan struct{}
 	releaseCh  map[string]chan struct{}
+	bodies     map[string][]byte
 }
 
 func newT120Upstream(t *testing.T, credential string) *t120Upstream {
 	t.Helper()
-	upstream := &t120Upstream{credential: credential, started: map[string]chan struct{}{"a-hold": make(chan struct{}, 1)}, releaseCh: map[string]chan struct{}{"a-hold": make(chan struct{})}}
+	upstream := &t120Upstream{credential: credential, started: map[string]chan struct{}{"a-hold": make(chan struct{}, 1)}, releaseCh: map[string]chan struct{}{"a-hold": make(chan struct{})}, bodies: make(map[string][]byte)}
 	upstream.server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer "+upstream.credential {
 			t.Errorf("upstream authorization = %q", request.Header.Get("Authorization"))
 		}
 		upstream.calls.Add(1)
-		_, _ = io.Copy(io.Discard, request.Body)
+		wireBody, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read upstream request body: %v", err)
+		}
+		upstream.mu.Lock()
+		upstream.bodies[request.Header.Get("X-T120-Case")] = append([]byte(nil), wireBody...)
+		upstream.mu.Unlock()
 		switch request.Header.Get("X-T120-Case") {
 		case "a-hold":
 			response.Header().Set("Content-Type", "text/event-stream")
@@ -768,6 +829,7 @@ func newT120Upstream(t *testing.T, credential string) *t120Upstream {
 			}
 		case "a-json", "a-after-reset":
 			response.Header().Set("Content-Type", "application/json")
+			response.Header().Set("X-T120-Upstream-Safe", "exact-json")
 			_, _ = io.WriteString(response, `{"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"body":"json-body","sentinel":"t120-unique-response-sentinel"}`)
 		case "json":
 			response.Header().Set("Content-Type", "application/json")
@@ -798,6 +860,7 @@ func newT120Upstream(t *testing.T, credential string) *t120Upstream {
 			_, _ = io.WriteString(response, `{"id":"above-usage","usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`)
 		case "error":
 			response.Header().Set("Content-Type", "application/json")
+			response.Header().Set("X-T120-Upstream-Safe", "upstream-error")
 			response.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = io.WriteString(response, `{"error":"t120-unique-response-sentinel"}`)
 		default:
@@ -807,6 +870,12 @@ func newT120Upstream(t *testing.T, credential string) *t120Upstream {
 	}))
 	t.Cleanup(upstream.server.Close)
 	return upstream
+}
+
+func (upstream *t120Upstream) body(name string) []byte {
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	return append([]byte(nil), upstream.bodies[name]...)
 }
 
 func (upstream *t120Upstream) waitFor(name string) {
@@ -835,7 +904,7 @@ func t120WaitFor(t *testing.T, predicate func() bool) {
 	t.Fatal("condition did not become true")
 }
 
-func t120StartProcess(t *testing.T, path string, clock *requestLimitTestClock, pricing config.PricingConfig, upstreamURL, upstreamCredential, adminCredential, pepper string, logs io.Writer) *t120Process {
+func t120StartProcess(t *testing.T, path string, clock *requestLimitTestClock, pricing config.PricingConfig, upstreamURL, upstreamCredential, adminCredential, pepper string, logs io.Writer, budgetSinks ...func(limiter.CommittedBudgetDelta)) *t120Process {
 	t.Helper()
 	database, err := storage.Open(context.Background(), path)
 	if err != nil {
@@ -908,12 +977,23 @@ func t120StartProcess(t *testing.T, path string, clock *requestLimitTestClock, p
 	tokenAccumulator := storage.NewUsageAggregateAccumulator(usageRepository)
 	tokens.SetCommittedDeltaSink(tokenAccumulator.Sink)
 	budgetAccumulator := storage.NewBudgetAccumulator(budgetRepository)
-	budget.SetCommittedDeltaSink(budgetAccumulator.Sink)
+	budget.SetCommittedDeltaSink(func(delta limiter.CommittedBudgetDelta) {
+		budgetAccumulator.Sink(delta)
+		for _, sink := range budgetSinks {
+			if sink != nil {
+				sink(delta)
+			}
+		}
+	})
 	handler, err := NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(transport.NewClient(), upstreamURL, upstreamCredential, adminCredential, pepper, repository, limiter.NewRequestLimiter(clock.Now), limiter.NewConcurrencyLimiter(), logger, tokens, TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, PricingResolver: accounting.NewPricingResolver(pricing), BudgetLimiter: budget}, worker, auth.TokenModeUsageOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &t120Process{database: database, gateway: httptest.NewServer(handler), worker: worker, logger: logger, tokenAccumulator: tokenAccumulator, budgetAccumulator: budgetAccumulator}
+}
+
+func t120StartProcessWithBudgetSink(t *testing.T, path string, clock *requestLimitTestClock, pricing config.PricingConfig, upstreamURL, upstreamCredential, adminCredential, pepper string, logs io.Writer, sink func(limiter.CommittedBudgetDelta)) *t120Process {
+	return t120StartProcess(t, path, clock, pricing, upstreamURL, upstreamCredential, adminCredential, pepper, logs, sink)
 }
 
 func t120StopProcess(t *testing.T, process *t120Process) {
