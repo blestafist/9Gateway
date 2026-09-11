@@ -193,6 +193,86 @@ func TestOpenCreatesExpectedUsageBucketSchema(t *testing.T) {
 	}
 }
 
+func TestOpenCreatesExpectedBudgetBucketSchema(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer database.Close()
+
+	assertSchemaVersion(t, database.DB, CurrentSchemaVersion)
+	var tableSQL string
+	if err := database.QueryRow(`SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'budget_buckets'`).Scan(&tableSQL); err != nil {
+		t.Fatalf("inspect budget_buckets table: %v", err)
+	}
+	for _, column := range []string{"api_key_id", "period_kind", "period_start", "spent_micros", "created_at", "updated_at"} {
+		var found int
+		if err := database.QueryRow(`SELECT count(*) FROM pragma_table_info('budget_buckets') WHERE name = ?`, column).Scan(&found); err != nil {
+			t.Fatalf("inspect %s column: %v", column, err)
+		}
+		if found != 1 {
+			t.Errorf("column %q missing from budget_buckets", column)
+		}
+	}
+	for _, index := range []string{"idx_budget_buckets_key_period", "idx_budget_buckets_expiration"} {
+		var found int
+		if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?`, index).Scan(&found); err != nil {
+			t.Fatalf("inspect %s index: %v", index, err)
+		}
+		if found != 1 {
+			t.Errorf("index %q missing", index)
+		}
+	}
+	assertIndexColumns(t, database.DB, "idx_budget_buckets_key_period", []string{"api_key_id", "period_kind", "period_start"})
+	assertIndexColumns(t, database.DB, "idx_budget_buckets_expiration", []string{"period_kind", "period_start"})
+	if !strings.Contains(tableSQL, "REFERENCES api_keys(id)") {
+		t.Fatalf("budget_buckets foreign key missing from table SQL: %q", tableSQL)
+	}
+	for _, forbidden := range []string{"raw_key", "gateway_key", "credential", "prompt", "response", "body", "token", "estimate", "lease", "sse"} {
+		if strings.Contains(strings.ToLower(tableSQL), forbidden) {
+			t.Errorf("forbidden budget data column %q found in table SQL %q", forbidden, tableSQL)
+		}
+	}
+
+	if _, err := database.Exec(`INSERT INTO api_keys (id,name,prefix,key_hash,enabled,created_at,updated_at,policy_json) VALUES ('budget-key','name','prefix',zeroblob(32),1,1,1,'{}')`); err != nil {
+		t.Fatalf("insert api key: %v", err)
+	}
+	valid := `INSERT INTO budget_buckets (api_key_id,period_kind,period_start,spent_micros,created_at,updated_at) VALUES ('budget-key','total',0,12,1,2)`
+	if _, err := database.Exec(valid); err != nil {
+		t.Fatalf("insert valid total budget: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO budget_buckets VALUES ('budget-key','day',86400,3,1,2)`); err != nil {
+		t.Fatalf("insert valid day budget: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO budget_buckets VALUES ('budget-key','month',2678400,4,1,2)`); err != nil {
+		t.Fatalf("insert valid month budget: %v", err)
+	}
+
+	constraints := []struct {
+		name  string
+		query string
+	}{
+		{"negative spent", `INSERT INTO budget_buckets VALUES ('budget-key','total',0,-1,1,1)`},
+		{"unknown period", `INSERT INTO budget_buckets VALUES ('budget-key','week',0,1,1,1)`},
+		{"total noncanonical start", `INSERT INTO budget_buckets VALUES ('budget-key','total',1,1,1,1)`},
+		{"day noncanonical start", `INSERT INTO budget_buckets VALUES ('budget-key','day',1,1,1,1)`},
+		{"month noncanonical start", `INSERT INTO budget_buckets VALUES ('budget-key','month',86400,1,1,1)`},
+		{"orphan key", `INSERT INTO budget_buckets VALUES ('missing-key','total',0,1,1,1)`},
+		{"duplicate identity", valid},
+		{"spent overflow", `INSERT INTO budget_buckets VALUES ('budget-key','total',0,9223372036854775808,1,1)`},
+		{"fractional timestamp", `INSERT INTO budget_buckets VALUES ('budget-key','total',0,1,1.5,1.5)`},
+		{"timestamp overflow", `INSERT INTO budget_buckets VALUES ('budget-key','total',0,1,9223372036854775807,9223372036854775807)`},
+		{"updated before created", `INSERT INTO budget_buckets VALUES ('budget-key','total',0,1,2,1)`},
+	}
+	for _, test := range constraints {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := database.Exec(test.query); err == nil {
+				t.Fatalf("constraint unexpectedly accepted %s", test.name)
+			}
+		})
+	}
+}
+
 func TestUsageBucketRejectsMissingOrNonpositiveAmount(t *testing.T) {
 	database, err := Open(context.Background(), ":memory:")
 	if err != nil {

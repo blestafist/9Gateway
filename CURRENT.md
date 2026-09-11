@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T114`.
+Done: `T001`-`T115`.
 
-Current: `T115` - add persistent budget schema.
+Current: `T116` - persist and restore total spend.
 
-Queued: `T115`-`T120` in dependency order from `TASKS.md`.
+Queued: `T116`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
