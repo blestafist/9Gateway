@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T115`.
+Done: `T001`-`T116`.
 
-Current: `T116` - persist and restore total spend.
+Current: `T117` - enforce UTC daily budgets.
 
-Queued: `T116`-`T120` in dependency order from `TASKS.md`.
+Queued: `T117`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

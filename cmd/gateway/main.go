@@ -55,6 +55,7 @@ func run() error {
 	}
 	tokenLimiter := limiter.NewTokenLimiter(nil)
 	usageRepository := storage.NewUsageBucketRepository(database)
+	budgetRepository := storage.NewBudgetBucketRepository(database)
 	now := time.Now().UTC()
 	if err := usageRepository.DeleteExpired(context.Background(), now); err != nil {
 		return err
@@ -96,6 +97,7 @@ func run() error {
 		return err
 	}
 	allowedWindows := make(map[string]map[limiter.TokenWindow]struct{}, len(keyRecords))
+	allowedBudgets := make(map[string]accounting.Money, len(keyRecords))
 	for _, record := range keyRecords {
 		policy, policyErr := auth.ParsePolicyJSONWithTokenMode([]byte(record.PolicyJSON), auth.TokenMode(cfg.Tokenizer.Mode))
 		if policyErr != nil {
@@ -106,6 +108,9 @@ func run() error {
 			windows[window] = struct{}{}
 		}
 		allowedWindows[record.ID] = windows
+		if total, limited := policy.TotalBudget(); limited {
+			allowedBudgets[record.ID] = total
+		}
 	}
 	committed := make([]limiter.CommittedTokenBucket, 0, len(persisted))
 	for _, bucket := range persisted {
@@ -128,6 +133,31 @@ func run() error {
 	if err := tokenLimiter.LoadCommitted(time.Now().UTC(), committed); err != nil {
 		return err
 	}
+	persistedBudget, err := budgetRepository.LoadTotal(context.Background())
+	if err != nil {
+		return err
+	}
+	knownBudgetKeys := make(map[string]struct{}, len(keyRecords))
+	for _, record := range keyRecords {
+		knownBudgetKeys[record.ID] = struct{}{}
+	}
+	spent := make([]limiter.BudgetSpent, 0, len(persistedBudget))
+	for _, bucket := range persistedBudget {
+		if _, found := knownBudgetKeys[bucket.APIKeyID]; !found {
+			return errors.New("startup: persisted budget bucket has unknown key")
+		}
+		if _, configured := allowedBudgets[bucket.APIKeyID]; !configured {
+			return errors.New("startup: persisted budget bucket has no current policy")
+		}
+		value, valueErr := accounting.NewMoneyMicros(bucket.SpentMicros)
+		if valueErr != nil {
+			return errors.New("startup: persisted budget bucket is invalid")
+		}
+		spent = append(spent, limiter.BudgetSpent{KeyID: bucket.APIKeyID, Spent: value})
+	}
+	if err := budgetLimiter.LoadSpent(spent); err != nil {
+		return err
+	}
 	processContext, processCancel := context.WithCancel(context.Background())
 	defer processCancel()
 	aggregateAccumulator := storage.NewUsageAggregateAccumulatorWithContext(processContext, usageRepository)
@@ -137,6 +167,15 @@ func run() error {
 		defer cancel()
 		if err := aggregateAccumulator.Shutdown(ctx); err != nil {
 			log.Printf("token aggregate shutdown: %v", err)
+		}
+	}()
+	budgetAccumulator := storage.NewBudgetAccumulatorWithContext(processContext, budgetRepository)
+	budgetLimiter.SetCommittedDeltaSink(budgetAccumulator.Sink)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := budgetAccumulator.Shutdown(ctx); err != nil {
+			log.Printf("budget aggregate shutdown: %v", err)
 		}
 	}()
 
