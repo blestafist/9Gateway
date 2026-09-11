@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T113`.
+Done: `T001`-`T114`.
 
-Current: `T114` - finalize every budget lifecycle path.
+Current: `T115` - add persistent budget schema.
 
-Queued: `T114`-`T120` in dependency order from `TASKS.md`.
+Queued: `T115`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -90,3 +90,14 @@ pricing, and planning failures fail closed before upstream. Admission remains
 conservative at the upstream-start boundary; actual monetary reconciliation is
 reserved for T111-T114. `/v1/models` and unrestricted generic traffic retain
 their budget-free transparent paths.
+
+T114 audits the complete lease lifecycle at the exact `client.Do` boundary:
+pre-start exits release zero, while connection/upload/header/read, response
+write/flush, conversion, cancellation, unsupported-response, custom-dispatch,
+and internal post-start ambiguity paths conservatively settle exactly once.
+Cancellation is issued before deferred body and lease cleanup; concurrency is
+released before any best-effort reconciliation handoff. Completion records carry
+only typed terminal outcome metadata, never prices, reservations, usage, or
+headers. Real HTTP and focused race tests cover immediate pre-start reuse,
+conservative post-start charging, cancellation, repeated cleanup, and key
+isolation without changing transport transparency or token accounting.

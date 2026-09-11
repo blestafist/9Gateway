@@ -18,6 +18,61 @@ type CompletionRecord struct {
 	Path      string
 	Status    int
 	Duration  time.Duration
+	Terminal  TerminalMetadata
+}
+
+// TerminalOutcome is a bounded, non-sensitive description of the request's
+// final transport state. It is deliberately an enum-like string: completion
+// logs must not carry reservation amounts, prices, usage, headers, or error
+// text.
+type TerminalOutcome string
+
+const (
+	TerminalOutcomeUnknown        TerminalOutcome = "unknown"
+	TerminalOutcomePreUpstream    TerminalOutcome = "pre_upstream"
+	TerminalOutcomeUpstreamError  TerminalOutcome = "upstream_error"
+	TerminalOutcomeResponseError  TerminalOutcome = "response_error"
+	TerminalOutcomeComplete       TerminalOutcome = "complete"
+	TerminalOutcomeCustomDispatch TerminalOutcome = "custom_dispatch"
+	TerminalOutcomeCancelled      TerminalOutcome = "cancelled"
+)
+
+// TerminalMetadata is the only lifecycle detail carried into completion logs.
+// Its values are safe typed scalars and contain no accounting or payload data.
+type TerminalMetadata struct {
+	Outcome         TerminalOutcome
+	UpstreamStarted bool
+}
+
+type terminalMetadataContextKey struct{}
+
+type terminalMetadataState struct {
+	metadata TerminalMetadata
+}
+
+func newTerminalMetadataState() *terminalMetadataState {
+	return &terminalMetadataState{metadata: TerminalMetadata{Outcome: TerminalOutcomeUnknown}}
+}
+
+func terminalMetadataFromContext(ctx context.Context) *terminalMetadataState {
+	if ctx == nil {
+		return nil
+	}
+	state, _ := ctx.Value(terminalMetadataContextKey{}).(*terminalMetadataState)
+	return state
+}
+
+func (state *terminalMetadataState) set(metadata TerminalMetadata) {
+	if state != nil {
+		state.metadata = metadata
+	}
+}
+
+func (state *terminalMetadataState) get() TerminalMetadata {
+	if state == nil {
+		return TerminalMetadata{Outcome: TerminalOutcomeUnknown}
+	}
+	return state.metadata
 }
 
 const defaultCompletionQueueCapacity = 128
@@ -89,6 +144,8 @@ func (completionLogger *CompletionLogger) write(record CompletionRecord) {
 		"path", record.Path,
 		"status", record.Status,
 		"duration", record.Duration,
+		"terminal_outcome", record.Terminal.Outcome,
+		"upstream_started", record.Terminal.UpstreamStarted,
 	)
 }
 

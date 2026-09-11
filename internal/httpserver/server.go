@@ -345,7 +345,9 @@ func newProxyHandlerWithLimitersAndTokenLimiter(client *http.Client, baseURL, ap
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	terminal := terminalMetadataFromContext(request.Context())
 	if handler.baseURL == nil {
+		terminal.set(TerminalMetadata{Outcome: TerminalOutcomePreUpstream})
 		writeGatewayError(response, gatewayErrorInternal, "")
 		return
 	}
@@ -368,6 +370,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	// zero. Once it starts, even an upload, header, or cancellation error may
 	// have reached upstream, so the reservation must be settled conservatively.
 	upstreamStarted := false
+	setTerminal := func(outcome TerminalOutcome) {
+		terminal.set(TerminalMetadata{Outcome: outcome, UpstreamStarted: upstreamStarted})
+	}
 	proxyContext, cancelUpstream := context.WithCancel(request.Context())
 	// Restricted inspection may block while reading a client body. Reserve a
 	// provisional slot for that phase and promote it into the full lifecycle
@@ -399,10 +404,18 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				_ = lifecycleLease.CompleteConservative()
 			}
 		}
+		if terminal.get().Outcome == TerminalOutcomeUnknown {
+			if upstreamStarted {
+				setTerminal(TerminalOutcomeComplete)
+			} else {
+				setTerminal(TerminalOutcomePreUpstream)
+			}
+		}
 	}()
 	if authenticated && handler.concurrencyLimiter != nil && shouldInspectRequestMetadata(request) {
 		inspectionLease, _ = handler.concurrencyLimiter.Acquire(principal.ID, principal.Policy.MaxConcurrency())
 		if inspectionLease == nil {
+			setTerminal(TerminalOutcomePreUpstream)
 			writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
 			return
 		}
@@ -416,6 +429,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 	if metadata != nil && metadata.Model != "" {
 		if authenticated && !principal.Policy.AllowsModel(metadata.Model) {
+			setTerminal(TerminalOutcomePreUpstream)
 			writeGatewayError(response, gatewayErrorModelNotAllowed, "model")
 			return
 		}
@@ -426,6 +440,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			if len(windows) != 0 {
 				allowed, resetAt := handler.requestLimiter.Allow(principal.ID, windows)
 				if !allowed {
+					setTerminal(TerminalOutcomePreUpstream)
 					writeGatewayErrorRetryAfter(response, gatewayErrorRequestLimit, "", handler.requestLimiter.RetryAfterSeconds(resetAt))
 					return
 				}
@@ -438,6 +453,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		var err error
 		tokenPlan, err = handler.tokenPlan(request, principal, metadata, inspected, inspectionAvailable)
 		if err != nil {
+			setTerminal(TerminalOutcomePreUpstream)
 			writeGatewayError(response, gatewayErrorInternal, "")
 			return
 		}
@@ -459,15 +475,18 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				// startup dependency is absent. Keep the response deliberately
 				// generic so wiring details cannot escape the gateway.
 				writeGatewayError(response, gatewayErrorInternal, "")
+				setTerminal(TerminalOutcomePreUpstream)
 				return
 			} else if !eligibleTokenRequest(request) || !inspectionAvailable || metadata == nil {
 				writeGatewayError(response, gatewayErrorInvalidRequest, "")
+				setTerminal(TerminalOutcomePreUpstream)
 				return
 			} else {
 				if tokenPlan == nil {
 					var err error
 					tokenPlan, err = handler.tokenPlan(request, principal, metadata, inspected, inspectionAvailable)
 					if err != nil || tokenPlan == nil {
+						setTerminal(TerminalOutcomePreUpstream)
 						writeGatewayError(response, gatewayErrorInvalidRequest, "")
 						return
 					}
@@ -477,6 +496,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 					Reservation: *tokenPlan, Resolver: handler.pricingResolver,
 				})
 				if err != nil {
+					setTerminal(TerminalOutcomePreUpstream)
 					writeGatewayError(response, gatewayErrorInvalidRequest, "")
 					return
 				}
@@ -506,12 +526,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			lifecycleLease, admissionErr = handler.leaseCoordinator.Acquire(options)
 		}
 		if admissionErr != nil {
+			setTerminal(TerminalOutcomePreUpstream)
 			handler.writeAdmissionError(response, admissionErr)
 			return
 		}
 	}
 	upstreamRequest, err := http.NewRequestWithContext(proxyContext, request.Method, targetURL.String(), requestBody)
 	if err != nil {
+		setTerminal(TerminalOutcomePreUpstream)
 		writeGatewayError(response, gatewayErrorInternal, "")
 		return
 	}
@@ -519,13 +541,29 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
 
+	if handler.client == nil {
+		setTerminal(TerminalOutcomePreUpstream)
+		writeGatewayError(response, gatewayErrorInternal, "")
+		return
+	}
 	upstreamStarted = true
 	upstreamResponse, err = handler.client.Do(upstreamRequest)
 	if err != nil {
+		if proxyContext.Err() != nil {
+			setTerminal(TerminalOutcomeCancelled)
+		} else {
+			setTerminal(TerminalOutcomeUpstreamError)
+		}
+		writeGatewayError(response, gatewayErrorUpstreamConnection, "")
+		return
+	}
+	if upstreamResponse == nil {
+		setTerminal(TerminalOutcomeUpstreamError)
 		writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 		return
 	}
 	if handler.responseDispatch != nil {
+		setTerminal(TerminalOutcomeCustomDispatch)
 		handler.responseDispatch(response, upstreamResponse, metadata)
 		return
 	}
@@ -541,6 +579,15 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	dispatchErr = dispatchResponseResultWithLeaseAndObservationAndPricing(response, upstreamResponse, metadata, lifecycleLease, responseObservation, selectedPricing, request.WithContext(proxyContext))
 	if responseObservation != nil {
 		responseObservation.finish(dispatchErr)
+	}
+	if dispatchErr != nil {
+		if proxyContext.Err() != nil || errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
+			setTerminal(TerminalOutcomeCancelled)
+		} else {
+			setTerminal(TerminalOutcomeResponseError)
+		}
+	} else {
+		setTerminal(TerminalOutcomeComplete)
 	}
 }
 
@@ -787,6 +834,13 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 
 	copyResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
+	if upstreamResponse.Body == nil {
+		// A RoundTripper is allowed to return a malformed response. It is still
+		// post-start ambiguity: preserve the upstream status, report a bounded
+		// transport error, and let the request defer conservatively settle the
+		// lease rather than panicking while copying a nil body.
+		return io.ErrUnexpectedEOF
+	}
 	if responseMode == ResponseModeSSE {
 		return streamResponseBody(response, upstreamResponse.Body, observation)
 	}
@@ -1157,6 +1211,8 @@ func withRequestID(next http.Handler) http.Handler {
 func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		startedAt := time.Now()
+		terminal := newTerminalMetadataState()
+		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
 		writer := &completionResponseWriter{ResponseWriter: response}
 		next.ServeHTTP(writer, request)
 
@@ -1166,6 +1222,8 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 			"path", request.URL.Path,
 			"status", writer.statusCode(),
 			"duration", time.Since(startedAt),
+			"terminal_outcome", terminal.get().Outcome,
+			"upstream_started", terminal.get().UpstreamStarted,
 		)
 	})
 }
@@ -1173,6 +1231,8 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		startedAt := time.Now()
+		terminal := newTerminalMetadataState()
+		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
 		writer := &completionResponseWriter{ResponseWriter: response}
 		next.ServeHTTP(writer, request)
 
@@ -1185,6 +1245,7 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 				Path:      request.URL.Path,
 				Status:    writer.statusCode(),
 				Duration:  time.Since(startedAt),
+				Terminal:  terminal.get(),
 			})
 		}
 	})
