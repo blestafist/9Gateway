@@ -323,6 +323,180 @@ func TestBudgetPolicyReplacementSettlesCapturedDayAndMonthBuckets(t *testing.T) 
 	}
 }
 
+func TestBudgetPolicyReplacementDoesNotImportActiveAcrossPeriods(t *testing.T) {
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	limiter := NewBudgetLimiter(func() time.Time { return now })
+
+	t.Run("day active does not constrain newly added total", func(t *testing.T) {
+		old := DailyBudgetPolicy(budgetMoney(t, 100))
+		limiter.RegisterPolicy("day-to-total", old)
+		dayReservation, err := limiter.Reserve("day-to-total", old, budgetMoney(t, 100))
+		if err != nil {
+			t.Fatal(err)
+		}
+		newPolicy := LimitedBudgetPolicy(budgetMoney(t, 10))
+		if err := limiter.ReplacePolicy("day-to-total", old, newPolicy, nil); err != nil {
+			t.Fatal(err)
+		}
+		totalReservation, err := limiter.Reserve("day-to-total", newPolicy, budgetMoney(t, 1))
+		if err != nil {
+			t.Fatalf("new total imported old day active: %v", err)
+		}
+		if err := dayReservation.Commit(budgetMoney(t, 100)); err != nil {
+			t.Fatal(err)
+		}
+		if err := totalReservation.Release(); err != nil {
+			t.Fatal(err)
+		}
+		shard := limiter.shard("day-to-total")
+		shard.mu.Lock()
+		state := shard.states["day-to-total"]
+		day := state.dayBuckets[currentDay(now)]
+		shard.mu.Unlock()
+		if state.spent != budgetMoney(t, 0) || !isZeroMoney(state.active) || day.spent != budgetMoney(t, 100) || !isZeroMoney(day.active) {
+			t.Fatalf("period ownership moved during replacement: total=%v/%v day=%#v", state.spent, state.active, day)
+		}
+	})
+
+	t.Run("total active does not constrain newly added day", func(t *testing.T) {
+		old := LimitedBudgetPolicy(budgetMoney(t, 100))
+		limiter.RegisterPolicy("total-to-day", old)
+		totalReservation, err := limiter.Reserve("total-to-day", old, budgetMoney(t, 100))
+		if err != nil {
+			t.Fatal(err)
+		}
+		newPolicy := DailyBudgetPolicy(budgetMoney(t, 10))
+		if err := limiter.ReplacePolicy("total-to-day", old, newPolicy, nil); err != nil {
+			t.Fatal(err)
+		}
+		dayReservation, err := limiter.Reserve("total-to-day", newPolicy, budgetMoney(t, 10))
+		if err != nil {
+			t.Fatalf("new day imported old total active: %v", err)
+		}
+		if err := totalReservation.Commit(budgetMoney(t, 100)); err != nil {
+			t.Fatal(err)
+		}
+		if err := dayReservation.Release(); err != nil {
+			t.Fatal(err)
+		}
+		shard := limiter.shard("total-to-day")
+		shard.mu.Lock()
+		state := shard.states["total-to-day"]
+		day := state.dayBuckets[currentDay(now)]
+		shard.mu.Unlock()
+		if state.spent != budgetMoney(t, 100) || !isZeroMoney(state.active) || !isZeroMoney(day.active) || day.spent != budgetMoney(t, 0) {
+			t.Fatalf("period ownership moved during replacement: total=%v/%v day=%#v", state.spent, state.active, day)
+		}
+	})
+
+	t.Run("month active does not constrain newly added total", func(t *testing.T) {
+		old := MonthlyBudgetPolicy(budgetMoney(t, 100))
+		limiter.RegisterPolicy("month-to-total", old)
+		monthReservation, err := limiter.Reserve("month-to-total", old, budgetMoney(t, 100))
+		if err != nil {
+			t.Fatal(err)
+		}
+		newPolicy := LimitedBudgetPolicy(budgetMoney(t, 10))
+		if err := limiter.ReplacePolicy("month-to-total", old, newPolicy, nil); err != nil {
+			t.Fatal(err)
+		}
+		totalReservation, err := limiter.Reserve("month-to-total", newPolicy, budgetMoney(t, 1))
+		if err != nil {
+			t.Fatalf("new total imported old month active: %v", err)
+		}
+		if err := monthReservation.Commit(budgetMoney(t, 100)); err != nil {
+			t.Fatal(err)
+		}
+		if err := totalReservation.Release(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestBudgetPolicyReplacementActivePeriodSetAcrossAddRemoveReadd(t *testing.T) {
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	limiter := NewBudgetLimiter(func() time.Time { return now })
+	key := "period-readd"
+	total := LimitedBudgetPolicy(budgetMoney(t, 100))
+	limiter.RegisterPolicy(key, total)
+	oldTotal, err := limiter.Reserve(key, total, budgetMoney(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withDay := TotalAndDailyBudgetPolicy(budgetMoney(t, 100), budgetMoney(t, 100))
+	if err := limiter.ReplacePolicy(key, total, withDay, nil); err != nil {
+		t.Fatal(err)
+	}
+	day, err := limiter.Reserve(key, withDay, budgetMoney(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withMonth := TotalDailyMonthlyBudgetPolicy(budgetMoney(t, 100), budgetMoney(t, 100), budgetMoney(t, 100))
+	if err := limiter.ReplacePolicy(key, withDay, withMonth, nil); err != nil {
+		t.Fatal(err)
+	}
+	month, err := limiter.Reserve(key, withMonth, budgetMoney(t, 30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlimited := UnlimitedBudgetPolicy()
+	if err := limiter.ReplacePolicy(key, withMonth, unlimited, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldTotal.Commit(budgetMoney(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := day.Commit(budgetMoney(t, 20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := month.Commit(budgetMoney(t, 30)); err != nil {
+		t.Fatal(err)
+	}
+	readded := TotalDailyMonthlyBudgetPolicy(budgetMoney(t, 100), budgetMoney(t, 100), budgetMoney(t, 100))
+	if err := limiter.ReplacePolicy(key, unlimited, readded, nil); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := limiter.Reserve(key, readded, budgetMoney(t, 40))
+	if err != nil {
+		t.Fatalf("re-added limits lost captured spend: %v", err)
+	}
+	if _, err := limiter.Reserve(key, readded, budgetMoney(t, 1)); !errors.Is(err, ErrBudgetCapacity) {
+		t.Fatalf("re-added limits reset captured spend: %v", err)
+	}
+	if err := remaining.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBudgetPolicyReplacementAdmissionAndFinalizationRace(t *testing.T) {
+	limiter := NewBudgetLimiter()
+	old := DailyBudgetPolicy(budgetMoney(t, 1000))
+	limiter.RegisterPolicy("replacement-race", old)
+	reservation, err := limiter.Reserve("replacement-race", old, budgetMoney(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPolicy := LimitedBudgetPolicy(budgetMoney(t, 1000))
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		_ = reservation.Commit(budgetMoney(t, 1))
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		_ = limiter.ReplacePolicy("replacement-race", old, newPolicy, nil)
+	}()
+	close(start)
+	wait.Wait()
+	if _, err := limiter.Reserve("replacement-race", newPolicy, budgetMoney(t, 1000)); err != nil {
+		t.Fatalf("replacement/finalization race stranded active capacity: %v", err)
+	}
+}
+
 func TestBudgetLimiterInitializationValidationIsAtomic(t *testing.T) {
 	limiter := NewBudgetLimiter()
 	if err := limiter.LoadSpent([]BudgetSpent{{KeyID: "key-a", Spent: budgetMoney(t, 1)}, {KeyID: "key-a", Spent: budgetMoney(t, 2)}}); !errors.Is(err, ErrBudgetInvalid) {

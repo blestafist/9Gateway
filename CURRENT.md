@@ -42,6 +42,9 @@ critical path. T107-T120 implement budget reservation/reconciliation,
 persistent spend, and UTC day/calendar-month
 enforcement. T118 adds exact UTC calendar-month bucket identities, restart
 restoration, cross-month settlement, and boundary-based Retry-After behavior;
+T119 replacement admission scopes active reservations to their captured
+total/day/month identities, so replacement cannot import unrelated active
+capacity while finalization remains on the admitting buckets;
 the optional Bifrost review and Apache-2.0/no-copy provenance are recorded in
 the budget implementation comments. Request-history/body persistence, metrics, `/ready`, CLI, tool-call
 execution/validation, and Web UI remain out of scope.

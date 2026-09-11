@@ -630,9 +630,15 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 	if isZeroMoney(candidate) {
 		return newBudgetReservation(limiter, keyID, nil, 0, candidate, time.Time{}, time.Time{}), nil
 	}
-	newActive, err := active.Add(candidate)
-	if err != nil || !newActive.Known() {
-		return nil, ErrBudgetState
+	// Each active counter is scoped to the exact budget identity captured by
+	// this admission. In particular, a day-only reservation must not occupy
+	// the lifetime-total active counter if a total limit is added later.
+	newActive := active
+	if policy.Limited {
+		newActive, err = active.Add(candidate)
+		if err != nil || !newActive.Known() {
+			return nil, ErrBudgetState
+		}
 	}
 	newDayActive := dayActive
 	if policy.DayLimited {
@@ -860,7 +866,10 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 	} else if kind == BudgetSettlementKnown {
 		result.Kind, result.Error = BudgetSettlementConservative, &BudgetSettlementError{Cause: ErrBudgetInvalidActual, Conservative: true}
 	}
-	newActive, subErr := state.active.Subtract(ownership.amount)
+	newActive, subErr := state.active, error(nil)
+	if ownership.totalCaptured {
+		newActive, subErr = state.active.Subtract(ownership.amount)
+	}
 	newSpent, addErr := state.spent, error(nil)
 	if ownership.totalCaptured {
 		newSpent, addErr = state.spent.Add(charge)
