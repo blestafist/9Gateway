@@ -214,7 +214,7 @@ func TestOpenCreatesExpectedBudgetBucketSchema(t *testing.T) {
 			t.Errorf("column %q missing from budget_buckets", column)
 		}
 	}
-	for _, index := range []string{"idx_budget_buckets_key_period", "idx_budget_buckets_expiration"} {
+	for _, index := range []string{"idx_budget_buckets_expiration"} {
 		var found int
 		if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?`, index).Scan(&found); err != nil {
 			t.Fatalf("inspect %s index: %v", index, err)
@@ -223,7 +223,13 @@ func TestOpenCreatesExpectedBudgetBucketSchema(t *testing.T) {
 			t.Errorf("index %q missing", index)
 		}
 	}
-	assertIndexColumns(t, database.DB, "idx_budget_buckets_key_period", []string{"api_key_id", "period_kind", "period_start"})
+	var redundantIndexCount int
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_budget_buckets_key_period'`).Scan(&redundantIndexCount); err != nil {
+		t.Fatalf("inspect redundant budget index: %v", err)
+	}
+	if redundantIndexCount != 0 {
+		t.Fatal("redundant budget identity index exists")
+	}
 	assertIndexColumns(t, database.DB, "idx_budget_buckets_expiration", []string{"period_kind", "period_start"})
 	if !strings.Contains(tableSQL, "REFERENCES api_keys(id)") {
 		t.Fatalf("budget_buckets foreign key missing from table SQL: %q", tableSQL)
@@ -270,6 +276,72 @@ func TestOpenCreatesExpectedBudgetBucketSchema(t *testing.T) {
 				t.Fatalf("constraint unexpectedly accepted %s", test.name)
 			}
 		})
+	}
+}
+
+func TestBudgetBucketMigrationUpgradesFromVersionFive(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations := mustEmbeddedMigrations(t)
+	if err := runMigrations(context.Background(), database, migrations[:5]); err != nil {
+		t.Fatalf("create version five schema: %v", err)
+	}
+	assertSchemaVersion(t, database, 5)
+
+	if err := runMigrations(context.Background(), database, migrations); err != nil {
+		t.Fatalf("apply migration 006: %v", err)
+	}
+	assertSchemaVersion(t, database, CurrentSchemaVersion)
+	var tableCount, expirationIndexCount, redundantIndexCount int
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'budget_buckets'`).Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_budget_buckets_expiration'`).Scan(&expirationIndexCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_budget_buckets_key_period'`).Scan(&redundantIndexCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 1 || expirationIndexCount != 1 || redundantIndexCount != 0 {
+		t.Fatalf("migration 006 schema = table %d, expiration index %d, redundant index %d; want 1, 1, 0", tableCount, expirationIndexCount, redundantIndexCount)
+	}
+}
+
+func TestBudgetBucketMigration006RollsBackOnExpirationIndexConflict(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations := mustEmbeddedMigrations(t)
+	if err := runMigrations(context.Background(), database, migrations[:5]); err != nil {
+		t.Fatalf("create version five schema: %v", err)
+	}
+	if _, err := database.Exec(`CREATE TABLE expiration_index_conflict (id INTEGER); CREATE INDEX idx_budget_buckets_expiration ON expiration_index_conflict(id)`); err != nil {
+		t.Fatalf("create conflicting expiration index: %v", err)
+	}
+
+	if err := runMigrations(context.Background(), database, migrations); err == nil {
+		t.Fatal("migration 006 with conflicting expiration index unexpectedly succeeded")
+	}
+	assertSchemaVersion(t, database, 5)
+	var budgetTableCount int
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'budget_buckets'`).Scan(&budgetTableCount); err != nil {
+		t.Fatal(err)
+	}
+	if budgetTableCount != 0 {
+		t.Fatal("failed migration 006 left budget_buckets behind")
 	}
 }
 

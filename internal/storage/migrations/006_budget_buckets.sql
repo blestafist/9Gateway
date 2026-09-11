@@ -41,7 +41,5 @@ CREATE TABLE budget_buckets (
     PRIMARY KEY (api_key_id, period_kind, period_start)
 );
 
-CREATE INDEX idx_budget_buckets_key_period
-    ON budget_buckets(api_key_id, period_kind, period_start);
 CREATE INDEX idx_budget_buckets_expiration
     ON budget_buckets(period_kind, period_start);
