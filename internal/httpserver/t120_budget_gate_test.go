@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,8 @@ import (
 // scenario. It deliberately owns two fresh process graphs around one SQLite
 // file: only committed token and budget buckets cross that boundary.
 func TestT120BudgetMilestoneLifecycle(t *testing.T) {
+	const promptSentinel = "t120-unique-prompt-sentinel"
+	const responseSentinel = "t120-unique-response-sentinel"
 	clock := &requestLimitTestClock{now: time.Date(2024, 12, 31, 23, 59, 30, 0, time.UTC)}
 	pepper := []byte("t120-pepper-secret")
 	adminCredential := "t120-admin-secret"
@@ -93,7 +96,7 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 		for name, values := range response.Header {
 			text += name + strings.Join(values, "|")
 		}
-		for _, secret := range []string{string(pepper), adminCredential, upstreamCredential, keyA.RawKey, keyB.RawKey, hex.EncodeToString(keyA.Digest), hex.EncodeToString(keyB.Digest), "sqlite", "database is locked", "prompt-fragment", "response-fragment", "input_per_million_micros", "reservation"} {
+		for _, secret := range []string{string(pepper), adminCredential, upstreamCredential, keyA.RawKey, keyB.RawKey, hex.EncodeToString(keyA.Digest), hex.EncodeToString(keyB.Digest), "sqlite", "database is locked", "input_per_million_micros", "reservation"} {
 			if strings.Contains(strings.ToLower(text), strings.ToLower(secret)) {
 				t.Fatalf("gateway response leaked %q: %q", secret, text)
 			}
@@ -110,10 +113,10 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 
 	// Exact pricing and an explicit output bound make the conservative two-micro
 	// reservation larger than the actual one-micro completion.
-	first := request(http.MethodPost, "/v1/chat/completions", keyA.RawKey, `{"model":"exact","max_tokens":2}`, map[string]string{"Content-Type": "application/json", "X-T120-Case": "a-json"})
+	first := request(http.MethodPost, "/v1/chat/completions", keyA.RawKey, `{"model":"exact","max_tokens":2,"messages":[{"role":"user","content":"t120-unique-prompt-sentinel"}]}`, map[string]string{"Content-Type": "application/json", "X-T120-Case": "a-json"})
 	firstBody := read(first)
 	assertSafe(first, firstBody)
-	if first.StatusCode != http.StatusOK || !bytes.Contains(firstBody, []byte(`"total_tokens":1`)) {
+	if first.StatusCode != http.StatusOK || !bytes.Contains(firstBody, []byte(`"total_tokens":1`)) || !bytes.Contains(firstBody, []byte(responseSentinel)) {
 		t.Fatalf("exact JSON lifecycle = %d/%q", first.StatusCode, firstBody)
 	}
 	t120WaitFor(t, func() bool { return process.worker.Stats().Succeeded >= 1 })
@@ -121,7 +124,7 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 	// The committed token total survives the process-local reservation and
 	// rejects a candidate that would oversubscribe the fixed token window.
 	before := upstream.calls.Load()
-	assertStatus(request(http.MethodPost, "/v1/chat/completions", keyA.RawKey, `{"model":"exact","max_tokens":2}`, map[string]string{"Content-Type": "application/json", "X-T120-Case": "a-token-rejected"}), http.StatusTooManyRequests, `"code":"token_limit_exceeded"`)
+	assertStatus(request(http.MethodPost, "/v1/chat/completions", keyA.RawKey, `{"model":"exact","max_tokens":2,"messages":[{"role":"user","content":"t120-unique-prompt-sentinel"}],"sentinel":"t120-unique-response-sentinel"}`, map[string]string{"Content-Type": "application/json", "X-T120-Case": "a-token-rejected"}), http.StatusTooManyRequests, `"code":"token_limit_exceeded"`)
 	if upstream.calls.Load() != before {
 		t.Fatal("token rejection reached upstream")
 	}
@@ -151,11 +154,14 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 		{"b-invalid", `{"model":"glob-invalid"}`, "invalid", http.StatusOK, "invalid-usage"},
 		{"b-lower", `{"model":"glob-lower"}`, "lower", http.StatusOK, "lower-usage"},
 		{"b-above", `{"model":"glob-above"}`, "above", http.StatusOK, "above-usage"},
-		{"b-error", `{"model":"glob-error"}`, "error", http.StatusServiceUnavailable, "upstream-error"},
+		{"b-error", `{"model":"glob-error","messages":[{"role":"user","content":"t120-unique-prompt-sentinel"}]}`, "error", http.StatusServiceUnavailable, "t120-unique-response-sentinel"},
 	} {
 		response := request(http.MethodPost, "/v1/chat/completions", keyB.RawKey, test.body, map[string]string{"Content-Type": "application/json", "X-T120-Case": test.content})
 		body := read(response)
 		assertSafe(response, body)
+		if test.content == "error" && !bytes.Contains(body, []byte(responseSentinel)) {
+			t.Fatalf("%s did not preserve transparent upstream response sentinel: %q", test.name, body)
+		}
 		if response.StatusCode != test.status || !bytes.Contains(body, []byte(test.want)) {
 			t.Fatalf("%s = %d/%q, want %d containing %q", test.name, response.StatusCode, body, test.status, test.want)
 		}
@@ -166,14 +172,17 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 		name, body, path, key string
 	}{
 		{"unknown price", `{"model":"not-priced"}`, "/v1/chat/completions", keyB.RawKey},
-		{"malformed", `{"model":`, "/v1/chat/completions", keyA.RawKey},
-		{"oversized", strings.Repeat("x", 5000), "/v1/chat/completions", keyA.RawKey},
-		{"model denied", `{"model":"glob-denied"}`, "/v1/chat/completions", keyA.RawKey},
+		{"malformed", `{"model":"t120-unique-prompt-sentinel","sentinel":"t120-unique-response-sentinel",`, "/v1/chat/completions", keyA.RawKey},
+		{"oversized", "t120-unique-prompt-sentinel:t120-unique-response-sentinel" + strings.Repeat("x", 5000), "/v1/chat/completions", keyA.RawKey},
+		{"model denied", `{"model":"glob-denied","messages":[{"role":"user","content":"t120-unique-prompt-sentinel"}],"sentinel":"t120-unique-response-sentinel"}`, "/v1/chat/completions", keyA.RawKey},
 	} {
 		before = upstream.calls.Load()
 		response := request(http.MethodPost, test.path, test.key, test.body, map[string]string{"Content-Type": "application/json"})
 		body := read(response)
 		assertSafe(response, body)
+		if bytes.Contains(body, []byte(promptSentinel)) || bytes.Contains(body, []byte(responseSentinel)) {
+			t.Fatalf("%s gateway-generated response leaked a sentinel: %q", test.name, body)
+		}
 		if response.StatusCode != http.StatusBadRequest && response.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s = %d/%q", test.name, response.StatusCode, body)
 		}
@@ -275,6 +284,259 @@ func TestT120BudgetMilestoneLifecycle(t *testing.T) {
 			}
 		}
 	}
+	for _, sentinel := range []string{promptSentinel, responseSentinel} {
+		if strings.Contains(logs.String(), sentinel) {
+			t.Fatalf("completion logs leaked sentinel %q", sentinel)
+		}
+	}
+}
+
+func TestT120PersistentRequestWindowRejectsWithoutUpstreamCall(t *testing.T) {
+	clock := &requestLimitTestClock{now: time.Date(2025, 1, 15, 12, 0, 30, 0, time.UTC)}
+	key, err := auth.GenerateGatewayKey([]byte("t120-request-window-pepper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(t.TempDir(), "request-window.db")
+	database, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := `{"allowed_models":["exact"],"request_windows":[{"amount":1,"duration":"1m"}],"token_windows":[{"amount":100,"duration":"1m"}],"token_mode":"usage_only","max_concurrent_requests":1,"budget_limits":[{"amount_micros":100,"period":"total"},{"amount_micros":100,"period":"day"},{"amount_micros":100,"period":"month"}]}`
+	created := time.Unix(1, 0).UTC()
+	if err := storage.NewAPIKeyRepository(database).Insert(context.Background(), storage.APIKeyRecord{ID: "request-window", Name: "request-window", DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, CreatedAt: created, UpdatedAt: created, PolicyJSON: policy}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upstream := newT120Upstream(t, "request-window-upstream")
+	process := t120StartProcess(t, databasePath, clock, t120Pricing(t), upstream.server.URL, upstream.credential, "request-window-admin", "t120-request-window-pepper", io.Discard)
+	client := transport.NewClient()
+	request := func() *http.Response {
+		t.Helper()
+		req, requestErr := http.NewRequest(http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact"}`))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		req.Header.Set("Authorization", "Bearer "+key.RawKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-T120-Case", "a-json")
+		response, requestErr := client.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		return response
+	}
+	first := request()
+	if body := readT120Body(t, first); first.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("json-body")) {
+		t.Fatalf("first request = %d/%q", first.StatusCode, body)
+	}
+	before := upstream.calls.Load()
+	second := request()
+	body := readT120Body(t, second)
+	if second.StatusCode != http.StatusTooManyRequests || second.Header.Get("Retry-After") != "30" || !bytes.Contains(body, []byte(`"code":"request_limit_exceeded"`)) {
+		t.Fatalf("persistent request rejection = %d/retry %q/body %q", second.StatusCode, second.Header.Get("Retry-After"), body)
+	}
+	if got := upstream.calls.Load(); got != before {
+		t.Fatalf("request rejection added upstream calls: before %d, after %d", before, got)
+	}
+	t120StopProcess(t, process)
+}
+
+func TestT120DailyAndMonthlyBudgetRejectionsAreIndependentHTTPGates(t *testing.T) {
+	clock := &requestLimitTestClock{now: time.Date(2025, 1, 15, 12, 0, 30, 0, time.UTC)}
+	pepper := []byte("t120-period-pepper")
+	keyDay, err := auth.GenerateGatewayKey(pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyMonth, err := auth.GenerateGatewayKey(pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(t.TempDir(), "period-budget.db")
+	database, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dayPolicy := `{"allowed_models":["exact"],"token_windows":[{"amount":100,"duration":"1m"}],"token_mode":"usage_only","max_concurrent_requests":1,"budget_limits":[{"amount_micros":100,"period":"total"},{"amount_micros":1,"period":"day"},{"amount_micros":100,"period":"month"}]}`
+	monthPolicy := `{"allowed_models":["exact"],"token_windows":[{"amount":100,"duration":"1m"}],"token_mode":"usage_only","max_concurrent_requests":1,"budget_limits":[{"amount_micros":100,"period":"total"},{"amount_micros":100,"period":"day"},{"amount_micros":1,"period":"month"}]}`
+	created := time.Unix(1, 0).UTC()
+	repository := storage.NewAPIKeyRepository(database)
+	for _, value := range []struct {
+		id, name, policy string
+		key              auth.GeneratedGatewayKey
+	}{{"day-only", "day-only", dayPolicy, keyDay}, {"month-only", "month-only", monthPolicy, keyMonth}} {
+		if err := repository.Insert(context.Background(), storage.APIKeyRecord{ID: value.id, Name: value.name, DisplayPrefix: value.key.DisplayPrefix, Digest: value.key.Digest, Enabled: true, CreatedAt: created, UpdatedAt: created, PolicyJSON: value.policy}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upstream := newT120Upstream(t, "period-upstream")
+	process := t120StartProcess(t, databasePath, clock, t120Pricing(t), upstream.server.URL, upstream.credential, "period-admin", string(pepper), io.Discard)
+	client := transport.NewClient()
+	request := func(key auth.GeneratedGatewayKey) *http.Response {
+		t.Helper()
+		req, requestErr := http.NewRequest(http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact"}`))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		req.Header.Set("Authorization", "Bearer "+key.RawKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-T120-Case", "a-json")
+		response, requestErr := client.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		return response
+	}
+	if response := request(keyDay); response.StatusCode != http.StatusOK {
+		t.Fatalf("daily setup = %d/%q", response.StatusCode, readT120Body(t, response))
+	} else {
+		readT120Body(t, response)
+	}
+	if response := request(keyMonth); response.StatusCode != http.StatusOK {
+		t.Fatalf("monthly setup = %d/%q", response.StatusCode, readT120Body(t, response))
+	} else {
+		readT120Body(t, response)
+	}
+	dayBefore := upstream.calls.Load()
+	dayRejected := request(keyDay)
+	dayBody := readT120Body(t, dayRejected)
+	dayRetry := int(clock.Now().AddDate(0, 0, 1).Truncate(24*time.Hour).Sub(clock.Now()) / time.Second)
+	if dayRejected.StatusCode != http.StatusTooManyRequests || dayRejected.Header.Get("Retry-After") != strconv.Itoa(dayRetry) || !bytes.Contains(dayBody, []byte(`"code":"budget_exceeded"`)) {
+		t.Fatalf("daily rejection = %d/retry %q/body %q, want %d", dayRejected.StatusCode, dayRejected.Header.Get("Retry-After"), dayBody, dayRetry)
+	}
+	if got := upstream.calls.Load(); got != dayBefore {
+		t.Fatalf("daily rejection reached upstream: before %d, after %d", dayBefore, got)
+	}
+	monthBefore := upstream.calls.Load()
+	monthRejected := request(keyMonth)
+	monthBody := readT120Body(t, monthRejected)
+	monthRetry := int(time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC).Sub(clock.Now()) / time.Second)
+	if monthRejected.StatusCode != http.StatusTooManyRequests || monthRejected.Header.Get("Retry-After") != strconv.Itoa(monthRetry) || !bytes.Contains(monthBody, []byte(`"code":"budget_exceeded"`)) {
+		t.Fatalf("monthly rejection = %d/retry %q/body %q, want %d", monthRejected.StatusCode, monthRejected.Header.Get("Retry-After"), monthBody, monthRetry)
+	}
+	if got := upstream.calls.Load(); got != monthBefore {
+		t.Fatalf("monthly rejection reached upstream: before %d, after %d", monthBefore, got)
+	}
+	t120StopProcess(t, process)
+}
+
+func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) {
+	clock := &requestLimitTestClock{now: time.Date(2025, 1, 15, 12, 0, 30, 0, time.UTC)}
+	pepper := []byte("t120-cancel-pepper")
+	key, err := auth.GenerateGatewayKey(pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := `{"allowed_models":["exact"],"token_windows":[{"amount":100,"duration":"1m"}],"token_mode":"usage_only","max_concurrent_requests":1,"budget_limits":[{"amount_micros":100,"period":"total"},{"amount_micros":100,"period":"day"},{"amount_micros":100,"period":"month"}]}`
+	databasePath := filepath.Join(t.TempDir(), "cancel.db")
+	database, err := storage.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Unix(1, 0).UTC()
+	if err := storage.NewAPIKeyRepository(database).Insert(context.Background(), storage.APIKeyRecord{ID: "cancel-key", Name: "cancel-key", DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, CreatedAt: created, UpdatedAt: created, PolicyJSON: policy}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cancelSeen := make(chan struct{})
+	var cancelOnce sync.Once
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.Header.Get("Authorization") != "Bearer cancel-upstream" {
+			t.Errorf("upstream authorization = %q", request.Header.Get("Authorization"))
+		}
+		switch request.Header.Get("X-T120-Case") {
+		case "cancel":
+			response.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(response, "data: cancellation-fragment\n\n")
+			response.(http.Flusher).Flush()
+			<-request.Context().Done()
+			cancelOnce.Do(func() { close(cancelSeen) })
+		case "a-json":
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"body":"reused"}`)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	process := t120StartProcess(t, databasePath, clock, t120Pricing(t), upstream.URL, "cancel-upstream", "cancel-admin", string(pepper), io.Discard)
+	client := transport.NewClient()
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact","messages":[{"role":"user","content":"cancel prompt sentinel"}],"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+key.RawKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-T120-Case", "cancel")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment := make([]byte, len("data: cancellation-fragment\n\n"))
+	if _, err := io.ReadFull(response.Body, fragment); err != nil || string(fragment) != "data: cancellation-fragment\n\n" {
+		t.Fatalf("cancellation first fragment = %q/%v", fragment, err)
+	}
+	cancel()
+	response.Body.Close()
+	select {
+	case <-cancelSeen:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not observe client cancellation")
+	}
+
+	// Upstream cancellation must release the in-memory lease before the
+	// conservative accounting handoff completes.
+	reused, err := http.NewRequest(http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused.Header.Set("Authorization", "Bearer "+key.RawKey)
+	reused.Header.Set("Content-Type", "application/json")
+	reused.Header.Set("X-T120-Case", "a-json")
+	reusedResponse, err := client.Do(reused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := readT120Body(t, reusedResponse); reusedResponse.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("reused")) {
+		t.Fatalf("post-cancellation reuse = %d/%q", reusedResponse.StatusCode, body)
+	}
+	t120WaitFor(t, func() bool { return t120BudgetTotal(t, databasePath, "cancel-key") > 0 })
+	t120WaitFor(t, func() bool { return t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key") > 0 })
+	t120StopProcess(t, process)
+	if got := t120BudgetTotal(t, databasePath, "cancel-key"); got <= 0 {
+		t.Fatalf("cancellation did not persist conservative budget settlement: %d", got)
+	}
+	if got := t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key"); got <= 0 {
+		t.Fatalf("cancellation did not persist conservative token settlement: %d", got)
+	}
+
+	// Restart restores committed spend, but no active lease. A fresh request
+	// remains below the generous budget and proves the old lease was not loaded.
+	process = t120StartProcess(t, databasePath, clock, t120Pricing(t), upstream.URL, "cancel-upstream", "cancel-admin", string(pepper), io.Discard)
+	restarted, err := http.NewRequest(http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.Header.Set("Authorization", "Bearer "+key.RawKey)
+	restarted.Header.Set("Content-Type", "application/json")
+	restarted.Header.Set("X-T120-Case", "a-json")
+	restartedResponse, err := client.Do(restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := readT120Body(t, restartedResponse); restartedResponse.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("reused")) {
+		t.Fatalf("post-restart reuse = %d/%q", restartedResponse.StatusCode, body)
+	}
+	t120StopProcess(t, process)
 }
 
 // TestT120BlockedObservationAndSQLiteWritersAreOffTheTransportPath proves the
@@ -324,6 +586,8 @@ func TestT120BlockedObservationAndSQLiteWritersAreOffTheTransportPath(t *testing
 	t.Cleanup(func() { closeOnce(t, parserRelease); shutdownObservationWorker(t, worker) })
 	var calls atomic.Int32
 	firstFragment := make(chan struct{})
+	firstReceived := make(chan struct{})
+	secondFragment := make(chan struct{})
 	var firstOnce sync.Once
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
@@ -335,11 +599,14 @@ func TestT120BlockedObservationAndSQLiteWritersAreOffTheTransportPath(t *testing
 			select {
 			case <-request.Context().Done():
 				return
-			case <-time.After(20 * time.Millisecond):
+			case <-firstReceived:
 			}
 		}
 		_, _ = io.WriteString(response, "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n")
 		response.(http.Flusher).Flush()
+		if request.Header.Get("X-T120-Case") == "first" {
+			close(secondFragment)
+		}
 	}))
 	t.Cleanup(upstream.Close)
 	concurrency := limiter.NewConcurrencyLimiter()
@@ -370,6 +637,21 @@ func TestT120BlockedObservationAndSQLiteWritersAreOffTheTransportPath(t *testing
 	if _, err := io.ReadFull(first.Body, buffer); err != nil || string(buffer) != "data: first\n\n" {
 		t.Fatalf("first flush = %q/%v", buffer, err)
 	}
+	select {
+	case <-secondFragment:
+		t.Fatal("upstream wrote the second fragment before the client received the first")
+	default:
+	}
+	close(firstReceived)
+	secondBuffer := make([]byte, len("data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n"))
+	if _, err := io.ReadFull(first.Body, secondBuffer); err != nil {
+		t.Fatalf("second SSE fragment = %q/%v", secondBuffer, err)
+	}
+	select {
+	case <-secondFragment:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not observe the controlled second-fragment release")
+	}
 	bodyDone := make(chan struct{})
 	go func() { _, _ = io.ReadAll(first.Body); close(bodyDone) }()
 	select {
@@ -395,21 +677,20 @@ func TestT120BlockedObservationAndSQLiteWritersAreOffTheTransportPath(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("budget SQLite writer did not block")
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && concurrency.Len() != 0 {
-		time.Sleep(time.Millisecond)
-	}
-	if got := concurrency.Len(); got != 0 {
-		t.Fatalf("concurrency retained while worker blocked: %d", got)
-	}
+	// Keep the budget writer blocked while a new request reuses the released
+	// concurrency slot and receives its first fragment.
 	second := request("second")
+	secondFragmentBytes := make([]byte, len("data: first\n\n"))
+	if _, err := io.ReadFull(second.Body, secondFragmentBytes); err != nil || second.StatusCode != http.StatusOK || string(secondFragmentBytes) != "data: first\n\n" || calls.Load() != 2 {
+		t.Fatalf("concurrency reuse = %d/%q/%v", second.StatusCode, secondFragmentBytes, err)
+	}
+	closeOnce(t, budgetDB.release)
 	secondBody, err := io.ReadAll(second.Body)
 	second.Body.Close()
-	if err != nil || second.StatusCode != http.StatusOK || !bytes.Contains(secondBody, []byte("data: first")) || calls.Load() != 2 {
-		t.Fatalf("concurrency reuse = %d/%q/%v", second.StatusCode, secondBody, err)
+	if err != nil || !bytes.Contains(append(secondFragmentBytes, secondBody...), []byte("data: first")) {
+		t.Fatalf("follow-up stream close = %q/%v", secondBody, err)
 	}
 	closeOnce(t, tokenDB.release)
-	closeOnce(t, budgetDB.release)
 }
 
 func t120Pricing(t *testing.T) config.PricingConfig {
@@ -436,6 +717,16 @@ func t120Pricing(t *testing.T) config.PricingConfig {
 		t.Fatal(err)
 	}
 	return pricing
+}
+
+func readT120Body(t *testing.T, response *http.Response) []byte {
+	t.Helper()
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 type t120Process struct {
@@ -477,7 +768,7 @@ func newT120Upstream(t *testing.T, credential string) *t120Upstream {
 			}
 		case "a-json", "a-after-reset":
 			response.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(response, `{"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"body":"json-body"}`)
+			_, _ = io.WriteString(response, `{"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"body":"json-body","sentinel":"t120-unique-response-sentinel"}`)
 		case "json":
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(response, `{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},"body":"json-body"}`)
@@ -508,7 +799,7 @@ func newT120Upstream(t *testing.T, credential string) *t120Upstream {
 		case "error":
 			response.Header().Set("Content-Type", "application/json")
 			response.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = io.WriteString(response, `{"error":"upstream-error"}`)
+			_, _ = io.WriteString(response, `{"error":"t120-unique-response-sentinel"}`)
 		default:
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(response, `{"body":"json-body","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
@@ -657,6 +948,25 @@ func t120BudgetTotal(t *testing.T, path, key string) int64 {
 	for _, bucket := range buckets {
 		if bucket.APIKeyID == key {
 			return bucket.SpentMicros
+		}
+	}
+	return 0
+}
+
+func t120TokenCommitted(t *testing.T, path string, now time.Time, key string) int64 {
+	t.Helper()
+	database, err := storage.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	buckets, err := storage.NewUsageBucketRepository(database).LoadUnexpired(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bucket := range buckets {
+		if bucket.APIKeyID == key {
+			return bucket.CommittedTokens
 		}
 	}
 	return 0
