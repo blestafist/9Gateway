@@ -31,6 +31,11 @@ var (
 	// cost. Such a cost is conservatively charged when that is representable.
 	ErrBudgetInvalidActual = errors.New("invalid budget actual cost")
 	ErrBudgetArithmetic    = errors.New("budget arithmetic failure")
+	// ErrBudgetPolicyReplacementConflict identifies an admission or replacement
+	// made with a policy which is no longer the published policy for the key.
+	// It is deliberately separate from capacity: stale principals must not be
+	// retried as if they merely ran out of money.
+	ErrBudgetPolicyReplacementConflict = errors.New("budget policy replacement conflict")
 )
 
 // BudgetCapacityError retains the daily reset which can make an otherwise
@@ -187,6 +192,11 @@ type BudgetLimiter struct {
 	lifecycle sync.RWMutex
 	shards    [budgetShardCount]budgetShard
 	sequence  atomic.Uint64
+	policyMu  sync.RWMutex
+	// policies is the last successfully published policy identity for each key.
+	// Reserve checks this while holding policyMu, making an authenticated
+	// principal from before a committed replacement fail closed.
+	policies  map[string]BudgetPolicy
 	sinkMu    sync.RWMutex
 	deltaSink func(CommittedBudgetDelta)
 	now       Clock
@@ -201,32 +211,38 @@ type BudgetReservation struct {
 }
 
 type budgetReservationOwnership struct {
-	mu         sync.Mutex
-	limiter    *BudgetLimiter
-	keyID      string
-	state      *budgetState
-	generation uint64
-	amount     accounting.Money
-	dayStart   time.Time
-	monthStart time.Time
-	finalized  bool
-	finalErr   error
-	result     BudgetSettlementResult
-	ticket     *BudgetAdjustmentTicket
+	mu            sync.Mutex
+	limiter       *BudgetLimiter
+	keyID         string
+	state         *budgetState
+	generation    uint64
+	amount        accounting.Money
+	dayStart      time.Time
+	monthStart    time.Time
+	totalCaptured bool
+	dayCaptured   bool
+	monthCaptured bool
+	finalized     bool
+	finalErr      error
+	result        BudgetSettlementResult
+	ticket        *BudgetAdjustmentTicket
 }
 
 // BudgetAdjustmentTicket owns only stable limiter identity and generation. It
 // deliberately does not retain a reservation or composite lease.
 type BudgetAdjustmentTicket struct {
-	mu         sync.Mutex
-	limiter    *BudgetLimiter
-	keyID      string
-	generation uint64
-	reserved   accounting.Money
-	dayStart   time.Time
-	monthStart time.Time
-	consumed   bool
-	resultErr  error
+	mu            sync.Mutex
+	limiter       *BudgetLimiter
+	keyID         string
+	generation    uint64
+	reserved      accounting.Money
+	dayStart      time.Time
+	monthStart    time.Time
+	totalCaptured bool
+	dayCaptured   bool
+	monthCaptured bool
+	consumed      bool
+	resultErr     error
 }
 
 func NewBudgetLimiter(clocks ...Clock) *BudgetLimiter {
@@ -234,7 +250,7 @@ func NewBudgetLimiter(clocks ...Clock) *BudgetLimiter {
 	if len(clocks) != 0 {
 		now = clocks[0]
 	}
-	limiter := &BudgetLimiter{now: now}
+	limiter := &BudgetLimiter{now: now, policies: make(map[string]BudgetPolicy)}
 	for index := range limiter.shards {
 		limiter.shards[index].states = make(map[string]*budgetState)
 	}
@@ -388,13 +404,96 @@ func (limiter *BudgetLimiter) LoadCommitted(values []CommittedBudget) error {
 	return limiter.LoadSpent(values)
 }
 
+// RegisterPolicy seeds the identity of a policy loaded before serving. It is
+// runtime metadata only; committed spend remains in the period-keyed buckets.
+func (limiter *BudgetLimiter) RegisterPolicy(keyID string, policy BudgetPolicy) {
+	if limiter == nil || !validKeyID(keyID) || !validPolicy(policy) {
+		return
+	}
+	limiter.policyMu.Lock()
+	if limiter.policies == nil {
+		limiter.policies = make(map[string]BudgetPolicy)
+	}
+	limiter.policies[keyID] = policy
+	limiter.policyMu.Unlock()
+}
+
+// ReplacePolicy holds out admission while a durable policy update and its
+// prepared authentication snapshot are committed. Existing state is retained;
+// only the enforcement fields change, while reservations retain their captured
+// bucket identities for later settlement.
+func (limiter *BudgetLimiter) ReplacePolicy(keyID string, oldPolicy, newPolicy BudgetPolicy, commit func() error) error {
+	if limiter == nil {
+		if commit == nil {
+			return nil
+		}
+		return commit()
+	}
+	if !validKeyID(keyID) || !validPolicy(oldPolicy) || !validPolicy(newPolicy) {
+		return ErrBudgetInvalid
+	}
+	limiter.policyMu.Lock()
+	defer limiter.policyMu.Unlock()
+	if current, ok := limiter.policies[keyID]; ok && !sameBudgetPolicy(current, oldPolicy) {
+		return ErrBudgetPolicyReplacementConflict
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return err
+		}
+	}
+	if limiter.policies == nil {
+		limiter.policies = make(map[string]BudgetPolicy)
+	}
+	limiter.policies[keyID] = newPolicy
+	shard := limiter.shard(keyID)
+	shard.mu.Lock()
+	if state := shard.states[keyID]; state != nil {
+		applyBudgetPolicyLocked(state, newPolicy)
+	}
+	shard.mu.Unlock()
+	return nil
+}
+
+func (limiter *BudgetLimiter) AllowsPolicyReplacement(keyID string, oldPolicy, newPolicy BudgetPolicy) bool {
+	if limiter == nil {
+		return true
+	}
+	limiter.policyMu.RLock()
+	defer limiter.policyMu.RUnlock()
+	current, ok := limiter.policies[keyID]
+	return !ok || sameBudgetPolicy(current, oldPolicy)
+}
+
+// PolicyCurrent reports whether the policy carried by an authenticated
+// principal is still the committed policy. It is checked even for an
+// unlimited replacement: otherwise a principal that carried a removed budget
+// could skip Reserve entirely after the limit was removed.
+func (limiter *BudgetLimiter) PolicyCurrent(keyID string, policy BudgetPolicy) bool {
+	if limiter == nil {
+		return true
+	}
+	limiter.policyMu.RLock()
+	defer limiter.policyMu.RUnlock()
+	current, ok := limiter.policies[keyID]
+	return !ok || sameBudgetPolicy(current, policy)
+}
+
 // Reserve admits candidate against spent plus active reservations.
 func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candidate accounting.Money) (*BudgetReservation, error) {
 	if limiter == nil || !validKeyID(keyID) || !validKnownMoney(candidate) || !validPolicy(policy) {
 		return nil, ErrBudgetInvalid
 	}
+	// The policy lock spans validation and the entire admission mutation. An
+	// administrator therefore cannot publish a replacement between the
+	// principal's policy check and reservation.
+	limiter.policyMu.RLock()
+	defer limiter.policyMu.RUnlock()
 	limiter.lifecycle.RLock()
 	defer limiter.lifecycle.RUnlock()
+	if current, ok := limiter.policies[keyID]; ok && !sameBudgetPolicy(current, policy) {
+		return nil, ErrBudgetPolicyReplacementConflict
+	}
 	shard := limiter.shard(keyID)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -403,18 +502,19 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 		if err := validateBudgetState(state); err != nil {
 			return nil, err
 		}
-		if state.hasLimit && (!policy.Limited || !sameMoney(state.total, policy.Total)) {
-			return nil, ErrBudgetInvalid
-		}
-		if state.hasDayLimit && (!policy.DayLimited || !sameMoney(state.dayLimit, policy.Day)) {
-			return nil, ErrBudgetInvalid
-		}
-		if state.hasMonthLimit && (!policy.MonthLimited || !sameMoney(state.monthLimit, policy.Month)) {
-			return nil, ErrBudgetInvalid
+		// Limiter-only callers may not have a startup policy registration. Keep
+		// the historical safety check for those callers; the registered path
+		// deliberately permits amount changes only through ReplacePolicy.
+		if _, registered := limiter.policies[keyID]; !registered {
+			if state.hasLimit && (!policy.Limited || !sameMoney(state.total, policy.Total)) ||
+				state.hasDayLimit && (!policy.DayLimited || !sameMoney(state.dayLimit, policy.Day)) ||
+				state.hasMonthLimit && (!policy.MonthLimited || !sameMoney(state.monthLimit, policy.Month)) {
+				return nil, ErrBudgetInvalid
+			}
 		}
 	}
 	if !policy.Limited && !policy.DayLimited && !policy.MonthLimited {
-		return newBudgetReservation(limiter, keyID, nil, 0, candidate), nil
+		return newBudgetReservation(limiter, keyID, nil, 0, candidate, time.Time{}, time.Time{}), nil
 	}
 	if shard.states == nil {
 		shard.states = make(map[string]*budgetState)
@@ -528,7 +628,7 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 		return nil, &BudgetCapacityError{ResetAt: reset, TotalRejected: totalRejected}
 	}
 	if isZeroMoney(candidate) {
-		return newBudgetReservation(limiter, keyID, nil, 0, candidate), nil
+		return newBudgetReservation(limiter, keyID, nil, 0, candidate, time.Time{}, time.Time{}), nil
 	}
 	newActive, err := active.Add(candidate)
 	if err != nil || !newActive.Known() {
@@ -546,7 +646,8 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 		if !ok {
 			return nil, ErrBudgetState
 		}
-		state = &budgetState{spent: spent, active: newActive, dayBuckets: make(map[time.Time]budgetDayState), monthBuckets: make(map[time.Time]budgetDayState), total: policy.Total, hasLimit: policy.Limited, dayLimit: policy.Day, hasDayLimit: policy.DayLimited, monthLimit: policy.Month, hasMonthLimit: policy.MonthLimited, generation: generation}
+		state = &budgetState{spent: spent, active: newActive, dayBuckets: make(map[time.Time]budgetDayState), monthBuckets: make(map[time.Time]budgetDayState), generation: generation}
+		applyBudgetPolicyLocked(state, policy)
 		state.totalLoaded = policy.Limited
 		if policy.DayLimited {
 			state.dayBuckets[dayStart] = budgetDayState{spent: daySpent, active: newDayActive}
@@ -560,6 +661,7 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 		}
 		shard.states[keyID] = state
 	} else {
+		applyBudgetPolicyLocked(state, policy)
 		if policy.Limited {
 			state.total, state.hasLimit = policy.Total, true
 		}
@@ -594,7 +696,7 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 	if !policy.MonthLimited {
 		monthStart = time.Time{}
 	}
-	return newBudgetReservation(limiter, keyID, state, state.generation, candidate, dayStart, monthStart), nil
+	return newBudgetReservation(limiter, keyID, state, state.generation, candidate, dayStart, monthStart, policy.Limited, policy.DayLimited, policy.MonthLimited), nil
 }
 
 func (limiter *BudgetLimiter) TryReserve(keyID string, policy BudgetPolicy, candidate accounting.Money) (*BudgetReservation, error) {
@@ -760,7 +862,7 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 	}
 	newActive, subErr := state.active.Subtract(ownership.amount)
 	newSpent, addErr := state.spent, error(nil)
-	if state.hasLimit {
+	if ownership.totalCaptured {
 		newSpent, addErr = state.spent.Add(charge)
 	}
 	day := budgetDayState{spent: knownZeroMoney(), active: knownZeroMoney()}
@@ -771,11 +873,11 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 	}
 	newDayActive, daySubErr := day.active, error(nil)
 	newDaySpent, dayAddErr := day.spent, error(nil)
-	if state.hasDayLimit {
+	if ownership.dayCaptured {
 		newDayActive, daySubErr = day.active.Subtract(ownership.amount)
 		newDaySpent, dayAddErr = day.spent.Add(charge)
 	}
-	if !state.hasDayLimit {
+	if !ownership.dayCaptured {
 		newDayActive, newDaySpent, daySubErr, dayAddErr = day.active, day.spent, nil, nil
 	}
 	month := budgetDayState{spent: knownZeroMoney(), active: knownZeroMoney()}
@@ -784,7 +886,7 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 	}
 	newMonthActive, monthSubErr := month.active, error(nil)
 	newMonthSpent, monthAddErr := month.spent, error(nil)
-	if state.hasMonthLimit {
+	if ownership.monthCaptured {
 		newMonthActive, monthSubErr = month.active.Subtract(ownership.amount)
 		newMonthSpent, monthAddErr = month.spent.Add(charge)
 	}
@@ -800,10 +902,10 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 		// A failed known-cost transition gets one conservative attempt. If even
 		// that cannot be represented, retaining active state is safer than
 		// pretending a charge was accounted for.
-		if state.hasLimit && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
+		if ownership.totalCaptured && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
 			newSpent, addErr = state.spent.Add(ownership.amount)
 		}
-		if state.hasMonthLimit && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
+		if ownership.monthCaptured && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
 			newMonthSpent, monthAddErr = month.spent.Add(ownership.amount)
 		}
 		if subErr != nil || addErr != nil || monthAddErr != nil || !newSpent.Known() || !newMonthSpent.Known() {
@@ -816,13 +918,13 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 		charge = ownership.amount
 	}
 	state.active, state.spent = newActive, newSpent
-	if state.hasDayLimit && !ownership.dayStart.IsZero() {
+	if ownership.dayCaptured && !ownership.dayStart.IsZero() {
 		if state.dayBuckets == nil {
 			state.dayBuckets = make(map[time.Time]budgetDayState)
 		}
 		state.dayBuckets[ownership.dayStart] = budgetDayState{spent: newDaySpent, active: newDayActive}
 	}
-	if state.hasMonthLimit && !ownership.monthStart.IsZero() {
+	if ownership.monthCaptured && !ownership.monthStart.IsZero() {
 		if state.monthBuckets == nil {
 			state.monthBuckets = make(map[time.Time]budgetDayState)
 		}
@@ -834,13 +936,13 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 	}
 	var deltas []CommittedBudgetDelta
 	if !isZeroMoney(charge) {
-		if state.hasLimit {
+		if ownership.totalCaptured {
 			deltas = append(deltas, *checkedBudgetDelta(ownership.keyID, result.CommittedDelta, BudgetPeriodTotal, time.Time{}))
 		}
-		if state.hasDayLimit && !ownership.dayStart.IsZero() {
+		if ownership.dayCaptured && !ownership.dayStart.IsZero() {
 			deltas = append(deltas, *checkedBudgetDelta(ownership.keyID, result.CommittedDelta, BudgetPeriodDay, ownership.dayStart))
 		}
-		if state.hasMonthLimit && !ownership.monthStart.IsZero() {
+		if ownership.monthCaptured && !ownership.monthStart.IsZero() {
 			deltas = append(deltas, *checkedBudgetDelta(ownership.keyID, result.CommittedDelta, BudgetPeriodMonth, ownership.monthStart))
 		}
 	}
@@ -850,7 +952,7 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 	sink := limiter.sink()
 	var adjustment *BudgetAdjustmentTicket
 	if deferred && result.Error == nil {
-		adjustment = &BudgetAdjustmentTicket{limiter: limiter, keyID: ownership.keyID, generation: ownership.generation, reserved: ownership.amount, dayStart: ownership.dayStart, monthStart: ownership.monthStart}
+		adjustment = &BudgetAdjustmentTicket{limiter: limiter, keyID: ownership.keyID, generation: ownership.generation, reserved: ownership.amount, dayStart: ownership.dayStart, monthStart: ownership.monthStart, totalCaptured: ownership.totalCaptured, dayCaptured: ownership.dayCaptured, monthCaptured: ownership.monthCaptured}
 	}
 	shard.mu.Unlock()
 	limiter.lifecycle.RUnlock()
@@ -926,14 +1028,14 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 		increase, subErr := actual.Subtract(reserved)
 		var addErr error
 		newSpent, addErr = state.spent, nil
-		if state.hasLimit {
+		if ticket.totalCaptured {
 			newSpent, addErr = state.spent.Add(increase)
 		}
 		if subErr != nil || addErr != nil || !newSpent.Known() {
 			ticket.resultErr = &BudgetSettlementError{Cause: ErrBudgetArithmetic, Conservative: true}
 		} else {
 			delta, ok = moneyMicros(increase)
-			if !ticket.dayStart.IsZero() {
+			if ticket.dayCaptured && !ticket.dayStart.IsZero() {
 				day := state.dayBuckets[ticket.dayStart]
 				var dayErr error
 				newDaySpent, dayErr = day.spent.Add(increase)
@@ -943,7 +1045,7 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 					dayDelta = delta
 				}
 			}
-			if !ticket.monthStart.IsZero() {
+			if ticket.monthCaptured && !ticket.monthStart.IsZero() {
 				month := state.monthBuckets[ticket.monthStart]
 				newMonthSpent, addErr = month.spent.Add(increase)
 				if addErr != nil || !newMonthSpent.Known() {
@@ -957,7 +1059,7 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 		refund, subErr := reserved.Subtract(actual)
 		var subErr2 error
 		newSpent, subErr2 = state.spent, nil
-		if state.hasLimit {
+		if ticket.totalCaptured {
 			newSpent, subErr2 = state.spent.Subtract(refund)
 		}
 		if subErr != nil || subErr2 != nil || !newSpent.Known() {
@@ -966,7 +1068,7 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 			r, _ := moneyMicros(refund)
 			delta = -r
 			ok = true
-			if !ticket.dayStart.IsZero() {
+			if ticket.dayCaptured && !ticket.dayStart.IsZero() {
 				day := state.dayBuckets[ticket.dayStart]
 				newDaySpent, subErr2 = day.spent.Subtract(refund)
 				if subErr2 != nil || !newDaySpent.Known() {
@@ -975,7 +1077,7 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 					dayDelta = delta
 				}
 			}
-			if !ticket.monthStart.IsZero() {
+			if ticket.monthCaptured && !ticket.monthStart.IsZero() {
 				month := state.monthBuckets[ticket.monthStart]
 				newMonthSpent, subErr2 = month.spent.Subtract(refund)
 				if subErr2 != nil || !newMonthSpent.Known() {
@@ -987,21 +1089,21 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 		}
 	} else {
 		newSpent, ok = state.spent, true
-		if !ticket.dayStart.IsZero() {
+		if ticket.dayCaptured && !ticket.dayStart.IsZero() {
 			newDaySpent = state.dayBuckets[ticket.dayStart].spent
 		}
-		if !ticket.monthStart.IsZero() {
+		if ticket.monthCaptured && !ticket.monthStart.IsZero() {
 			newMonthSpent = state.monthBuckets[ticket.monthStart].spent
 		}
 	}
 	if ticket.resultErr == nil && ok {
 		state.spent = newSpent
-		if !ticket.dayStart.IsZero() {
+		if ticket.dayCaptured && !ticket.dayStart.IsZero() {
 			day := state.dayBuckets[ticket.dayStart]
 			day.spent = newDaySpent
 			state.dayBuckets[ticket.dayStart] = day
 		}
-		if !ticket.monthStart.IsZero() {
+		if ticket.monthCaptured && !ticket.monthStart.IsZero() {
 			month := state.monthBuckets[ticket.monthStart]
 			month.spent = newMonthSpent
 			state.monthBuckets[ticket.monthStart] = month
@@ -1014,7 +1116,7 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 	}
 	err := ticket.resultErr
 	var deltaValue *CommittedBudgetDelta
-	if err == nil && delta != 0 && state.hasLimit {
+	if err == nil && delta != 0 && ticket.totalCaptured {
 		deltaValue = checkedBudgetDelta(keyID, delta, BudgetPeriodTotal, time.Time{})
 	}
 	sink := limiter.sink()
@@ -1080,6 +1182,18 @@ func validPolicy(policy BudgetPolicy) bool {
 	}
 	return policy.MonthLimited == validKnownMoney(policy.Month)
 }
+func sameBudgetPolicy(first, second BudgetPolicy) bool {
+	return first.Limited == second.Limited && first.DayLimited == second.DayLimited && first.MonthLimited == second.MonthLimited &&
+		(!first.Limited || sameMoney(first.Total, second.Total)) &&
+		(!first.DayLimited || sameMoney(first.Day, second.Day)) &&
+		(!first.MonthLimited || sameMoney(first.Month, second.Month))
+}
+func applyBudgetPolicyLocked(state *budgetState, policy BudgetPolicy) {
+	state.total, state.hasLimit = policy.Total, policy.Limited
+	state.dayLimit, state.hasDayLimit = policy.Day, policy.DayLimited
+	state.monthLimit, state.hasMonthLimit = policy.Month, policy.MonthLimited
+	state.totalLoaded = state.totalLoaded || policy.Limited
+}
 func validKeyID(keyID string) bool { return keyID != "" }
 func validKnownMoney(value accounting.Money) bool {
 	micros, known := value.Micros()
@@ -1106,12 +1220,6 @@ func validateBudgetState(state *budgetState) error {
 	if _, err := state.spent.Add(state.active); err != nil {
 		return ErrBudgetState
 	}
-	if state.hasLimit {
-		fits, err := state.active.LessOrEqual(state.total)
-		if err != nil || !fits {
-			return ErrBudgetState
-		}
-	}
 	if state.hasDayLimit && !validKnownMoney(state.dayLimit) {
 		return ErrBudgetState
 	}
@@ -1125,12 +1233,6 @@ func validateBudgetState(state *budgetState) error {
 		if _, err := bucket.spent.Add(bucket.active); err != nil {
 			return ErrBudgetState
 		}
-		if state.hasDayLimit {
-			fits, err := bucket.active.LessOrEqual(state.dayLimit)
-			if err != nil || !fits {
-				return ErrBudgetState
-			}
-		}
 	}
 	for start, bucket := range state.monthBuckets {
 		if !validMonthStart(start) || !validKnownMoney(bucket.spent) || !validKnownMoney(bucket.active) {
@@ -1138,12 +1240,6 @@ func validateBudgetState(state *budgetState) error {
 		}
 		if _, err := bucket.spent.Add(bucket.active); err != nil {
 			return ErrBudgetState
-		}
-		if state.hasMonthLimit {
-			fits, err := bucket.active.LessOrEqual(state.monthLimit)
-			if err != nil || !fits {
-				return ErrBudgetState
-			}
 		}
 	}
 	return nil
@@ -1164,14 +1260,16 @@ func (limiter *BudgetLimiter) unlockAllShards() {
 		limiter.shards[index].mu.Unlock()
 	}
 }
-func newBudgetReservation(limiter *BudgetLimiter, keyID string, state *budgetState, generation uint64, amount accounting.Money, starts ...time.Time) *BudgetReservation {
-	start := time.Time{}
-	month := time.Time{}
-	if len(starts) > 0 {
-		start = starts[0]
+func newBudgetReservation(limiter *BudgetLimiter, keyID string, state *budgetState, generation uint64, amount accounting.Money, dayStart, monthStart time.Time, captured ...bool) *BudgetReservation {
+	ownership := &budgetReservationOwnership{limiter: limiter, keyID: keyID, state: state, generation: generation, amount: amount, dayStart: dayStart, monthStart: monthStart}
+	if len(captured) > 0 {
+		ownership.totalCaptured = captured[0]
 	}
-	if len(starts) > 1 {
-		month = starts[1]
+	if len(captured) > 1 {
+		ownership.dayCaptured = captured[1]
 	}
-	return &BudgetReservation{ownership: &budgetReservationOwnership{limiter: limiter, keyID: keyID, state: state, generation: generation, amount: amount, dayStart: start, monthStart: month}}
+	if len(captured) > 2 {
+		ownership.monthCaptured = captured[2]
+	}
+	return &BudgetReservation{ownership: ownership}
 }

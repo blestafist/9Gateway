@@ -164,6 +164,29 @@ func NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 			}
 		}
 	}
+	if tokenConfig.BudgetLimiter != nil {
+		service.allowBudgetPolicyReplacement = func(id string, oldPolicy, newPolicy limiter.BudgetPolicy) bool {
+			return tokenConfig.BudgetLimiter.AllowsPolicyReplacement(id, oldPolicy, newPolicy)
+		}
+		service.replaceBudgetPolicy = func(id string, oldPolicy, newPolicy limiter.BudgetPolicy, commit func() error) error {
+			if err := tokenConfig.BudgetLimiter.ReplacePolicy(id, oldPolicy, newPolicy, commit); errors.Is(err, limiter.ErrBudgetPolicyReplacementConflict) {
+				return errPolicyConflict
+			} else {
+				return err
+			}
+		}
+		if records, listErr := repository.List(context.Background()); listErr != nil {
+			return nil, errAdminKeyCreation
+		} else {
+			for _, record := range records {
+				policy, parseErr := auth.ParsePolicyJSON([]byte(record.PolicyJSON))
+				if parseErr != nil {
+					return nil, errAdminKeyCreation
+				}
+				tokenConfig.BudgetLimiter.RegisterPolicy(record.ID, budgetPolicy(policy))
+			}
+		}
+	}
 	admin := &adminHandler{credential: adminCredential, service: service}
 	router := routeWithAdmin(proxy, admin, service.auth)
 	return newHandlerWithCompletionLogger(completionLogger, router), nil
@@ -358,6 +381,12 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	targetURL.Fragment = ""
 
 	principal, authenticated := PrincipalFromContext(request.Context())
+	if authenticated && handler.tokenConfig.BudgetLimiter != nil && !handler.tokenConfig.BudgetLimiter.PolicyCurrent(principal.ID, budgetPolicy(principal.Policy)) {
+		setTerminal := terminalMetadataFromContext(request.Context()).set
+		setTerminal(TerminalMetadata{Outcome: TerminalOutcomePreUpstream})
+		writeGatewayError(response, gatewayErrorInvalidAPIKey, "")
+		return
+	}
 	var inspectionLease *limiter.Lease
 	var upstreamResponse *http.Response
 	var lifecycleLease *limiter.ResourceLease
@@ -464,7 +493,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var budgetPlan *accounting.BudgetReservationPlan
 	var selectedPricing accounting.PricingResolution
 	if authenticated {
-		if total, limited := principal.Policy.TotalBudget(); limited || func() bool { _, day := principal.Policy.DailyBudget(); return day }() {
+		if total, limited := principal.Policy.TotalBudget(); limited || func() bool { _, day := principal.Policy.DailyBudget(); return day }() || func() bool { _, month := principal.Policy.MonthlyBudget(); return month }() {
 			// Lifetime budget admission is intentionally restricted to known
 			// generation endpoints. Generic endpoints remain transparent only
 			// for keys without a budget policy.
@@ -532,6 +561,15 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			handler.writeAdmissionError(response, admissionErr)
 			return
 		}
+	}
+	// A budget replacement may add enforcement to a previously unlimited
+	// principal, in which case no BudgetReservation was created above. Recheck
+	// immediately before constructing/starting upstream work so a snapshot that
+	// became stale during the rest of admission cannot bypass the new policy.
+	if authenticated && handler.tokenConfig.BudgetLimiter != nil && !handler.tokenConfig.BudgetLimiter.PolicyCurrent(principal.ID, budgetPolicy(principal.Policy)) {
+		setTerminal(TerminalOutcomePreUpstream)
+		writeGatewayError(response, gatewayErrorInvalidAPIKey, "")
+		return
 	}
 	upstreamRequest, err := http.NewRequestWithContext(proxyContext, request.Method, targetURL.String(), requestBody)
 	if err != nil {
@@ -698,7 +736,8 @@ func shouldInspectRequestMetadata(request *http.Request) bool {
 	// byte-transparent and are not read solely to discover their size.
 	_, budgetLimited := principal.Policy.TotalBudget()
 	_, dayLimited := principal.Policy.DailyBudget()
-	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited || dayLimited
+	_, monthLimited := principal.Policy.MonthlyBudget()
+	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited || dayLimited || monthLimited
 }
 
 func eligibleTokenRequest(request *http.Request) bool {

@@ -15,6 +15,15 @@ rules. It may include exact/glob allow and deny model lists, request windows,
 token windows, maximum concurrency, budget, token mode, and logging policy.
 Deny takes precedence. Do not add regex without a concrete need.
 
+Administrative replacement prepares the complete authentication snapshot before
+the durable update, then serializes the commit through token and budget
+admission boundaries before publishing the snapshot. Budget spend is keyed by
+API key and period identity rather than configured amount, so amount changes,
+removal, and re-addition preserve historical spend. Reservations retain their
+captured total/day/month buckets through replacement and settlement. A
+principal captured before a committed replacement is rejected rather than being
+allowed to use stale budget limits.
+
 ## Request Limits
 
 Request limits are amount plus duration; RPM is the ordinary `amount / 1m`

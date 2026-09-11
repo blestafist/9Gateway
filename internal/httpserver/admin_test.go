@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -604,11 +605,152 @@ func TestAdminPolicyReplacementBlocksStaleHTTPAdmission(t *testing.T) {
 	}
 }
 
+func TestAdminBudgetReplacementBlocksStaleHTTPAdmissionAndKeepsDurablePolicy(t *testing.T) {
+	pepper := []byte("budget-replacement-race-pepper")
+	key := generatedForAdmin(t, pepper)
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	base := storage.NewAPIKeyRepository(database)
+	oldJSON := `{"budget_limits":[{"amount_micros":10,"period":"total"},{"amount_micros":10,"period":"day"},{"amount_micros":10,"period":"month"}]}`
+	newJSON := `{"budget_limits":[{"amount_micros":1,"period":"total"},{"amount_micros":1,"period":"day"},{"amount_micros":1,"period":"month"}]}`
+	if err := base.Insert(context.Background(), storage.APIKeyRecord{ID: "budget-race", Name: "budget-race", DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(), PolicyJSON: oldJSON}); err != nil {
+		t.Fatal(err)
+	}
+	repository := &blockingPolicyRecordRepository{APIKeyRepository: base, entered: make(chan struct{}), release: make(chan struct{})}
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	budget := limiter.NewBudgetLimiter()
+	pricing := accounting.NewPricingResolver(t110Pricing(t, "rules:\n  - model: budget-race\n    input_per_million_micros: 1000000\n    output_per_million_micros: 1000000\n"))
+	handler, err := NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(transport.NewClient(), upstream.URL, "upstream", "admin", string(pepper), repository, nil, nil, nil, nil, TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, PricingResolver: pricing, BudgetLimiter: budget}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	adminRequest := newPolicyRequest(t, server.URL, "budget-race", `{"enabled":true,"policy":`+newJSON+`}`, "admin")
+	adminRequest.Method = http.MethodPut
+	adminDone := make(chan *http.Response, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(adminRequest)
+		if requestErr != nil {
+			t.Errorf("admin request: %v", requestErr)
+			return
+		}
+		adminDone <- response
+	}()
+	<-repository.entered
+	publicRequest, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"budget-race"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicRequest.Header.Set("Authorization", "Bearer "+key.RawKey)
+	publicRequest.Header.Set("Content-Type", "application/json")
+	publicDone := make(chan *http.Response, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(publicRequest)
+		if requestErr != nil {
+			t.Errorf("public request: %v", requestErr)
+			return
+		}
+		publicDone <- response
+	}()
+	select {
+	case response := <-publicDone:
+		response.Body.Close()
+		t.Fatal("stale budget request passed policy barrier before commit")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(repository.release)
+	adminResponse := <-adminDone
+	adminBody, _ := io.ReadAll(adminResponse.Body)
+	adminResponse.Body.Close()
+	if adminResponse.StatusCode != http.StatusOK {
+		t.Fatalf("budget policy update = %d/%s", adminResponse.StatusCode, adminBody)
+	}
+	publicResponse := <-publicDone
+	publicBody, _ := io.ReadAll(publicResponse.Body)
+	publicResponse.Body.Close()
+	if publicResponse.StatusCode != http.StatusUnauthorized || upstreamCalls.Load() != 0 {
+		t.Fatalf("stale budget admission = %d/%s, upstream calls %d", publicResponse.StatusCode, publicBody, upstreamCalls.Load())
+	}
+	record, err := base.GetByID(context.Background(), "budget-race")
+	if err != nil || record.PolicyJSON != newJSON {
+		t.Fatalf("durable budget policy = %#v/%v", record, err)
+	}
+}
+
+func TestAdminBudgetReplacementRepositoryFailureLeavesRuntimeAndSnapshotUnchanged(t *testing.T) {
+	pepper := []byte("budget-replacement-failure-pepper")
+	key := generatedForAdmin(t, pepper)
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	base := storage.NewAPIKeyRepository(database)
+	oldJSON := `{"budget_limits":[{"amount_micros":10,"period":"total"}]}`
+	newJSON := `{"budget_limits":[{"amount_micros":1,"period":"total"}]}`
+	if err := base.Insert(context.Background(), storage.APIKeyRecord{ID: "budget-failure", Name: "budget-failure", DisplayPrefix: key.DisplayPrefix, Digest: key.Digest, Enabled: true, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(), PolicyJSON: oldJSON}); err != nil {
+		t.Fatal(err)
+	}
+	repository := &failingPolicyRecordRepository{APIKeyRepository: base, err: errors.New("injected repository failure")}
+	budget := limiter.NewBudgetLimiter()
+	oldPolicy, _ := auth.ParsePolicyJSON([]byte(oldJSON))
+	oldTotal, _ := oldPolicy.TotalBudget()
+	budget.RegisterPolicy("budget-failure", limiter.BudgetPolicy{Total: oldTotal, Limited: true})
+	service, err := newAdminKeyService(repository, pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.allowBudgetPolicyReplacement = func(id string, old, next limiter.BudgetPolicy) bool {
+		return budget.AllowsPolicyReplacement(id, old, next)
+	}
+	service.replaceBudgetPolicy = func(id string, old, next limiter.BudgetPolicy, commit func() error) error {
+		return budget.ReplacePolicy(id, old, next, commit)
+	}
+	if _, err := service.updatePolicy(context.Background(), "budget-failure", true, []byte(newJSON)); err == nil {
+		t.Fatal("repository failure unexpectedly succeeded")
+	}
+	principal, err := service.auth.Authenticate(key.RawKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, present := principal.Policy.TotalBudget(); !present || got != oldTotal {
+		t.Fatalf("snapshot budget changed after repository failure = %v/%t", got, present)
+	}
+	reservation, err := budget.Reserve("budget-failure", limiter.LimitedBudgetPolicy(oldTotal), oldTotal)
+	if err != nil {
+		t.Fatalf("old runtime budget changed after repository failure = %v", err)
+	}
+	_ = reservation.ReleaseBeforeUpstream()
+	record, err := base.GetByID(context.Background(), "budget-failure")
+	if err != nil || record.PolicyJSON != oldJSON {
+		t.Fatalf("durable policy changed after repository failure = %#v/%v", record, err)
+	}
+}
+
 type blockingPolicyRecordRepository struct {
 	*storage.APIKeyRepository
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type failingPolicyRecordRepository struct {
+	*storage.APIKeyRepository
+	err error
+}
+
+func (repository *failingPolicyRecordRepository) UpdatePolicyRecord(context.Context, string, bool, string) (storage.APIKeyRecord, error) {
+	return storage.APIKeyRecord{}, repository.err
 }
 
 func (repository *blockingPolicyRecordRepository) UpdatePolicyRecord(ctx context.Context, id string, enabled bool, policy string) (storage.APIKeyRecord, error) {

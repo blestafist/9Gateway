@@ -97,9 +97,6 @@ func run() error {
 		return err
 	}
 	allowedWindows := make(map[string]map[limiter.TokenWindow]struct{}, len(keyRecords))
-	allowedBudgets := make(map[string]accounting.Money, len(keyRecords))
-	allowedDays := make(map[string]struct{}, len(keyRecords))
-	allowedMonths := make(map[string]struct{}, len(keyRecords))
 	for _, record := range keyRecords {
 		policy, policyErr := auth.ParsePolicyJSONWithTokenMode([]byte(record.PolicyJSON), auth.TokenMode(cfg.Tokenizer.Mode))
 		if policyErr != nil {
@@ -110,15 +107,6 @@ func run() error {
 			windows[window] = struct{}{}
 		}
 		allowedWindows[record.ID] = windows
-		if total, limited := policy.TotalBudget(); limited {
-			allowedBudgets[record.ID] = total
-		}
-		if _, limited := policy.DailyBudget(); limited {
-			allowedDays[record.ID] = struct{}{}
-		}
-		if _, limited := policy.MonthlyBudget(); limited {
-			allowedMonths[record.ID] = struct{}{}
-		}
 	}
 	committed := make([]limiter.CommittedTokenBucket, 0, len(persisted))
 	for _, bucket := range persisted {
@@ -168,9 +156,6 @@ func run() error {
 		if _, found := knownBudgetKeys[bucket.APIKeyID]; !found {
 			return errors.New("startup: persisted budget bucket has unknown key")
 		}
-		if _, configured := allowedBudgets[bucket.APIKeyID]; !configured {
-			return errors.New("startup: persisted budget bucket has no current policy")
-		}
 		value, valueErr := accounting.NewMoneyMicros(bucket.SpentMicros)
 		if valueErr != nil {
 			return errors.New("startup: persisted budget bucket is invalid")
@@ -178,9 +163,6 @@ func run() error {
 		spent = append(spent, limiter.BudgetSpent{KeyID: bucket.APIKeyID, Spent: value})
 	}
 	for _, bucket := range persistedDays {
-		if _, configured := allowedDays[bucket.APIKeyID]; !configured {
-			return errors.New("startup: persisted daily budget bucket has no current policy")
-		}
 		value, valueErr := accounting.NewMoneyMicros(bucket.SpentMicros)
 		if valueErr != nil {
 			return errors.New("startup: persisted daily budget bucket is invalid")
@@ -188,9 +170,6 @@ func run() error {
 		spent = append(spent, limiter.BudgetSpent{KeyID: bucket.APIKeyID, Spent: value, Period: limiter.BudgetPeriodDay, PeriodStart: bucket.PeriodStart})
 	}
 	for _, bucket := range persistedMonths {
-		if _, configured := allowedMonths[bucket.APIKeyID]; !configured {
-			return errors.New("startup: persisted monthly budget bucket has no current policy")
-		}
 		value, valueErr := accounting.NewMoneyMicros(bucket.SpentMicros)
 		if valueErr != nil {
 			return errors.New("startup: persisted monthly budget bucket is invalid")

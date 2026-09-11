@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pestit/9gateway/internal/auth"
+	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/storage"
 )
 
@@ -24,7 +25,7 @@ const adminRequestBodyLimit int64 = 16 * 1024
 var (
 	errInvalidAdminRequest = errors.New("invalid admin request")
 	errAdminKeyCreation    = errors.New("admin key creation failed")
-	errPolicyConflict      = errors.New("token policy conflicts with active usage")
+	errPolicyConflict      = errors.New("policy replacement conflicts with active usage")
 )
 
 // apiKeyInserter is the only storage capability needed by key creation. SQL
@@ -56,13 +57,15 @@ type gatewayKeyGenerator interface {
 }
 
 type adminKeyService struct {
-	repository                  apiKeyRepository
-	pepper                      []byte
-	generator                   gatewayKeyGenerator
-	auth                        *auth.Authenticator
-	allowTokenPolicyReplacement func(string, []auth.TokenWindow, []auth.TokenWindow) bool
-	replaceTokenPolicy          func(string, []auth.TokenWindow, []auth.TokenWindow, func() error) error
-	refreshMu                   sync.Mutex
+	repository                   apiKeyRepository
+	pepper                       []byte
+	generator                    gatewayKeyGenerator
+	auth                         *auth.Authenticator
+	allowTokenPolicyReplacement  func(string, []auth.TokenWindow, []auth.TokenWindow) bool
+	replaceTokenPolicy           func(string, []auth.TokenWindow, []auth.TokenWindow, func() error) error
+	allowBudgetPolicyReplacement func(string, limiter.BudgetPolicy, limiter.BudgetPolicy) bool
+	replaceBudgetPolicy          func(string, limiter.BudgetPolicy, limiter.BudgetPolicy, func() error) error
+	refreshMu                    sync.Mutex
 }
 
 func newAdminKeyService(repository apiKeyRepository, pepper []byte, tokenModes ...auth.TokenMode) (*adminKeyService, error) {
@@ -250,6 +253,7 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 	found := false
 	unchanged := false
 	var oldWindows, newWindows []auth.TokenWindow
+	var oldBudget, newBudget limiter.BudgetPolicy
 	for index := range records {
 		if records[index].ID != id {
 			continue
@@ -261,7 +265,12 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 			return updatedAdminKey{}, errInvalidAdminRequest
 		}
 		oldWindows, newWindows = oldPolicy.TokenWindows(), newPolicy.TokenWindows()
+		oldBudget = budgetPolicy(oldPolicy)
+		newBudget = budgetPolicy(newPolicy)
 		if service.allowTokenPolicyReplacement != nil && !service.allowTokenPolicyReplacement(id, oldWindows, newWindows) {
+			return updatedAdminKey{}, errPolicyConflict
+		}
+		if service.allowBudgetPolicyReplacement != nil && !service.allowBudgetPolicyReplacement(id, oldBudget, newBudget) {
 			return updatedAdminKey{}, errPolicyConflict
 		}
 		unchanged = records[index].Enabled == enabled && records[index].PolicyJSON == string(policyJSON)
@@ -296,12 +305,21 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		if err != nil {
 			return err
 		}
-		service.auth.Publish(prepared)
 		return nil
 	}
-	if service.replaceTokenPolicy != nil {
+	// Admission acquires token policy before budget policy. Use the same lock
+	// order for the nested replacement transaction; reversing it would permit a
+	// token/budget admission deadlock during an admin update.
+	switch {
+	case service.replaceTokenPolicy != nil && service.replaceBudgetPolicy != nil:
+		err = service.replaceTokenPolicy(id, oldWindows, newWindows, func() error {
+			return service.replaceBudgetPolicy(id, oldBudget, newBudget, commit)
+		})
+	case service.replaceBudgetPolicy != nil:
+		err = service.replaceBudgetPolicy(id, oldBudget, newBudget, commit)
+	case service.replaceTokenPolicy != nil:
 		err = service.replaceTokenPolicy(id, oldWindows, newWindows, commit)
-	} else {
+	default:
 		err = commit()
 	}
 	if err != nil {
@@ -310,6 +328,11 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		}
 		return updatedAdminKey{}, errAdminKeyCreation
 	}
+	// Every limiter replacement has now published its runtime identity. Publish
+	// the authentication snapshot last, so no request can observe durable JSON
+	// and a new principal while one of the admission limiters still carries the
+	// previous policy.
+	service.auth.Publish(prepared)
 	if persisted.ID != "" {
 		replacement = persisted
 	} else {
@@ -318,6 +341,13 @@ func (service *adminKeyService) updatePolicy(ctx context.Context, id string, ena
 		// do not perform a cancelable read after a known durable update.
 	}
 	return updatedAdminKeyFromRecord(replacement, policyJSON), nil
+}
+
+func budgetPolicy(policy auth.EffectivePolicy) limiter.BudgetPolicy {
+	total, totalSet := policy.TotalBudget()
+	day, daySet := policy.DailyBudget()
+	month, monthSet := policy.MonthlyBudget()
+	return limiter.BudgetPolicy{Total: total, Limited: totalSet, Day: day, DayLimited: daySet, Month: month, MonthLimited: monthSet}
 }
 
 func updatedAdminKeyFromRecord(record storage.APIKeyRecord, policyJSON []byte) updatedAdminKey {

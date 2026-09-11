@@ -2,9 +2,9 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T118`.
+Done: `T001`-`T119`.
 
-Current: `T119` - make budget policy replacement safe.
+Current: `T120` - complete the budget milestone.
 
 Queued: `T120` in dependency order from `TASKS.md`.
 
