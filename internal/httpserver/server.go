@@ -539,7 +539,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			}
 		}
 	}
-	dispatchErr = dispatchResponseResultWithLeaseAndObservation(response, upstreamResponse, metadata, lifecycleLease, responseObservation, request.WithContext(proxyContext))
+	dispatchErr = dispatchResponseResultWithLeaseAndObservationAndPricing(response, upstreamResponse, metadata, lifecycleLease, responseObservation, selectedPricing, request.WithContext(proxyContext))
 	if responseObservation != nil {
 		responseObservation.finish(dispatchErr)
 	}
@@ -715,6 +715,10 @@ func dispatchResponseResultWithLease(response http.ResponseWriter, upstreamRespo
 }
 
 func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, lease *limiter.ResourceLease, observation *responseObservation, requests ...*http.Request) error {
+	return dispatchResponseResultWithLeaseAndObservationAndPricing(response, upstreamResponse, metadata, lease, observation, accounting.UnknownPricingResolution(), requests...)
+}
+
+func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.ResponseWriter, upstreamResponse *http.Response, metadata *openai.RequestMetadata, lease *limiter.ResourceLease, observation *responseObservation, pricing accounting.PricingResolution, requests ...*http.Request) error {
 	var request *http.Request
 	if len(requests) != 0 {
 		request = requests[0]
@@ -741,11 +745,18 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 			if errors.Is(err, errCompressedWireTooLarge) {
 				finalizeConvertedLeaseConservatively(lease)
 			} else {
-				settleConvertedLease(lease, aggregation)
+				// A conversion error means the generated response was never
+				// complete. Partial usage is not sufficient evidence for a
+				// synchronous actual-cost outcome.
+				finalizeConvertedLeaseConservatively(lease)
 			}
 			return err
 		}
 		body, done := aggregation.JSON, aggregation.Done
+		// The compatibility decoder has already produced canonical usage. Settle
+		// the in-memory lease now, before bounded trailer draining or downstream
+		// writes can fail; neither failure invalidates usage already observed.
+		settleConvertedLease(lease, aggregation, pricing)
 		// AggregateSSEToJSON intentionally stops reading at [DONE]. Encodings
 		// with trailers still need a bounded drain to validate them; an identity
 		// representation has nothing left to validate and must not wait for EOF.
@@ -754,8 +765,6 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 				writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 				if errors.Is(err, errCompressedWireTooLarge) {
 					finalizeConvertedLeaseConservatively(lease)
-				} else {
-					settleConvertedLease(lease, aggregation)
 				}
 				return err
 			}
@@ -774,7 +783,6 @@ func dispatchResponseResultWithLeaseAndObservation(response http.ResponseWriter,
 		if writeErr == nil && written != len(body) {
 			writeErr = io.ErrShortWrite
 		}
-		settleConvertedLease(lease, aggregation)
 		return writeErr
 	}
 
@@ -801,12 +809,18 @@ func finalizeConvertedLeaseConservatively(lease *limiter.ResourceLease) {
 // decoder has observed one. Downstream write, flush, or bounded-drain errors do
 // not erase valid upstream usage that was already observed; without a valid
 // total the lease remains conservatively charged.
-func settleConvertedLease(lease *limiter.ResourceLease, aggregation openai.AggregationResult) {
+func settleConvertedLease(lease *limiter.ResourceLease, aggregation openai.AggregationResult, pricing accounting.PricingResolution) {
 	if lease == nil {
 		return
 	}
 	if aggregation.Observed && aggregation.Usage.Total().Known() {
-		_ = lease.CommitKnown(aggregation.Usage.Total().Int64())
+		cost, err := accounting.CalculateActualCost(aggregation.Usage, pricing)
+		if err != nil {
+			cost = accounting.UnknownMoney()
+		}
+		// CommitKnownUsage independently reconciles the known token total and
+		// settles a budget conservatively when differentiated cost is unknown.
+		_ = lease.CommitKnownUsage(aggregation.Usage, cost)
 		return
 	}
 	finalizeConvertedLeaseConservatively(lease)

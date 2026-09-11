@@ -2,9 +2,9 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T111`.
+Done: `T001`-`T112`.
 
-Current: `T112` - reconcile converted SSE cost.
+Current: `T113` - reconcile transparent SSE cost.
 
 Queued: `T113`-`T120` in dependency order from `TASKS.md`.
 
@@ -63,6 +63,14 @@ the conservative budget charge only when differentiated usage and pricing are
 known; unknown, overflow, malformed, truncated, dropped, and shutdown paths
 retain conservative charges. Transparent response bytes, status, headers, and
 completion timing remain unchanged.
+
+T112 carries selected pricing into the explicit stream:false/SSE compatibility
+path and settles its composite lease synchronously from the canonical usage
+produced during aggregation. Actual integer-micros cost replaces the
+conservative budget charge before bounded trailer drain or generated-response
+write; known token totals still reconcile when differentiated cost is unknown,
+while conversion failure remains conservative. No rendered JSON reparsing,
+queue, SQL, logging, or extra pre-write parsing was added.
 
 T110 wires one startup-built immutable pricing resolver and one process budget
 limiter into authenticated generation admission. Known chat-completions and
