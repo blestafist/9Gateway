@@ -533,6 +533,63 @@ func TestBudgetLimiterInitializationValidationIsAtomic(t *testing.T) {
 	}
 }
 
+func TestBudgetLimiterRestoreRejectsNoncanonicalTotalsAtomically(t *testing.T) {
+	for name, values := range map[string][]BudgetSpent{
+		"noncanonical total":              {{KeyID: "total", Spent: budgetMoney(t, 1), Period: BudgetPeriodTotal, PeriodStart: time.Unix(0, 0).UTC()}},
+		"legacy empty with nonzero start": {{KeyID: "legacy", Spent: budgetMoney(t, 1), PeriodStart: time.Unix(1, 0).UTC()}},
+		"canonical and noncanonical duplicate": {
+			{KeyID: "duplicate", Spent: budgetMoney(t, 1), Period: BudgetPeriodTotal},
+			{KeyID: "duplicate", Spent: budgetMoney(t, 2), Period: BudgetPeriodTotal, PeriodStart: time.Unix(1, 0).UTC()},
+		},
+		"malformed after another key": {
+			{KeyID: "initialized", Spent: budgetMoney(t, 1)},
+			{KeyID: "malformed", Spent: accounting.UnknownMoney()},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			limiter := NewBudgetLimiter()
+			if err := limiter.LoadSpent(values); !errors.Is(err, ErrBudgetInvalid) {
+				t.Fatalf("restore error = %v", err)
+			}
+			if got := limiter.Len(); got != 0 {
+				t.Fatalf("failed restore retained %d states", got)
+			}
+		})
+	}
+}
+
+func TestBudgetLimiterRestoreCanonicalizesLegacyTotalAndRetainsCompatibility(t *testing.T) {
+	limiter := NewBudgetLimiter()
+	if err := limiter.LoadSpent([]BudgetSpent{{KeyID: "legacy", Spent: budgetMoney(t, 7)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := limiter.LoadSpent([]BudgetSpent{{KeyID: "legacy", Spent: budgetMoney(t, 1), Period: BudgetPeriodTotal}}); !errors.Is(err, ErrBudgetInvalid) {
+		t.Fatalf("canonical duplicate after legacy restore = %v", err)
+	}
+	if spent, active := budgetStateForTest(t, limiter, "legacy"); spent != budgetMoney(t, 7) || !isZeroMoney(active) {
+		t.Fatalf("legacy restore state changed = %v/%v", spent, active)
+	}
+
+	dayStart := time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC)
+	monthStart := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	valid := NewBudgetLimiter()
+	if err := valid.LoadSpent([]BudgetSpent{
+		{KeyID: "periods", Spent: budgetMoney(t, 2), Period: BudgetPeriodDay, PeriodStart: dayStart},
+		{KeyID: "periods", Spent: budgetMoney(t, 3), Period: BudgetPeriodMonth, PeriodStart: monthStart},
+	}); err != nil {
+		t.Fatalf("valid period restore = %v", err)
+	}
+	state := valid.shard("periods")
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if got := state.states["periods"].dayBuckets[dayStart].spent; got != budgetMoney(t, 2) {
+		t.Fatalf("day restore = %v", got)
+	}
+	if got := state.states["periods"].monthBuckets[monthStart].spent; got != budgetMoney(t, 3) {
+		t.Fatalf("month restore = %v", got)
+	}
+}
+
 func TestBudgetLimiterReleaseConcurrentAndReuse(t *testing.T) {
 	limiter := NewBudgetLimiter()
 	reservation, err := limiter.Reserve("key-a", LimitedBudgetPolicy(budgetMoney(t, 10)), budgetMoney(t, 10))

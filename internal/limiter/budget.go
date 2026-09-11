@@ -3,7 +3,6 @@ package limiter
 import (
 	"errors"
 	"hash/fnv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -314,45 +313,82 @@ func (limiter *BudgetLimiter) LoadSpent(values []BudgetSpent) error {
 	if limiter == nil {
 		return ErrBudgetInvalid
 	}
-	pending := make(map[string]accounting.Money, len(values))
+	type spentIdentity struct {
+		keyID       string
+		period      BudgetPeriod
+		periodStart time.Time
+	}
+	type pendingSpent struct {
+		identity spentIdentity
+		spent    accounting.Money
+	}
+	pending := make([]pendingSpent, 0, len(values))
+	identities := make(map[spentIdentity]struct{}, len(values))
 	for _, value := range values {
 		if !validKeyID(value.KeyID) || !validKnownMoney(value.Spent) || (value.Period != "" && value.Period != BudgetPeriodTotal && value.Period != BudgetPeriodDay && value.Period != BudgetPeriodMonth) {
-			return ErrBudgetInvalid
-		}
-		if value.Period == BudgetPeriodDay && !validDayStart(value.PeriodStart) {
-			return ErrBudgetInvalid
-		}
-		if value.Period == BudgetPeriodMonth && !validMonthStart(value.PeriodStart) {
 			return ErrBudgetInvalid
 		}
 		period := value.Period
 		if period == "" {
 			period = BudgetPeriodTotal
 		}
-		identity := value.KeyID + "\x00" + string(period) + "\x00" + value.PeriodStart.UTC().Format(time.RFC3339Nano)
-		if _, duplicate := pending[identity]; duplicate {
+		start := time.Time{}
+		switch period {
+		case BudgetPeriodTotal:
+			if !value.PeriodStart.IsZero() {
+				return ErrBudgetInvalid
+			}
+		case BudgetPeriodDay:
+			if !validDayStart(value.PeriodStart) {
+				return ErrBudgetInvalid
+			}
+			start = currentDay(value.PeriodStart)
+		case BudgetPeriodMonth:
+			if !validMonthStart(value.PeriodStart) {
+				return ErrBudgetInvalid
+			}
+			start = currentMonth(value.PeriodStart)
+		default:
 			return ErrBudgetInvalid
 		}
-		pending[identity] = value.Spent
+		identity := spentIdentity{keyID: value.KeyID, period: period, periodStart: start}
+		if _, duplicate := identities[identity]; duplicate {
+			return ErrBudgetInvalid
+		}
+		identities[identity] = struct{}{}
+		pending = append(pending, pendingSpent{identity: identity, spent: value.Spent})
 	}
 	limiter.lifecycle.Lock()
 	defer limiter.lifecycle.Unlock()
 	limiter.lockAllShards()
 	defer limiter.unlockAllShards()
+	// Validate every existing state before checking or applying the requested
+	// buckets. This keeps a malformed batch from partially initializing keys or
+	// mutating a bucket before a later corruption is discovered.
 	for index := range limiter.shards {
-		if limiter.shards[index].states == nil {
-			limiter.shards[index].states = make(map[string]*budgetState)
+		for keyID, state := range limiter.shards[index].states {
+			if !validKeyID(keyID) || state == nil {
+				return ErrBudgetState
+			}
+			if err := validateBudgetState(state); err != nil {
+				return err
+			}
 		}
 	}
-	for identity, spent := range pending {
-		parts := strings.Split(identity, "\x00")
-		keyID := parts[0]
-		period := BudgetPeriod(parts[1])
-		start := time.Time{}
-		if period == BudgetPeriodDay || period == BudgetPeriodMonth {
-			start, _ = time.Parse(time.RFC3339Nano, parts[2])
-		}
+	// Check all target identities while state is still untouched. In
+	// particular, legacy empty-period totals and explicit totals share the same
+	// canonical identity and cannot be loaded twice.
+	for _, value := range pending {
+		keyID := value.identity.keyID
+		period := value.identity.period
+		start := value.identity.periodStart
 		state := limiter.shard(keyID).states[keyID]
+		if state != nil && period == BudgetPeriodDay && state.dayBuckets == nil {
+			return ErrBudgetState
+		}
+		if state != nil && period == BudgetPeriodMonth && state.monthBuckets == nil {
+			return ErrBudgetState
+		}
 		_, loadedDay := stateDay(state, start)
 		loadedMonth := false
 		if state != nil && state.monthBuckets != nil {
@@ -361,29 +397,48 @@ func (limiter *BudgetLimiter) LoadSpent(values []BudgetSpent) error {
 		if state != nil && ((period == BudgetPeriodDay && loadedDay) || (period == BudgetPeriodMonth && loadedMonth) || (period != BudgetPeriodDay && period != BudgetPeriodMonth && state.totalLoaded)) {
 			return ErrBudgetInvalid
 		}
-		if isZeroMoney(spent) {
+	}
+	newKeys := make(map[string]struct{}, len(pending))
+	for _, value := range pending {
+		if !isZeroMoney(value.spent) && limiter.shard(value.identity.keyID).states[value.identity.keyID] == nil {
+			newKeys[value.identity.keyID] = struct{}{}
+		}
+	}
+	currentGeneration := limiter.sequence.Load()
+	if uint64(len(newKeys)) > ^uint64(0)-currentGeneration {
+		return ErrBudgetState
+	}
+	if len(newKeys) != 0 {
+		limiter.sequence.Add(uint64(len(newKeys)))
+	}
+	generations := make(map[string]uint64, len(newKeys))
+	var generation uint64
+	for keyID := range newKeys {
+		generation++
+		generations[keyID] = currentGeneration + generation
+	}
+	for _, value := range pending {
+		if isZeroMoney(value.spent) {
 			continue
 		}
-		generation, ok := limiter.nextGeneration()
-		if !ok {
-			return ErrBudgetState
-		}
+		keyID := value.identity.keyID
+		period := value.identity.period
+		start := value.identity.periodStart
+		shard := limiter.shard(keyID)
+		state := shard.states[keyID]
 		if state == nil {
-			state = &budgetState{spent: knownZeroMoney(), active: knownZeroMoney(), dayBuckets: make(map[time.Time]budgetDayState), monthBuckets: make(map[time.Time]budgetDayState), generation: generation}
-			limiter.shard(keyID).states[keyID] = state
+			if shard.states == nil {
+				shard.states = make(map[string]*budgetState)
+			}
+			state = &budgetState{spent: knownZeroMoney(), active: knownZeroMoney(), dayBuckets: make(map[time.Time]budgetDayState), monthBuckets: make(map[time.Time]budgetDayState), generation: generations[keyID]}
+			shard.states[keyID] = state
 		}
 		if period == BudgetPeriodDay {
-			if state.dayBuckets == nil {
-				state.dayBuckets = make(map[time.Time]budgetDayState)
-			}
-			state.dayBuckets[start] = budgetDayState{spent: spent, active: knownZeroMoney()}
+			state.dayBuckets[start] = budgetDayState{spent: value.spent, active: knownZeroMoney()}
 		} else if period == BudgetPeriodMonth {
-			if state.monthBuckets == nil {
-				state.monthBuckets = make(map[time.Time]budgetDayState)
-			}
-			state.monthBuckets[start] = budgetDayState{spent: spent, active: knownZeroMoney()}
+			state.monthBuckets[start] = budgetDayState{spent: value.spent, active: knownZeroMoney()}
 		} else {
-			state.spent, state.totalLoaded = spent, true
+			state.spent, state.totalLoaded = value.spent, true
 		}
 	}
 	return nil
