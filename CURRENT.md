@@ -1,12 +1,12 @@
 # Current Work
 
-Current milestone: pricing and budget enforcement (`T105`-`T120`).
+Current milestone: complete (`T101`-`T120`).
 
-Done: `T001`-`T119`.
+Done: `T001`-`T120`.
 
-Current: `T120` - complete the budget milestone.
+Current: unset.
 
-Queued: `T120` in dependency order from `TASKS.md`.
+Queued: unset.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -38,7 +38,7 @@ gateway keys, minimal admin bootstrap, hot-path authentication, model policy,
 generic request windows, and per-key concurrency. T081-T100 add token usage,
 bounded estimation, reservation/reconciliation, token-window enforcement, and
 persistent token aggregates while keeping parsing and SQLite off the transport
-critical path. T107-T120 are planned for budget reservation/reconciliation,
+critical path. T107-T120 implement budget reservation/reconciliation,
 persistent spend, and UTC day/calendar-month
 enforcement. T118 adds exact UTC calendar-month bucket identities, restart
 restoration, cross-month settlement, and boundary-based Retry-After behavior;
