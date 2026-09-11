@@ -155,7 +155,18 @@ func RetryAfterSecondsAt(now, resetAt time.Time) int {
 	if delta <= 0 {
 		return 1
 	}
-	return int((delta-1)/time.Second) + 1
+	seconds := int64(delta / time.Second)
+	if delta%time.Second != 0 {
+		seconds++
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if seconds > maxInt {
+		return int(maxInt)
+	}
+	if seconds < 1 {
+		return 1
+	}
+	return int(seconds)
 }
 
 // FixedWindowStart returns the UTC, Unix-epoch-aligned start of the fixed

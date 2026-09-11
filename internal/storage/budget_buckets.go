@@ -87,7 +87,7 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 		if delta.Period == "" {
 			delta.Period = limiter.BudgetPeriodTotal
 		}
-		if delta.Period != limiter.BudgetPeriodTotal && (delta.Period != limiter.BudgetPeriodDay || !validDayStart(delta.PeriodStart)) {
+		if delta.Period != limiter.BudgetPeriodTotal && (delta.Period == limiter.BudgetPeriodDay && !validDayStart(delta.PeriodStart) || delta.Period == limiter.BudgetPeriodMonth && !validMonthStart(delta.PeriodStart) || delta.Period != limiter.BudgetPeriodDay && delta.Period != limiter.BudgetPeriodMonth) {
 			return ErrInvalidBudgetBucket
 		}
 		if delta.SpentDelta == math.MinInt64 {
@@ -241,7 +241,7 @@ func currentDay(t time.Time) time.Time {
 }
 func validDayStart(t time.Time) bool { return !t.IsZero() && t.Equal(currentDay(t)) }
 func bucketStart(delta BudgetBucketDelta) int64 {
-	if delta.Period == limiter.BudgetPeriodDay {
+	if delta.Period == limiter.BudgetPeriodDay || delta.Period == limiter.BudgetPeriodMonth {
 		return delta.PeriodStart.UTC().Unix()
 	}
 	return 0
@@ -276,5 +276,43 @@ func (repository *BudgetBucketRepository) DeleteExpiredDays(ctx context.Context,
 		return ErrBudgetBucketUnavailable
 	}
 	_, err := repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='day' AND period_start < ?`, currentDay(before).Unix())
+	return err
+}
+
+func currentMonth(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+func validMonthStart(t time.Time) bool { return !t.IsZero() && t.Equal(currentMonth(t)) }
+
+// LoadMonth restores only the current UTC calendar-month bucket.
+func (repository *BudgetBucketRepository) LoadMonth(ctx context.Context, now time.Time) ([]BudgetBucket, error) {
+	if ctx == nil || repository == nil || repository.database == nil {
+		return nil, ErrBudgetBucketUnavailable
+	}
+	start := currentMonth(now)
+	rows, err := repository.database.QueryContext(ctx, `SELECT budget_buckets.api_key_id, budget_buckets.spent_micros, CASE WHEN api_keys.id IS NULL THEN 0 ELSE 1 END FROM budget_buckets LEFT JOIN api_keys ON api_keys.id=budget_buckets.api_key_id WHERE period_kind='month' AND period_start=? ORDER BY budget_buckets.api_key_id`, start.Unix())
+	if err != nil {
+		return nil, ErrBudgetBucketUnavailable
+	}
+	defer rows.Close()
+	result := []BudgetBucket{}
+	for rows.Next() {
+		var b BudgetBucket
+		var known int
+		if err := rows.Scan(&b.APIKeyID, &b.SpentMicros, &known); err != nil || b.APIKeyID == "" || b.SpentMicros < 0 || known != 1 {
+			return nil, ErrInvalidBudgetBucket
+		}
+		b.Period = limiter.BudgetPeriodMonth
+		b.PeriodStart = start
+		result = append(result, b)
+	}
+	return result, rows.Err()
+}
+func (repository *BudgetBucketRepository) DeleteExpiredMonths(ctx context.Context, before time.Time) error {
+	if repository == nil || repository.database == nil {
+		return ErrBudgetBucketUnavailable
+	}
+	_, err := repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='month' AND period_start < ?`, currentMonth(before).Unix())
 	return err
 }

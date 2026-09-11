@@ -38,6 +38,61 @@ func TestBudgetLimiterDailyUTCResetAndAdmittingDay(t *testing.T) {
 	}
 }
 
+func TestBudgetLimiterCalendarMonthBoundariesAndCrossMonthSettlement(t *testing.T) {
+	current := time.Date(2024, 1, 31, 23, 59, 59, 999999999, time.UTC)
+	limiter := NewBudgetLimiter(func() time.Time { return current })
+	policy := MonthlyBudgetPolicy(budgetMoney(t, 10))
+	reservation, err := limiter.Reserve("month", policy, budgetMoney(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	if next, err := limiter.Reserve("month", policy, budgetMoney(t, 10)); err != nil || next == nil {
+		t.Fatalf("February admission = %v", err)
+	} else {
+		_ = next.Release()
+	}
+	if err := reservation.Commit(budgetMoney(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	state := limiter.shard("month")
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.states["month"].monthBuckets) != 2 {
+		t.Fatalf("month buckets = %#v", state.states["month"].monthBuckets)
+	}
+	for _, date := range []time.Time{time.Date(2024, 2, 29, 12, 0, 0, 0, time.UTC), time.Date(2024, 3, 31, 12, 0, 0, 0, time.UTC), time.Date(2024, 4, 30, 12, 0, 0, 0, time.UTC), time.Date(2024, 5, 31, 12, 0, 0, 0, time.UTC), time.Date(2025, 1, 31, 12, 0, 0, 0, time.UTC)} {
+		if got := currentMonth(date); got.Day() != 1 || got.Location() != time.UTC {
+			t.Fatalf("month start %v", got)
+		}
+	}
+}
+
+func TestBudgetLimiterMonthlyRetryAndAtomicCombinedLimits(t *testing.T) {
+	current := time.Date(2024, 12, 15, 0, 0, 0, 0, time.UTC)
+	limiter := NewBudgetLimiter(func() time.Time { return current })
+	policy := TotalDailyMonthlyBudgetPolicy(budgetMoney(t, 20), budgetMoney(t, 20), budgetMoney(t, 10))
+	r, err := limiter.Reserve("combined", policy, budgetMoney(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Commit(budgetMoney(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = limiter.Reserve("combined", policy, budgetMoney(t, 1))
+	var capacity *BudgetCapacityError
+	if !errors.As(err, &capacity) || !capacity.ResetAt.Equal(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("monthly reset = %v/%v", err, capacity)
+	}
+	if got := limiter.RetryAfterSeconds(capacity.ResetAt); got != 1468800 {
+		t.Fatalf("retry after = %d", got)
+	}
+	current = time.Date(2024, 12, 31, 23, 0, 0, 0, time.UTC)
+	if _, err := limiter.Reserve("combined", policy, budgetMoney(t, 11)); !errors.Is(err, ErrBudgetCapacity) {
+		t.Fatalf("atomic overage = %v", err)
+	}
+}
+
 func TestBudgetLimiterDailyRejectionCarriesResetAndTotalSuppressesIt(t *testing.T) {
 	current := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	limiter := NewBudgetLimiter(func() time.Time { return current })

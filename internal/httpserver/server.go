@@ -516,8 +516,8 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		if budgetPlan != nil {
 			total, totalLimited := principal.Policy.TotalBudget()
 			day, dayLimited := principal.Policy.DailyBudget()
-			options.BudgetPolicy = limiter.LimitedBudgetPolicyWithDay(total, day, totalLimited)
-			options.BudgetPolicy.DayLimited = dayLimited
+			month, monthLimited := principal.Policy.MonthlyBudget()
+			options.BudgetPolicy = limiter.BudgetPolicy{Total: total, Limited: totalLimited, Day: day, DayLimited: dayLimited, Month: month, MonthLimited: monthLimited}
 			options.BudgetCandidate = budgetPlan.Reserved()
 		}
 		var admissionErr *limiter.AdmissionError

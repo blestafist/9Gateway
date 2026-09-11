@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T117`.
+Done: `T001`-`T118`.
 
-Current: `T118` - enforce UTC calendar-month budgets.
+Current: `T119` - make budget policy replacement safe.
 
-Queued: `T118`-`T120` in dependency order from `TASKS.md`.
+Queued: `T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -40,7 +40,10 @@ bounded estimation, reservation/reconciliation, token-window enforcement, and
 persistent token aggregates while keeping parsing and SQLite off the transport
 critical path. T107-T120 are planned for budget reservation/reconciliation,
 persistent spend, and UTC day/calendar-month
-enforcement. Request-history/body persistence, metrics, `/ready`, CLI, tool-call
+enforcement. T118 adds exact UTC calendar-month bucket identities, restart
+restoration, cross-month settlement, and boundary-based Retry-After behavior;
+the optional Bifrost review and Apache-2.0/no-copy provenance are recorded in
+the budget implementation comments. Request-history/body persistence, metrics, `/ready`, CLI, tool-call
 execution/validation, and Web UI remain out of scope.
 Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
 completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion.

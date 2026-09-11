@@ -51,6 +51,7 @@ type BudgetPeriod string
 
 const BudgetPeriodTotal BudgetPeriod = "total"
 const BudgetPeriodDay BudgetPeriod = "day"
+const BudgetPeriodMonth BudgetPeriod = "month"
 
 type BudgetLimit struct {
 	Period BudgetPeriod
@@ -102,6 +103,8 @@ type EffectivePolicy struct {
 	totalBudgetSet bool
 	dayBudget      accounting.Money
 	dayBudgetSet   bool
+	monthBudget    accounting.Money
+	monthBudgetSet bool
 }
 
 // ParsePolicy strictly validates and compiles one stored policy document.
@@ -222,7 +225,7 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 		policy.tokenWindows = append(policy.tokenWindows, normalized)
 	}
 	if len(document.BudgetLimits) != 0 {
-		total, totalPresent, day, dayPresent, err := parseBudgetLimits(document.BudgetLimits)
+		total, totalPresent, day, dayPresent, month, monthPresent, err := parseBudgetLimits(document.BudgetLimits)
 		if err != nil {
 			return EffectivePolicy{}, ErrInvalidPolicy
 		}
@@ -233,6 +236,10 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 		if dayPresent {
 			policy.dayBudget = day
 			policy.dayBudgetSet = true
+		}
+		if monthPresent {
+			policy.monthBudget = month
+			policy.monthBudgetSet = true
 		}
 	}
 	if document.TokenMode != nil {
@@ -330,14 +337,24 @@ func (policy EffectivePolicy) DailyBudget() (accounting.Money, bool) {
 
 func (policy EffectivePolicy) DayBudget() (accounting.Money, bool) { return policy.DailyBudget() }
 
+// MonthlyBudget returns the configured UTC calendar-month budget, if present.
+func (policy EffectivePolicy) MonthlyBudget() (accounting.Money, bool) {
+	return policy.monthBudget, policy.monthBudgetSet
+}
+
+func (policy EffectivePolicy) MonthBudget() (accounting.Money, bool) { return policy.MonthlyBudget() }
+
 // BudgetLimits returns immutable budget entries in their documented order.
 func (policy EffectivePolicy) BudgetLimits() []BudgetLimit {
-	limits := make([]BudgetLimit, 0, 2)
+	limits := make([]BudgetLimit, 0, 3)
 	if policy.totalBudgetSet {
 		limits = append(limits, BudgetLimit{Period: BudgetPeriodTotal, Amount: policy.totalBudget})
 	}
 	if policy.dayBudgetSet {
 		limits = append(limits, BudgetLimit{Period: BudgetPeriodDay, Amount: policy.dayBudget})
+	}
+	if policy.monthBudgetSet {
+		limits = append(limits, BudgetLimit{Period: BudgetPeriodMonth, Amount: policy.monthBudget})
 	}
 	return limits
 }
@@ -368,66 +385,73 @@ func modelPatternStrings(patterns []modelmatch.Pattern) []string {
 	return result
 }
 
-func parseBudgetLimits(raw json.RawMessage) (accounting.Money, bool, accounting.Money, bool, error) {
+func parseBudgetLimits(raw json.RawMessage) (accounting.Money, bool, accounting.Money, bool, accounting.Money, bool, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || trimmed[0] != '[' {
-		return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+		return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 	}
 	var entries []json.RawMessage
 	if err := json.Unmarshal(trimmed, &entries); err != nil || entries == nil {
-		return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+		return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 	}
-	var total, day accounting.Money
-	var totalPresent, dayPresent bool
+	var total, day, month accounting.Money
+	var totalPresent, dayPresent, monthPresent bool
 	seenPeriods := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		object := bytes.TrimSpace(entry)
 		if len(object) == 0 || object[0] != '{' {
-			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+		}
+		if err := rejectDuplicateJSONKeys(object); err != nil {
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(object, &fields); err != nil {
-			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		for field := range fields {
 			if field != "amount_micros" && field != "period" {
-				return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+				return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 			}
 		}
 		amountRaw, amountOK := fields["amount_micros"]
 		periodRaw, periodOK := fields["period"]
 		if !amountOK || !periodOK || bytes.Equal(bytes.TrimSpace(amountRaw), []byte("null")) || bytes.Equal(bytes.TrimSpace(periodRaw), []byte("null")) {
-			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		var period string
-		if err := json.Unmarshal(periodRaw, &period); err != nil || period == "" || (period != string(BudgetPeriodTotal) && period != string(BudgetPeriodDay)) {
-			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+		if err := json.Unmarshal(periodRaw, &period); err != nil || period == "" || (period != string(BudgetPeriodTotal) && period != string(BudgetPeriodDay) && period != string(BudgetPeriodMonth)) {
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		if _, exists := seenPeriods[period]; exists {
-			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		seenPeriods[period] = struct{}{}
 		micros, err := parseBudgetMicros(amountRaw)
 		if err != nil {
-			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		value, err := accounting.NewMoneyMicros(micros)
 		if err != nil || micros == 0 {
-			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		if period == string(BudgetPeriodTotal) {
 			total, totalPresent = value, true
 		} else {
-			day, dayPresent = value, true
+			if period == string(BudgetPeriodDay) {
+				day, dayPresent = value, true
+			} else {
+				month, monthPresent = value, true
+			}
 		}
 	}
-	return total, totalPresent, day, dayPresent, nil
+	return total, totalPresent, day, dayPresent, month, monthPresent, nil
 }
 
 // parseTotalBudget is retained for package-local compatibility with earlier
 // tests and callers; T117's compiler uses parseBudgetLimits above.
 func parseTotalBudget(raw json.RawMessage) (accounting.Money, bool, error) {
-	total, present, _, _, err := parseBudgetLimits(raw)
+	total, present, _, _, _, _, err := parseBudgetLimits(raw)
 	return total, present, err
 }
 
