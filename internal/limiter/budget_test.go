@@ -515,6 +515,84 @@ func TestBudgetReservationTerminalOutcomesAndInvalidActual(t *testing.T) {
 	}
 }
 
+func TestBudgetDailyKnownOverflowFallsBackAtomically(t *testing.T) {
+	now := time.Date(2024, 7, 15, 12, 0, 0, 0, time.UTC)
+	limiter := NewBudgetLimiter(func() time.Time { return now })
+	dayStart := currentDay(now)
+	prior := budgetMoney(t, accounting.MaxMoneyMicros-1)
+	policy := DailyBudgetPolicy(accounting.MaxMoney())
+	if err := limiter.LoadSpent([]BudgetSpent{{KeyID: "daily-overflow", Spent: prior, Period: BudgetPeriodDay, PeriodStart: dayStart}}); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := limiter.Reserve("daily-overflow", policy, budgetMoney(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.Commit(budgetMoney(t, 2)); !errors.Is(err, ErrBudgetArithmetic) {
+		t.Fatalf("overflow settlement = %v, want typed arithmetic error", err)
+	}
+	state := limiter.shard("daily-overflow")
+	state.mu.Lock()
+	current := state.states["daily-overflow"]
+	var day budgetDayState
+	if current != nil {
+		day = current.dayBuckets[dayStart]
+	}
+	state.mu.Unlock()
+	if current == nil || current.spent != budgetMoney(t, 0) || !isZeroMoney(current.active) || day.spent != accounting.MaxMoney() || !isZeroMoney(day.active) {
+		t.Fatalf("daily fallback state = total %v/%v, day %#v", current.spent, current.active, day)
+	}
+	if _, err := limiter.Reserve("daily-overflow", policy, budgetMoney(t, 1)); !errors.Is(err, ErrBudgetCapacity) {
+		t.Fatalf("post-fallback admission = %v, want daily capacity rejection", err)
+	}
+	result, finalized := reservation.Result()
+	if !finalized || result.Kind != BudgetSettlementConservative || result.Charged != budgetMoney(t, 1) {
+		t.Fatalf("settlement result = %#v, finalized=%v", result, finalized)
+	}
+	for range 4 {
+		if err := reservation.Commit(budgetMoney(t, 3)); !errors.Is(err, ErrBudgetArithmetic) {
+			t.Fatalf("repeated settlement = %v", err)
+		}
+	}
+}
+
+func TestBudgetDailyKnownOverflowConcurrentFinalizationIsOneShot(t *testing.T) {
+	now := time.Date(2024, 8, 15, 12, 0, 0, 0, time.UTC)
+	limiter := NewBudgetLimiter(func() time.Time { return now })
+	dayStart := currentDay(now)
+	if err := limiter.LoadSpent([]BudgetSpent{{KeyID: "daily-race", Spent: budgetMoney(t, accounting.MaxMoneyMicros-1), Period: BudgetPeriodDay, PeriodStart: dayStart}}); err != nil {
+		t.Fatal(err)
+	}
+	policy := DailyBudgetPolicy(accounting.MaxMoney())
+	reservation, err := limiter.Reserve("daily-race", policy, budgetMoney(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const attempts = 64
+	var wait sync.WaitGroup
+	wait.Add(attempts)
+	for range attempts {
+		go func() {
+			defer wait.Done()
+			if err := reservation.Commit(budgetMoney(t, 2)); !errors.Is(err, ErrBudgetArithmetic) {
+				t.Errorf("concurrent settlement = %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	state := limiter.shard("daily-race")
+	state.mu.Lock()
+	current := state.states["daily-race"]
+	var day budgetDayState
+	if current != nil {
+		day = current.dayBuckets[dayStart]
+	}
+	state.mu.Unlock()
+	if current == nil || !isZeroMoney(current.active) || day.spent != accounting.MaxMoney() || !isZeroMoney(day.active) {
+		t.Fatalf("concurrent settlement state = total %v/%v, day %#v", current.spent, current.active, day)
+	}
+}
+
 func TestBudgetDeferredAdjustmentAndSinkOrdering(t *testing.T) {
 	limiter := NewBudgetLimiter()
 	policy := LimitedBudgetPolicy(budgetMoney(t, 100))

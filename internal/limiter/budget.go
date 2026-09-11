@@ -905,10 +905,13 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 		if ownership.totalCaptured && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
 			newSpent, addErr = state.spent.Add(ownership.amount)
 		}
+		if ownership.dayCaptured && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
+			newDaySpent, dayAddErr = day.spent.Add(ownership.amount)
+		}
 		if ownership.monthCaptured && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
 			newMonthSpent, monthAddErr = month.spent.Add(ownership.amount)
 		}
-		if subErr != nil || addErr != nil || monthAddErr != nil || !newSpent.Known() || !newMonthSpent.Known() {
+		if subErr != nil || addErr != nil || dayAddErr != nil || monthAddErr != nil || !newSpent.Known() || !newDaySpent.Known() || !newMonthSpent.Known() {
 			shard.mu.Unlock()
 			limiter.lifecycle.RUnlock()
 			result.Error = &BudgetSettlementError{Cause: ErrBudgetArithmetic, Conservative: true}
