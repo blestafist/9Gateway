@@ -293,6 +293,10 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	// a parser failure never consumes the ticket or changes its conservative
 	// charge.
 	if err != nil {
+		// Parsing failure is a terminal observation outcome. The conservative
+		// amount was already committed at transport completion; consume both
+		// one-shot tickets so no discarded job can be adjusted later.
+		invalidateObservationJob(job)
 		worker.failed.Add(1)
 		return
 	}

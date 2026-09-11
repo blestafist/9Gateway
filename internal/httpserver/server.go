@@ -391,11 +391,10 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			case (tokenAdmission || budgetAdmission) && responseObservation != nil:
 				responseObservation.settle(lifecycleLease, handler.usageObservationWorker, budgetAdmission)
 			case tokenAdmission || budgetAdmission:
-				if budgetAdmission {
-					_, _ = lifecycleLease.TransportCompleteTokenDeferredBudgetConservative()
-				} else {
-					_, _ = lifecycleLease.TransportComplete()
-				}
+				// No observation can be submitted for an opaque response or an
+				// unsupported coding. Settle both resources conservatively here
+				// rather than creating an orphaned deferred ticket.
+				_ = lifecycleLease.CompleteConservative()
 			default:
 				_ = lifecycleLease.CompleteConservative()
 			}

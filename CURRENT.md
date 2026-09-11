@@ -2,11 +2,11 @@
 
 Current milestone: pricing and budget enforcement (`T105`-`T120`).
 
-Done: `T001`-`T112`.
+Done: `T001`-`T113`.
 
-Current: `T113` - reconcile transparent SSE cost.
+Current: `T114` - finalize every budget lifecycle path.
 
-Queued: `T113`-`T120` in dependency order from `TASKS.md`.
+Queued: `T114`-`T120` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -71,6 +71,15 @@ conservative budget charge before bounded trailer drain or generated-response
 write; known token totals still reconcile when differentiated cost is unknown,
 while conversion failure remains conservative. No rendered JSON reparsing,
 queue, SQL, logging, or extra pre-write parsing was added.
+
+T113 reconciles transparent SSE budget cost from a bounded immutable copy of
+only successfully written and flushed wire bytes. Physical upstream EOF closes
+the stream without waiting for `[DONE]` or `finish_reason`, then releases
+concurrency and settles conservative token/budget charges before one
+nonblocking worker handoff. Canonical SSE observation adjusts actual budget
+only when differentiated input/output usage and immutable selected pricing are
+known; overflow, malformed/incomplete data, unsupported coding, cancellation,
+downstream failure, saturation, and shutdown remain conservative.
 
 T110 wires one startup-built immutable pricing resolver and one process budget
 limiter into authenticated generation admission. Known chat-completions and
