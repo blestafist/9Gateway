@@ -28,7 +28,7 @@ func TestParsePolicy(t *testing.T) {
 		},
 		{
 			name: "valid combined",
-			json: `{"allowed_models":["gpt-*","exact"],"denied_models":["gpt-bad"],"request_windows":[{"amount":10,"duration":"1m"},{"amount":100,"duration":"1h"}],"token_windows":[{"amount":1000,"duration":"1h"},{"amount":10000,"duration":"24h"}],"budget_limits":[{"amount_micros":1,"period":"total"}],"token_mode":"usage_only","max_concurrent_requests":3}`,
+			json: `{"allowed_models":["gpt-*","exact"],"denied_models":["gpt-bad"],"request_windows":[{"amount":10,"duration":"1m"},{"amount":100,"duration":"1h"}],"token_windows":[{"amount":1000,"duration":"1h"},{"amount":10000,"duration":"24h"}],"budget_limits":[{"amount_micros":1,"period":"total"},{"amount_micros":2,"period":"day"}],"token_mode":"usage_only","max_concurrent_requests":3}`,
 			check: func(t *testing.T, policy EffectivePolicy) {
 				if !policy.AllowsModel("gpt-good") || !policy.AllowsModel("exact") || policy.AllowsModel("gpt-bad") || policy.AllowsModel("other") {
 					t.Fatal("combined model policy evaluated incorrectly")
@@ -36,7 +36,9 @@ func TestParsePolicy(t *testing.T) {
 				want := []RequestWindow{{Amount: 10, Duration: time.Minute}, {Amount: 100, Duration: time.Hour}}
 				wantTokens := []TokenWindow{{Amount: 1000, Duration: time.Hour}, {Amount: 10000, Duration: 24 * time.Hour}}
 				budget, present := policy.TotalBudget()
-				if micros, known := budget.Micros(); !present || !known || micros != 1 || !reflect.DeepEqual(policy.RequestWindows(), want) || !reflect.DeepEqual(policy.TokenWindows(), wantTokens) || policy.TokenMode() != TokenModeUsageOnly || policy.MaxConcurrency() != 3 {
+				day, dayPresent := policy.DailyBudget()
+				dayMicros, dayKnown := day.Micros()
+				if micros, known := budget.Micros(); !present || !known || micros != 1 || !dayPresent || !dayKnown || dayMicros != 2 || !reflect.DeepEqual(policy.RequestWindows(), want) || !reflect.DeepEqual(policy.TokenWindows(), wantTokens) || policy.TokenMode() != TokenModeUsageOnly || policy.MaxConcurrency() != 3 {
 					t.Fatalf("compiled policy = %#v", policy)
 				}
 				if mode, ok := policy.TokenModeOverride(); !ok || mode != TokenModeUsageOnly {
@@ -62,7 +64,7 @@ func TestParsePolicy(t *testing.T) {
 		{name: "invalid duration", json: `{"request_windows":[{"amount":1,"duration":"nope"}]}`, wantErr: true},
 		{name: "null token windows", json: `{"token_windows":null}`, wantErr: true},
 		{name: "null budget limits", json: `{"budget_limits":null}`, wantErr: true},
-		{name: "budget day unsupported", json: `{"budget_limits":[{"amount_micros":1,"period":"day"}]}`, wantErr: true},
+		{name: "budget day", json: `{"budget_limits":[{"amount_micros":1,"period":"day"}]}`},
 		{name: "budget month unsupported", json: `{"budget_limits":[{"amount_micros":1,"period":"month"}]}`, wantErr: true},
 		{name: "budget unknown period", json: `{"budget_limits":[{"amount_micros":1,"period":"future"}]}`, wantErr: true},
 		{name: "budget duplicate period", json: `{"budget_limits":[{"amount_micros":1,"period":"total"},{"amount_micros":2,"period":"total"}]}`, wantErr: true},

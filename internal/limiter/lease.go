@@ -41,9 +41,10 @@ var (
 // token-window retry reporting and is zero when the resource has no useful
 // reset (for example, a saturated concurrency slot or an oversized estimate).
 type AdmissionError struct {
-	Resource AdmissionResource
-	ResetAt  time.Time
-	Invalid  bool
+	Resource          AdmissionResource
+	ResetAt           time.Time
+	RetryAfterSeconds int
+	Invalid           bool
 }
 
 func (err *AdmissionError) Error() string {
@@ -258,6 +259,13 @@ func (coordinator *ResourceLeaseCoordinator) finishAdmission(concurrencyLease *L
 			}
 			concurrencyLease.releaseOwned()
 			admission := &AdmissionError{Resource: AdmissionBudget}
+			var capacity *BudgetCapacityError
+			if errors.As(err, &capacity) {
+				admission.ResetAt = capacity.ResetAt
+				if !capacity.ResetAt.IsZero() {
+					admission.RetryAfterSeconds = coordinator.budgets.RetryAfterSeconds(capacity.ResetAt)
+				}
+			}
 			if !errors.Is(err, ErrBudgetCapacity) {
 				admission.Invalid = true
 			}

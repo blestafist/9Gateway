@@ -46,12 +46,16 @@ type TokenWindow struct {
 	Duration time.Duration
 }
 
-// BudgetPeriod identifies the accounting period of a budget limit. T105 only
-// compiles the lifetime total period; other periods are deliberately rejected
-// until their runtime enforcement exists.
+// BudgetPeriod identifies the accounting period of a budget limit.
 type BudgetPeriod string
 
 const BudgetPeriodTotal BudgetPeriod = "total"
+const BudgetPeriodDay BudgetPeriod = "day"
+
+type BudgetLimit struct {
+	Period BudgetPeriod
+	Amount accounting.Money
+}
 
 // Bifrost provenance review: commit 03ab391865710462302bbcf52dca2f32682b91b5
 // (branch dev), framework/configstore/tables/ratelimit.go,
@@ -96,6 +100,8 @@ type EffectivePolicy struct {
 	maxConcurrency int
 	totalBudget    accounting.Money
 	totalBudgetSet bool
+	dayBudget      accounting.Money
+	dayBudgetSet   bool
 }
 
 // ParsePolicy strictly validates and compiles one stored policy document.
@@ -216,13 +222,17 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 		policy.tokenWindows = append(policy.tokenWindows, normalized)
 	}
 	if len(document.BudgetLimits) != 0 {
-		budget, present, err := parseTotalBudget(document.BudgetLimits)
+		total, totalPresent, day, dayPresent, err := parseBudgetLimits(document.BudgetLimits)
 		if err != nil {
 			return EffectivePolicy{}, ErrInvalidPolicy
 		}
-		if present {
-			policy.totalBudget = budget
+		if totalPresent {
+			policy.totalBudget = total
 			policy.totalBudgetSet = true
+		}
+		if dayPresent {
+			policy.dayBudget = day
+			policy.dayBudgetSet = true
 		}
 	}
 	if document.TokenMode != nil {
@@ -313,6 +323,25 @@ func (policy EffectivePolicy) TotalBudget() (accounting.Money, bool) {
 	return policy.totalBudget, policy.totalBudgetSet
 }
 
+// DailyBudget returns the configured UTC calendar-day budget, if present.
+func (policy EffectivePolicy) DailyBudget() (accounting.Money, bool) {
+	return policy.dayBudget, policy.dayBudgetSet
+}
+
+func (policy EffectivePolicy) DayBudget() (accounting.Money, bool) { return policy.DailyBudget() }
+
+// BudgetLimits returns immutable budget entries in their documented order.
+func (policy EffectivePolicy) BudgetLimits() []BudgetLimit {
+	limits := make([]BudgetLimit, 0, 2)
+	if policy.totalBudgetSet {
+		limits = append(limits, BudgetLimit{Period: BudgetPeriodTotal, Amount: policy.totalBudget})
+	}
+	if policy.dayBudgetSet {
+		limits = append(limits, BudgetLimit{Period: BudgetPeriodDay, Amount: policy.dayBudget})
+	}
+	return limits
+}
+
 // AllowsModel applies deny precedence and then the optional allow list.
 func (policy EffectivePolicy) AllowsModel(model string) bool {
 	for _, pattern := range policy.deniedModels {
@@ -339,55 +368,67 @@ func modelPatternStrings(patterns []modelmatch.Pattern) []string {
 	return result
 }
 
-func parseTotalBudget(raw json.RawMessage) (accounting.Money, bool, error) {
+func parseBudgetLimits(raw json.RawMessage) (accounting.Money, bool, accounting.Money, bool, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || trimmed[0] != '[' {
-		return accounting.Money{}, false, ErrInvalidPolicy
+		return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 	}
 	var entries []json.RawMessage
 	if err := json.Unmarshal(trimmed, &entries); err != nil || entries == nil {
-		return accounting.Money{}, false, ErrInvalidPolicy
+		return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 	}
-	var total accounting.Money
+	var total, day accounting.Money
+	var totalPresent, dayPresent bool
 	seenPeriods := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		object := bytes.TrimSpace(entry)
 		if len(object) == 0 || object[0] != '{' {
-			return accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(object, &fields); err != nil {
-			return accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		for field := range fields {
 			if field != "amount_micros" && field != "period" {
-				return accounting.Money{}, false, ErrInvalidPolicy
+				return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 			}
 		}
 		amountRaw, amountOK := fields["amount_micros"]
 		periodRaw, periodOK := fields["period"]
 		if !amountOK || !periodOK || bytes.Equal(bytes.TrimSpace(amountRaw), []byte("null")) || bytes.Equal(bytes.TrimSpace(periodRaw), []byte("null")) {
-			return accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		var period string
-		if err := json.Unmarshal(periodRaw, &period); err != nil || period == "" || period != string(BudgetPeriodTotal) {
-			return accounting.Money{}, false, ErrInvalidPolicy
+		if err := json.Unmarshal(periodRaw, &period); err != nil || period == "" || (period != string(BudgetPeriodTotal) && period != string(BudgetPeriodDay)) {
+			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		if _, exists := seenPeriods[period]; exists {
-			return accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		seenPeriods[period] = struct{}{}
 		micros, err := parseBudgetMicros(amountRaw)
 		if err != nil {
-			return accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
 		value, err := accounting.NewMoneyMicros(micros)
 		if err != nil || micros == 0 {
-			return accounting.Money{}, false, ErrInvalidPolicy
+			return accounting.Money{}, false, accounting.Money{}, false, ErrInvalidPolicy
 		}
-		total = value
+		if period == string(BudgetPeriodTotal) {
+			total, totalPresent = value, true
+		} else {
+			day, dayPresent = value, true
+		}
 	}
-	return total, len(entries) != 0, nil
+	return total, totalPresent, day, dayPresent, nil
+}
+
+// parseTotalBudget is retained for package-local compatibility with earlier
+// tests and callers; T117's compiler uses parseBudgetLimits above.
+func parseTotalBudget(raw json.RawMessage) (accounting.Money, bool, error) {
+	total, present, _, _, err := parseBudgetLimits(raw)
+	return total, present, err
 }
 
 func parseBudgetMicros(raw json.RawMessage) (int64, error) {

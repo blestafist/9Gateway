@@ -5,9 +5,60 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
 )
+
+func TestBudgetLimiterDailyUTCResetAndAdmittingDay(t *testing.T) {
+	current := time.Date(2024, 2, 28, 23, 59, 59, 500_000_000, time.UTC)
+	clock := func() time.Time { return current }
+	limiter := NewBudgetLimiter(clock)
+	policy := DailyBudgetPolicy(budgetMoney(t, 10))
+	reservation, err := limiter.Reserve("daily", policy, budgetMoney(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = time.Date(2024, 2, 29, 0, 0, 0, 0, time.UTC)
+	if _, err := limiter.Reserve("daily", policy, budgetMoney(t, 1)); err != nil {
+		t.Fatalf("leap-day reset = %v", err)
+	}
+	if err := reservation.Commit(budgetMoney(t, 10)); err != nil {
+		sh := limiter.shard("daily")
+		sh.mu.Lock()
+		s := sh.states["daily"]
+		t.Fatalf("%v spent=%v active=%v days=%#v ownership=%#v total=%v daylimit=%v", err, s.spent, s.active, s.dayBuckets, reservation.ownership, s.total, s.dayLimit)
+	}
+	// The reservation was admitted on Feb 28; its settlement must not charge Feb 29.
+	state := limiter.shard("daily")
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.states["daily"].dayBuckets) != 2 {
+		t.Fatalf("day buckets = %d", len(state.states["daily"].dayBuckets))
+	}
+}
+
+func TestBudgetLimiterDailyRejectionCarriesResetAndTotalSuppressesIt(t *testing.T) {
+	current := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	limiter := NewBudgetLimiter(func() time.Time { return current })
+	day := DailyBudgetPolicy(budgetMoney(t, 2))
+	r, err := limiter.Reserve("daily-reset", day, budgetMoney(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Commit(budgetMoney(t, 2)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = limiter.Reserve("daily-reset", day, budgetMoney(t, 1))
+	var capacity *BudgetCapacityError
+	if !errors.As(err, &capacity) || capacity.ResetAt != time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC) {
+		t.Fatalf("daily rejection = %v/%v", err, capacity)
+	}
+	totalDay := TotalAndDailyBudgetPolicy(budgetMoney(t, 2), budgetMoney(t, 2))
+	if _, err := limiter.Reserve("total-day", totalDay, budgetMoney(t, 3)); !errors.As(err, &capacity) || capacity.ResetAt.IsZero() == false && capacity.TotalRejected == false {
+		t.Fatalf("combined rejection = %v", err)
+	}
+}
 
 func budgetMoney(t *testing.T, micros int64) accounting.Money {
 	t.Helper()

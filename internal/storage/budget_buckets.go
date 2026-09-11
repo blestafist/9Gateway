@@ -6,14 +6,18 @@ import (
 	"errors"
 	"math"
 	"time"
+
+	"github.com/pestit/9gateway/internal/limiter"
 )
 
 // BudgetBucketDelta is a signed change to one lifetime (total) budget bucket.
 // Lifetime buckets are identified by stable API-key ID; credentials and policy
 // data never cross this persistence boundary.
 type BudgetBucketDelta struct {
-	APIKeyID   string
-	SpentDelta int64
+	APIKeyID    string
+	SpentDelta  int64
+	Period      limiter.BudgetPeriod
+	PeriodStart time.Time
 }
 
 // BudgetBucket is the durable committed portion of a lifetime budget. Active
@@ -21,6 +25,8 @@ type BudgetBucketDelta struct {
 type BudgetBucket struct {
 	APIKeyID    string
 	SpentMicros int64
+	Period      limiter.BudgetPeriod
+	PeriodStart time.Time
 }
 
 var (
@@ -78,6 +84,12 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 		if delta.APIKeyID == "" {
 			return ErrInvalidBudgetBucket
 		}
+		if delta.Period == "" {
+			delta.Period = limiter.BudgetPeriodTotal
+		}
+		if delta.Period != limiter.BudgetPeriodTotal && (delta.Period != limiter.BudgetPeriodDay || !validDayStart(delta.PeriodStart)) {
+			return ErrInvalidBudgetBucket
+		}
 		if delta.SpentDelta == math.MinInt64 {
 			return ErrBudgetBucketUnderflow
 		}
@@ -99,7 +111,6 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 
 	// The timestamp is operational metadata only. It is intentionally not
 	// surfaced in errors or used as part of the bucket identity.
-	const totalStart int64 = 0
 	now := time.Now().UTC().Unix()
 	knownKeys := make(map[string]struct{}, len(valid))
 	for _, delta := range valid {
@@ -117,16 +128,16 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 			result, execErr := tx.ExecContext(ctx, `
 				UPDATE budget_buckets
 				SET spent_micros = spent_micros + ?, updated_at = ?
-				WHERE api_key_id = ? AND period_kind = 'total' AND period_start = 0
+				WHERE api_key_id = ? AND period_kind = ? AND period_start = ?
 				  AND spent_micros >= ?`,
-				delta.SpentDelta, now, delta.APIKeyID, -delta.SpentDelta)
+				delta.SpentDelta, now, delta.APIKeyID, delta.Period, bucketStart(delta), -delta.SpentDelta)
 			if execErr != nil {
 				return errors.New("apply budget buckets: write failed")
 			}
 			rows, rowsErr := result.RowsAffected()
 			if rowsErr != nil || rows != 1 {
 				var present int
-				if queryErr := tx.QueryRowContext(ctx, `SELECT 1 FROM budget_buckets WHERE api_key_id = ? AND period_kind = 'total' AND period_start = 0`, delta.APIKeyID).Scan(&present); errors.Is(queryErr, sql.ErrNoRows) {
+				if queryErr := tx.QueryRowContext(ctx, `SELECT 1 FROM budget_buckets WHERE api_key_id = ? AND period_kind = ? AND period_start = ?`, delta.APIKeyID, delta.Period, bucketStart(delta)).Scan(&present); errors.Is(queryErr, sql.ErrNoRows) {
 					return ErrBudgetBucketUnknownKey
 				}
 				return ErrBudgetBucketUnderflow
@@ -137,11 +148,11 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 		result, execErr := tx.ExecContext(ctx, `
 			INSERT INTO budget_buckets
 				(api_key_id, period_kind, period_start, spent_micros, created_at, updated_at)
-			VALUES (?, 'total', ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT(api_key_id, period_kind, period_start) DO UPDATE SET
 				spent_micros = budget_buckets.spent_micros + excluded.spent_micros,
 				updated_at = excluded.updated_at`,
-			delta.APIKeyID, totalStart, delta.SpentDelta, now, now)
+			delta.APIKeyID, delta.Period, bucketStart(delta), delta.SpentDelta, now, now)
 		if execErr != nil {
 			return ErrBudgetBucketOverflow
 		}
@@ -149,7 +160,7 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 			return ErrBudgetBucketOverflow
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind = 'total' AND period_start = 0 AND spent_micros = 0`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM budget_buckets WHERE spent_micros = 0`); err != nil {
 		return errors.New("apply budget buckets: cleanup failed")
 	}
 	if err := tx.Commit(); err != nil {
@@ -202,6 +213,8 @@ func (repository *BudgetBucketRepository) LoadTotal(ctx context.Context) ([]Budg
 		if bucket.APIKeyID == "" || bucket.SpentMicros < 0 || knownKey != 1 {
 			return nil, ErrInvalidBudgetBucket
 		}
+		bucket.Period = limiter.BudgetPeriodTotal
+		bucket.PeriodStart = time.Unix(0, 0).UTC()
 		result = append(result, bucket)
 	}
 	if err := rows.Err(); err != nil {
@@ -220,4 +233,48 @@ func (repository *BudgetBucketRepository) LoadSpent(ctx context.Context) ([]Budg
 
 func (repository *BudgetBucketRepository) LoadTotalSpent(ctx context.Context) ([]BudgetBucket, error) {
 	return repository.LoadTotal(ctx)
+}
+
+func currentDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+func validDayStart(t time.Time) bool { return !t.IsZero() && t.Equal(currentDay(t)) }
+func bucketStart(delta BudgetBucketDelta) int64 {
+	if delta.Period == limiter.BudgetPeriodDay {
+		return delta.PeriodStart.UTC().Unix()
+	}
+	return 0
+}
+
+// LoadDay restores one current UTC calendar-day bucket per key.
+func (repository *BudgetBucketRepository) LoadDay(ctx context.Context, now time.Time) ([]BudgetBucket, error) {
+	if ctx == nil || repository == nil || repository.database == nil {
+		return nil, ErrBudgetBucketUnavailable
+	}
+	start := currentDay(now)
+	rows, err := repository.database.QueryContext(ctx, `SELECT budget_buckets.api_key_id, budget_buckets.spent_micros, CASE WHEN api_keys.id IS NULL THEN 0 ELSE 1 END FROM budget_buckets LEFT JOIN api_keys ON api_keys.id=budget_buckets.api_key_id WHERE period_kind='day' AND period_start=? ORDER BY budget_buckets.api_key_id`, start.Unix())
+	if err != nil {
+		return nil, ErrBudgetBucketUnavailable
+	}
+	defer rows.Close()
+	result := []BudgetBucket{}
+	for rows.Next() {
+		var b BudgetBucket
+		var known int
+		if err := rows.Scan(&b.APIKeyID, &b.SpentMicros, &known); err != nil || b.APIKeyID == "" || b.SpentMicros < 0 || known != 1 {
+			return nil, ErrInvalidBudgetBucket
+		}
+		b.Period = limiter.BudgetPeriodDay
+		b.PeriodStart = start
+		result = append(result, b)
+	}
+	return result, rows.Err()
+}
+func (repository *BudgetBucketRepository) DeleteExpiredDays(ctx context.Context, before time.Time) error {
+	if repository == nil || repository.database == nil {
+		return ErrBudgetBucketUnavailable
+	}
+	_, err := repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='day' AND period_start < ?`, currentDay(before).Unix())
+	return err
 }

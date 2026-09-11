@@ -23,7 +23,7 @@ type BudgetAccumulator struct {
 	done       chan struct{}
 
 	mu        sync.Mutex
-	pending   map[string]int64
+	pending   map[BudgetBucketDelta]BudgetBucketDelta
 	accepting bool
 	stopOnce  sync.Once
 	lastErr   error
@@ -42,7 +42,7 @@ func NewBudgetAccumulatorWithContext(parent context.Context, repository *BudgetB
 		repository: repository,
 		ctx:        ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
-		pending: make(map[string]int64), accepting: true,
+		pending: make(map[BudgetBucketDelta]BudgetBucketDelta), accepting: true,
 	}
 	go accumulator.run()
 	return accumulator
@@ -58,8 +58,13 @@ func (accumulator *BudgetAccumulator) Sink(delta limiter.CommittedBudgetDelta) {
 	if !accumulator.accepting {
 		return
 	}
-	current := accumulator.pending[delta.KeyID]
-	next, ok := checkedSignedAdd(current, delta.Delta)
+	period := delta.Period
+	if period == "" {
+		period = limiter.BudgetPeriodTotal
+	}
+	identity := BudgetBucketDelta{APIKeyID: delta.KeyID, Period: period, PeriodStart: delta.PeriodStart.UTC()}
+	current := accumulator.pending[identity]
+	next, ok := checkedSignedAdd(current.SpentDelta, delta.Delta)
 	if !ok {
 		// The limiter already published the state. Keeping the accumulator
 		// unchanged is safer than emitting a malformed persistence write.
@@ -67,9 +72,11 @@ func (accumulator *BudgetAccumulator) Sink(delta limiter.CommittedBudgetDelta) {
 		return
 	}
 	if next == 0 {
-		delete(accumulator.pending, delta.KeyID)
+		delete(accumulator.pending, identity)
 	} else {
-		accumulator.pending[delta.KeyID] = next
+		value := identity
+		value.SpentDelta = next
+		accumulator.pending[identity] = value
 	}
 	select {
 	case accumulator.wake <- struct{}{}:
@@ -133,9 +140,9 @@ func (accumulator *BudgetAccumulator) take() []BudgetBucketDelta {
 		return nil
 	}
 	batch := make([]BudgetBucketDelta, 0, len(accumulator.pending))
-	for key, delta := range accumulator.pending {
-		batch = append(batch, BudgetBucketDelta{APIKeyID: key, SpentDelta: delta})
-		delete(accumulator.pending, key)
+	for identity, delta := range accumulator.pending {
+		batch = append(batch, delta)
+		delete(accumulator.pending, identity)
 	}
 	return batch
 }
@@ -144,16 +151,20 @@ func (accumulator *BudgetAccumulator) restore(batch []BudgetBucketDelta) {
 	accumulator.mu.Lock()
 	defer accumulator.mu.Unlock()
 	for _, delta := range batch {
-		current := accumulator.pending[delta.APIKeyID]
-		next, ok := checkedSignedAdd(current, delta.SpentDelta)
+		identity := delta
+		identity.SpentDelta = 0
+		current := accumulator.pending[identity]
+		next, ok := checkedSignedAdd(current.SpentDelta, delta.SpentDelta)
 		if !ok {
 			accumulator.lastErr = ErrBudgetAccumulatorOverflow
 			continue
 		}
 		if next == 0 {
-			delete(accumulator.pending, delta.APIKeyID)
+			delete(accumulator.pending, identity)
 		} else {
-			accumulator.pending[delta.APIKeyID] = next
+			value := identity
+			value.SpentDelta = next
+			accumulator.pending[identity] = value
 		}
 	}
 }

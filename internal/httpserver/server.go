@@ -464,7 +464,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var budgetPlan *accounting.BudgetReservationPlan
 	var selectedPricing accounting.PricingResolution
 	if authenticated {
-		if total, limited := principal.Policy.TotalBudget(); limited {
+		if total, limited := principal.Policy.TotalBudget(); limited || func() bool { _, day := principal.Policy.DailyBudget(); return day }() {
 			// Lifetime budget admission is intentionally restricted to known
 			// generation endpoints. Generic endpoints remain transparent only
 			// for keys without a budget policy.
@@ -503,7 +503,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				budgetAdmission = true
 				budgetPlan = &plan
 				selectedPricing = plan.SelectedPricing
-				_ = total // the policy value is read again when building lease options
+				_ = total // policy values are read again when building lease options
 			}
 		}
 	}
@@ -514,8 +514,10 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			options.TokenAmount = tokenPlan.Total.Int64()
 		}
 		if budgetPlan != nil {
-			total, _ := principal.Policy.TotalBudget()
-			options.BudgetPolicy = limiter.LimitedBudgetPolicy(total)
+			total, totalLimited := principal.Policy.TotalBudget()
+			day, dayLimited := principal.Policy.DailyBudget()
+			options.BudgetPolicy = limiter.LimitedBudgetPolicyWithDay(total, day, totalLimited)
+			options.BudgetPolicy.DayLimited = dayLimited
 			options.BudgetCandidate = budgetPlan.Reserved()
 		}
 		var admissionErr *limiter.AdmissionError
@@ -608,7 +610,16 @@ func (handler *proxyHandler) writeAdmissionError(response http.ResponseWriter, r
 			writeGatewayError(response, gatewayErrorInternal, "")
 			return
 		}
-		writeGatewayError(response, gatewayErrorBudgetLimit, "")
+		retry := 0
+		retry = rejection.RetryAfterSeconds
+		if retry <= 0 && !rejection.ResetAt.IsZero() {
+			retry = limiter.RetryAfterSecondsAt(time.Now().UTC(), rejection.ResetAt)
+		}
+		if retry > 0 {
+			writeGatewayErrorRetryAfter(response, gatewayErrorBudgetLimit, "", retry)
+		} else {
+			writeGatewayError(response, gatewayErrorBudgetLimit, "")
+		}
 		return
 	}
 	writeGatewayError(response, gatewayErrorConcurrencyLimit, "")
@@ -686,7 +697,8 @@ func shouldInspectRequestMetadata(request *http.Request) bool {
 	// still inspect eligible bodies for admission; all other requests remain
 	// byte-transparent and are not read solely to discover their size.
 	_, budgetLimited := principal.Policy.TotalBudget()
-	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited
+	_, dayLimited := principal.Policy.DailyBudget()
+	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited || dayLimited
 }
 
 func eligibleTokenRequest(request *http.Request) bool {

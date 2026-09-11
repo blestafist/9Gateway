@@ -3,10 +3,13 @@ package limiter
 import (
 	"errors"
 	"hash/fnv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
+	"github.com/pestit/9gateway/internal/auth"
 )
 
 // Bifrost provenance notice: the budget and usage paths at commit
@@ -29,6 +32,17 @@ var (
 	ErrBudgetInvalidActual = errors.New("invalid budget actual cost")
 	ErrBudgetArithmetic    = errors.New("budget arithmetic failure")
 )
+
+// BudgetCapacityError retains the daily reset which can make an otherwise
+// rejected admission possible. TotalRejected suppresses it when time alone is
+// insufficient.
+type BudgetCapacityError struct {
+	ResetAt       time.Time
+	TotalRejected bool
+}
+
+func (err *BudgetCapacityError) Error() string { return ErrBudgetCapacity.Error() }
+func (err *BudgetCapacityError) Unwrap() error { return ErrBudgetCapacity }
 
 // BudgetSettlementError is returned when a terminal operation had to choose a
 // safe fallback. Conservative reports whether the reservation's estimate was
@@ -89,6 +103,8 @@ type CommittedBudgetDelta struct {
 	KeyID          string
 	Delta          int64
 	CommittedDelta int64
+	Period         BudgetPeriod
+	PeriodStart    time.Time
 }
 
 // BudgetSpendDelta is a descriptive alias for CommittedBudgetDelta.
@@ -96,18 +112,36 @@ type BudgetSpendDelta = CommittedBudgetDelta
 
 // BudgetPolicy is the narrow total-budget input consumed by the limiter.
 type BudgetPolicy struct {
-	Total   accounting.Money
-	Limited bool
+	Total      accounting.Money
+	Limited    bool
+	Day        accounting.Money
+	DayLimited bool
 }
+
+type BudgetPeriod = auth.BudgetPeriod
+
+const BudgetPeriodTotal = auth.BudgetPeriodTotal
+const BudgetPeriodDay = auth.BudgetPeriodDay
 
 func UnlimitedBudgetPolicy() BudgetPolicy { return BudgetPolicy{} }
 func LimitedBudgetPolicy(total accounting.Money) BudgetPolicy {
 	return BudgetPolicy{Total: total, Limited: true}
 }
+func LimitedBudgetPolicyWithDay(total accounting.Money, day accounting.Money, totalLimited bool) BudgetPolicy {
+	return BudgetPolicy{Total: total, Limited: totalLimited, Day: day, DayLimited: true}
+}
+func DailyBudgetPolicy(day accounting.Money) BudgetPolicy {
+	return BudgetPolicy{Day: day, DayLimited: true}
+}
+func TotalAndDailyBudgetPolicy(total, day accounting.Money) BudgetPolicy {
+	return LimitedBudgetPolicyWithDay(total, day, true)
+}
 
 type BudgetSpent struct {
-	KeyID string
-	Spent accounting.Money
+	KeyID       string
+	Spent       accounting.Money
+	Period      BudgetPeriod
+	PeriodStart time.Time
 }
 
 type CommittedBudget = BudgetSpent
@@ -118,12 +152,17 @@ type budgetShard struct {
 }
 
 type budgetState struct {
-	spent      accounting.Money
-	active     accounting.Money
-	total      accounting.Money
-	hasLimit   bool
-	generation uint64
+	spent       accounting.Money
+	active      accounting.Money
+	dayBuckets  map[time.Time]budgetDayState
+	total       accounting.Money
+	hasLimit    bool
+	dayLimit    accounting.Money
+	hasDayLimit bool
+	totalLoaded bool
+	generation  uint64
 }
+type budgetDayState struct{ spent, active accounting.Money }
 
 const budgetShardCount = 32
 
@@ -133,6 +172,9 @@ type BudgetLimiter struct {
 	sequence  atomic.Uint64
 	sinkMu    sync.RWMutex
 	deltaSink func(CommittedBudgetDelta)
+	now       Clock
+	timeMu    sync.Mutex
+	lastNow   time.Time
 }
 
 // BudgetReservation is a copy-safe ownership handle. Copies share private
@@ -148,6 +190,7 @@ type budgetReservationOwnership struct {
 	state      *budgetState
 	generation uint64
 	amount     accounting.Money
+	dayStart   time.Time
 	finalized  bool
 	finalErr   error
 	result     BudgetSettlementResult
@@ -162,12 +205,17 @@ type BudgetAdjustmentTicket struct {
 	keyID      string
 	generation uint64
 	reserved   accounting.Money
+	dayStart   time.Time
 	consumed   bool
 	resultErr  error
 }
 
-func NewBudgetLimiter() *BudgetLimiter {
-	limiter := &BudgetLimiter{}
+func NewBudgetLimiter(clocks ...Clock) *BudgetLimiter {
+	var now Clock
+	if len(clocks) != 0 {
+		now = clocks[0]
+	}
+	limiter := &BudgetLimiter{now: now}
 	for index := range limiter.shards {
 		limiter.shards[index].states = make(map[string]*budgetState)
 	}
@@ -192,6 +240,31 @@ func (limiter *BudgetLimiter) sink() func(CommittedBudgetDelta) {
 	return limiter.deltaSink
 }
 
+func (limiter *BudgetLimiter) nowTime() time.Time {
+	if limiter == nil {
+		return time.Now().UTC()
+	}
+	limiter.timeMu.Lock()
+	defer limiter.timeMu.Unlock()
+	now := time.Now().UTC()
+	if limiter.now != nil {
+		now = limiter.now().UTC()
+	}
+	if !limiter.lastNow.IsZero() && now.Before(limiter.lastNow) {
+		return limiter.lastNow
+	}
+	limiter.lastNow = now
+	return now
+}
+func (limiter *BudgetLimiter) RetryAfterSeconds(resetAt time.Time) int {
+	return RetryAfterSecondsAt(limiter.nowTime(), resetAt)
+}
+func currentDay(now time.Time) time.Time {
+	now = now.UTC()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+}
+func validDayStart(start time.Time) bool { return !start.IsZero() && start.Equal(currentDay(start)) }
+
 // LoadSpent initializes committed lifetime spend without importing active
 // reservations. It is strict and atomic.
 func (limiter *BudgetLimiter) LoadSpent(values []BudgetSpent) error {
@@ -200,13 +273,21 @@ func (limiter *BudgetLimiter) LoadSpent(values []BudgetSpent) error {
 	}
 	pending := make(map[string]accounting.Money, len(values))
 	for _, value := range values {
-		if !validKeyID(value.KeyID) || !validKnownMoney(value.Spent) {
+		if !validKeyID(value.KeyID) || !validKnownMoney(value.Spent) || (value.Period != "" && value.Period != BudgetPeriodTotal && value.Period != BudgetPeriodDay) {
 			return ErrBudgetInvalid
 		}
-		if _, duplicate := pending[value.KeyID]; duplicate {
+		if value.Period == BudgetPeriodDay && !validDayStart(value.PeriodStart) {
 			return ErrBudgetInvalid
 		}
-		pending[value.KeyID] = value.Spent
+		period := value.Period
+		if period == "" {
+			period = BudgetPeriodTotal
+		}
+		identity := value.KeyID + "\x00" + string(period) + "\x00" + value.PeriodStart.UTC().Format(time.RFC3339Nano)
+		if _, duplicate := pending[identity]; duplicate {
+			return ErrBudgetInvalid
+		}
+		pending[identity] = value.Spent
 	}
 	limiter.lifecycle.Lock()
 	defer limiter.lifecycle.Unlock()
@@ -217,12 +298,19 @@ func (limiter *BudgetLimiter) LoadSpent(values []BudgetSpent) error {
 			limiter.shards[index].states = make(map[string]*budgetState)
 		}
 	}
-	for keyID := range pending {
-		if limiter.shard(keyID).states[keyID] != nil {
+	for identity, spent := range pending {
+		parts := strings.Split(identity, "\x00")
+		keyID := parts[0]
+		period := BudgetPeriod(parts[1])
+		start := time.Time{}
+		if period == BudgetPeriodDay {
+			start, _ = time.Parse(time.RFC3339Nano, parts[2])
+		}
+		state := limiter.shard(keyID).states[keyID]
+		_, loadedDay := stateDay(state, start)
+		if state != nil && ((period == BudgetPeriodDay && loadedDay) || period != BudgetPeriodDay && state.totalLoaded) {
 			return ErrBudgetInvalid
 		}
-	}
-	for keyID, spent := range pending {
 		if isZeroMoney(spent) {
 			continue
 		}
@@ -230,9 +318,28 @@ func (limiter *BudgetLimiter) LoadSpent(values []BudgetSpent) error {
 		if !ok {
 			return ErrBudgetState
 		}
-		limiter.shard(keyID).states[keyID] = &budgetState{spent: spent, active: knownZeroMoney(), generation: generation}
+		if state == nil {
+			state = &budgetState{spent: knownZeroMoney(), active: knownZeroMoney(), dayBuckets: make(map[time.Time]budgetDayState), generation: generation}
+			limiter.shard(keyID).states[keyID] = state
+		}
+		if period == BudgetPeriodDay {
+			if state.dayBuckets == nil {
+				state.dayBuckets = make(map[time.Time]budgetDayState)
+			}
+			state.dayBuckets[start] = budgetDayState{spent: spent, active: knownZeroMoney()}
+		} else {
+			state.spent, state.totalLoaded = spent, true
+		}
 	}
 	return nil
+}
+
+func stateDay(state *budgetState, start time.Time) (budgetDayState, bool) {
+	if state == nil || state.dayBuckets == nil {
+		return budgetDayState{}, false
+	}
+	bucket, ok := state.dayBuckets[start]
+	return bucket, ok
 }
 
 func (limiter *BudgetLimiter) LoadCommittedSpent(values []BudgetSpent) error {
@@ -260,34 +367,84 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 		if state.hasLimit && (!policy.Limited || !sameMoney(state.total, policy.Total)) {
 			return nil, ErrBudgetInvalid
 		}
+		if state.hasDayLimit && (!policy.DayLimited || !sameMoney(state.dayLimit, policy.Day)) {
+			return nil, ErrBudgetInvalid
+		}
 	}
-	if !policy.Limited {
+	if !policy.Limited && !policy.DayLimited {
 		return newBudgetReservation(limiter, keyID, nil, 0, candidate), nil
 	}
 	if shard.states == nil {
 		shard.states = make(map[string]*budgetState)
 	}
 	spent, active := knownZeroMoney(), knownZeroMoney()
+	daySpent, dayActive := knownZeroMoney(), knownZeroMoney()
+	dayStart := currentDay(limiter.nowTime())
 	if state != nil {
+		for start, bucket := range state.dayBuckets {
+			if start.Before(dayStart) && isZeroMoney(bucket.active) {
+				delete(state.dayBuckets, start)
+			}
+		}
 		spent, active = state.spent, state.active
+		if state.dayBuckets != nil {
+			bucket := state.dayBuckets[dayStart]
+			if bucket.spent.Known() {
+				daySpent = bucket.spent
+			}
+			if bucket.active.Known() {
+				dayActive = bucket.active
+			}
+		}
 	}
 	used, err := spent.Add(active)
 	if err != nil || !used.Known() {
 		return nil, ErrBudgetState
 	}
-	remaining, err := policy.Total.Subtract(used)
-	if err != nil {
-		if errors.Is(err, accounting.ErrMoneyUnderflow) {
-			return nil, ErrBudgetCapacity
+	totalRejected := false
+	if policy.Limited {
+		remaining, subErr := policy.Total.Subtract(used)
+		if subErr != nil {
+			if errors.Is(subErr, accounting.ErrMoneyUnderflow) {
+				totalRejected = true
+			} else {
+				return nil, ErrBudgetState
+			}
+		} else {
+			fits, cmpErr := candidate.LessOrEqual(remaining)
+			if cmpErr != nil {
+				return nil, ErrBudgetState
+			}
+			totalRejected = !fits
 		}
+	}
+	dayUsed, addErr := daySpent.Add(dayActive)
+	if addErr != nil {
 		return nil, ErrBudgetState
 	}
-	fits, err := candidate.LessOrEqual(remaining)
-	if err != nil {
-		return nil, ErrBudgetState
+	dayRejected := false
+	if policy.DayLimited {
+		remaining, subErr := policy.Day.Subtract(dayUsed)
+		if subErr != nil {
+			if errors.Is(subErr, accounting.ErrMoneyUnderflow) {
+				dayRejected = true
+			} else {
+				return nil, ErrBudgetState
+			}
+		} else {
+			fits, cmpErr := candidate.LessOrEqual(remaining)
+			if cmpErr != nil {
+				return nil, ErrBudgetState
+			}
+			dayRejected = !fits
+		}
 	}
-	if !fits {
-		return nil, ErrBudgetCapacity
+	if totalRejected || dayRejected {
+		reset := time.Time{}
+		if dayRejected && !totalRejected {
+			reset = dayStart.Add(24 * time.Hour)
+		}
+		return nil, &BudgetCapacityError{ResetAt: reset, TotalRejected: totalRejected}
 	}
 	if isZeroMoney(candidate) {
 		return newBudgetReservation(limiter, keyID, nil, 0, candidate), nil
@@ -296,20 +453,46 @@ func (limiter *BudgetLimiter) Reserve(keyID string, policy BudgetPolicy, candida
 	if err != nil || !newActive.Known() {
 		return nil, ErrBudgetState
 	}
+	newDayActive := dayActive
+	if policy.DayLimited {
+		newDayActive, err = dayActive.Add(candidate)
+		if err != nil {
+			return nil, ErrBudgetState
+		}
+	}
 	if state == nil {
 		generation, ok := limiter.nextGeneration()
 		if !ok {
 			return nil, ErrBudgetState
 		}
-		state = &budgetState{spent: spent, active: newActive, total: policy.Total, hasLimit: true, generation: generation}
+		state = &budgetState{spent: spent, active: newActive, dayBuckets: make(map[time.Time]budgetDayState), total: policy.Total, hasLimit: policy.Limited, dayLimit: policy.Day, hasDayLimit: policy.DayLimited, generation: generation}
+		state.totalLoaded = policy.Limited
+		if policy.DayLimited {
+			state.dayBuckets[dayStart] = budgetDayState{spent: daySpent, active: newDayActive}
+		}
 		shard.states[keyID] = state
 	} else {
-		if !state.hasLimit {
+		if policy.Limited {
 			state.total, state.hasLimit = policy.Total, true
 		}
 		state.active = newActive
+		if policy.DayLimited {
+			if state.dayBuckets == nil {
+				state.dayBuckets = make(map[time.Time]budgetDayState)
+			}
+			state.dayBuckets[dayStart] = budgetDayState{spent: daySpent, active: newDayActive}
+		}
+		if policy.Limited {
+			state.total, state.hasLimit = policy.Total, true
+		}
+		if policy.DayLimited {
+			state.dayLimit, state.hasDayLimit = policy.Day, true
+		}
 	}
-	return newBudgetReservation(limiter, keyID, state, state.generation, candidate), nil
+	if !policy.DayLimited {
+		dayStart = time.Time{}
+	}
+	return newBudgetReservation(limiter, keyID, state, state.generation, candidate, dayStart), nil
 }
 
 func (limiter *BudgetLimiter) TryReserve(keyID string, policy BudgetPolicy, candidate accounting.Money) (*BudgetReservation, error) {
@@ -424,14 +607,16 @@ func (reservation *BudgetReservation) finalizeInternal(kind BudgetSettlementKind
 		ownership.mu.Unlock()
 		return result, ErrBudgetState
 	}
-	result, err, delta, sink, ticket := ownership.limiter.settleReservation(ownership, kind, actual, deferred)
+	result, err, deltas, sink, ticket := ownership.limiter.settleReservation(ownership, kind, actual, deferred)
 	ownership.result, ownership.finalErr, ownership.ticket, ownership.finalized = result, err, ticket, true
 	ownership.mu.Unlock()
-	notifyBudgetDelta(sink, delta)
+	for _, delta := range deltas {
+		notifyBudgetDelta(sink, &delta)
+	}
 	return result, err
 }
 
-func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwnership, kind BudgetSettlementKind, actual accounting.Money, deferred bool) (BudgetSettlementResult, error, *CommittedBudgetDelta, func(CommittedBudgetDelta), *BudgetAdjustmentTicket) {
+func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwnership, kind BudgetSettlementKind, actual accounting.Money, deferred bool) (BudgetSettlementResult, error, []CommittedBudgetDelta, func(CommittedBudgetDelta), *BudgetAdjustmentTicket) {
 	result := BudgetSettlementResult{KeyID: ownership.keyID, Kind: kind, Reserved: ownership.amount, Actual: actual, Charged: knownZeroMoney()}
 	if limiter == nil {
 		result.Error = ErrBudgetState
@@ -443,7 +628,7 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 			result.Error = &BudgetSettlementError{Cause: ErrBudgetInvalidActual, Conservative: true}
 		}
 		if kind == BudgetSettlementDeferred {
-			return result, result.Error, nil, nil, &BudgetAdjustmentTicket{reserved: ownership.amount}
+			return result, result.Error, nil, nil, &BudgetAdjustmentTicket{reserved: ownership.amount, dayStart: ownership.dayStart}
 		}
 		return result, result.Error, nil, nil, nil
 	}
@@ -472,8 +657,26 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 		result.Kind, result.Error = BudgetSettlementConservative, &BudgetSettlementError{Cause: ErrBudgetInvalidActual, Conservative: true}
 	}
 	newActive, subErr := state.active.Subtract(ownership.amount)
-	newSpent, addErr := state.spent.Add(charge)
-	if subErr != nil || !newActive.Known() {
+	newSpent, addErr := state.spent, error(nil)
+	if state.hasLimit {
+		newSpent, addErr = state.spent.Add(charge)
+	}
+	day := budgetDayState{spent: knownZeroMoney(), active: knownZeroMoney()}
+	if state.dayBuckets != nil {
+		if existing, ok := state.dayBuckets[ownership.dayStart]; ok {
+			day = existing
+		}
+	}
+	newDayActive, daySubErr := day.active, error(nil)
+	newDaySpent, dayAddErr := day.spent, error(nil)
+	if state.hasDayLimit {
+		newDayActive, daySubErr = day.active.Subtract(ownership.amount)
+		newDaySpent, dayAddErr = day.spent.Add(charge)
+	}
+	if !state.hasDayLimit {
+		newDayActive, newDaySpent, daySubErr, dayAddErr = day.active, day.spent, nil, nil
+	}
+	if subErr != nil || daySubErr != nil || !newActive.Known() || !newDayActive.Known() {
 		// The active counter cannot be safely released if its exact admitted
 		// amount is absent. Do not partially mutate a corrupt state.
 		shard.mu.Unlock()
@@ -481,11 +684,11 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 		result.Error = &BudgetSettlementError{Cause: ErrBudgetState, Conservative: false}
 		return result, result.Error, nil, nil, nil
 	}
-	if addErr != nil || !newSpent.Known() {
+	if addErr != nil || dayAddErr != nil || !newSpent.Known() || !newDaySpent.Known() {
 		// A failed known-cost transition gets one conservative attempt. If even
 		// that cannot be represented, retaining active state is safer than
 		// pretending a charge was accounted for.
-		if !isZeroMoney(charge) || kind == BudgetSettlementKnown {
+		if state.hasLimit && (!isZeroMoney(charge) || kind == BudgetSettlementKnown) {
 			newSpent, addErr = state.spent.Add(ownership.amount)
 		}
 		if subErr != nil || addErr != nil || !newSpent.Known() {
@@ -498,29 +701,40 @@ func (limiter *BudgetLimiter) settleReservation(ownership *budgetReservationOwne
 		charge = ownership.amount
 	}
 	state.active, state.spent = newActive, newSpent
+	if state.hasDayLimit && !ownership.dayStart.IsZero() {
+		if state.dayBuckets == nil {
+			state.dayBuckets = make(map[time.Time]budgetDayState)
+		}
+		state.dayBuckets[ownership.dayStart] = budgetDayState{spent: newDaySpent, active: newDayActive}
+	}
 	result.Charged = charge
 	if micros, known := charge.Micros(); known {
 		result.CommittedDelta = micros
 	}
-	var delta *CommittedBudgetDelta
+	var deltas []CommittedBudgetDelta
 	if !isZeroMoney(charge) {
-		delta = checkedBudgetDelta(ownership.keyID, result.CommittedDelta)
+		if state.hasLimit {
+			deltas = append(deltas, *checkedBudgetDelta(ownership.keyID, result.CommittedDelta, BudgetPeriodTotal, time.Time{}))
+		}
+		if state.hasDayLimit && !ownership.dayStart.IsZero() {
+			deltas = append(deltas, *checkedBudgetDelta(ownership.keyID, result.CommittedDelta, BudgetPeriodDay, ownership.dayStart))
+		}
 	}
-	if isZeroMoney(state.spent) && isZeroMoney(state.active) {
+	if isZeroMoney(state.spent) && isZeroMoney(state.active) && len(state.dayBuckets) == 0 {
 		delete(shard.states, ownership.keyID)
 	}
 	sink := limiter.sink()
 	var adjustment *BudgetAdjustmentTicket
 	if deferred && result.Error == nil {
-		adjustment = &BudgetAdjustmentTicket{limiter: limiter, keyID: ownership.keyID, generation: ownership.generation, reserved: ownership.amount}
+		adjustment = &BudgetAdjustmentTicket{limiter: limiter, keyID: ownership.keyID, generation: ownership.generation, reserved: ownership.amount, dayStart: ownership.dayStart}
 	}
 	shard.mu.Unlock()
 	limiter.lifecycle.RUnlock()
-	return result, result.Error, delta, sink, adjustment
+	return result, result.Error, deltas, sink, adjustment
 }
 
-func checkedBudgetDelta(keyID string, delta int64) *CommittedBudgetDelta {
-	return &CommittedBudgetDelta{KeyID: keyID, Delta: delta, CommittedDelta: delta}
+func checkedBudgetDelta(keyID string, delta int64, period BudgetPeriod, start time.Time) *CommittedBudgetDelta {
+	return &CommittedBudgetDelta{KeyID: keyID, Delta: delta, CommittedDelta: delta, Period: period, PeriodStart: start}
 }
 
 func notifyBudgetDelta(sink func(CommittedBudgetDelta), delta *CommittedBudgetDelta) {
@@ -575,7 +789,9 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 		return err
 	}
 	var newSpent accounting.Money
+	var newDaySpent accounting.Money
 	var delta int64
+	var dayDelta int64
 	var ok bool
 	comparison, cmpErr := actual.Compare(reserved)
 	if cmpErr != nil {
@@ -583,28 +799,61 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 	} else if comparison == accounting.Greater {
 		increase, subErr := actual.Subtract(reserved)
 		var addErr error
-		newSpent, addErr = state.spent.Add(increase)
+		newSpent, addErr = state.spent, nil
+		if state.hasLimit {
+			newSpent, addErr = state.spent.Add(increase)
+		}
 		if subErr != nil || addErr != nil || !newSpent.Known() {
 			ticket.resultErr = &BudgetSettlementError{Cause: ErrBudgetArithmetic, Conservative: true}
 		} else {
 			delta, ok = moneyMicros(increase)
+			if !ticket.dayStart.IsZero() {
+				day := state.dayBuckets[ticket.dayStart]
+				var dayErr error
+				newDaySpent, dayErr = day.spent.Add(increase)
+				if dayErr != nil || !newDaySpent.Known() {
+					ok = false
+				} else {
+					dayDelta = delta
+				}
+			}
 		}
 	} else if comparison == accounting.Less {
 		refund, subErr := reserved.Subtract(actual)
 		var subErr2 error
-		newSpent, subErr2 = state.spent.Subtract(refund)
+		newSpent, subErr2 = state.spent, nil
+		if state.hasLimit {
+			newSpent, subErr2 = state.spent.Subtract(refund)
+		}
 		if subErr != nil || subErr2 != nil || !newSpent.Known() {
 			ticket.resultErr = &BudgetSettlementError{Cause: ErrBudgetArithmetic, Conservative: true}
 		} else {
 			r, _ := moneyMicros(refund)
 			delta = -r
 			ok = true
+			if !ticket.dayStart.IsZero() {
+				day := state.dayBuckets[ticket.dayStart]
+				newDaySpent, subErr2 = day.spent.Subtract(refund)
+				if subErr2 != nil || !newDaySpent.Known() {
+					ok = false
+				} else {
+					dayDelta = delta
+				}
+			}
 		}
 	} else {
 		newSpent, ok = state.spent, true
+		if !ticket.dayStart.IsZero() {
+			newDaySpent = state.dayBuckets[ticket.dayStart].spent
+		}
 	}
 	if ticket.resultErr == nil && ok {
 		state.spent = newSpent
+		if !ticket.dayStart.IsZero() {
+			day := state.dayBuckets[ticket.dayStart]
+			day.spent = newDaySpent
+			state.dayBuckets[ticket.dayStart] = day
+		}
 		if isZeroMoney(state.spent) && isZeroMoney(state.active) {
 			delete(shard.states, keyID)
 		} else if delta != 0 {
@@ -613,14 +862,17 @@ func (ticket *BudgetAdjustmentTicket) Adjust(actual accounting.Money) error {
 	}
 	err := ticket.resultErr
 	var deltaValue *CommittedBudgetDelta
-	if err == nil && delta != 0 {
-		deltaValue = checkedBudgetDelta(keyID, delta)
+	if err == nil && delta != 0 && state.hasLimit {
+		deltaValue = checkedBudgetDelta(keyID, delta, BudgetPeriodTotal, time.Time{})
 	}
 	sink := limiter.sink()
 	shard.mu.Unlock()
 	limiter.lifecycle.RUnlock()
 	ticket.mu.Unlock()
 	notifyBudgetDelta(sink, deltaValue)
+	if err == nil && dayDelta != 0 {
+		notifyBudgetDelta(sink, checkedBudgetDelta(keyID, dayDelta, BudgetPeriodDay, ticket.dayStart))
+	}
 	return err
 }
 
@@ -665,10 +917,13 @@ func (limiter *BudgetLimiter) nextGeneration() (uint64, bool) {
 }
 
 func validPolicy(policy BudgetPolicy) bool {
-	if !policy.Limited {
-		return !policy.Total.Known()
+	if policy.Limited != validKnownMoney(policy.Total) {
+		return false
 	}
-	return validKnownMoney(policy.Total)
+	if !policy.DayLimited {
+		return !policy.Day.Known()
+	}
+	return validKnownMoney(policy.Day)
 }
 func validKeyID(keyID string) bool { return keyID != "" }
 func validKnownMoney(value accounting.Money) bool {
@@ -702,6 +957,23 @@ func validateBudgetState(state *budgetState) error {
 			return ErrBudgetState
 		}
 	}
+	if state.hasDayLimit && !validKnownMoney(state.dayLimit) {
+		return ErrBudgetState
+	}
+	for start, bucket := range state.dayBuckets {
+		if !validDayStart(start) || !validKnownMoney(bucket.spent) || !validKnownMoney(bucket.active) {
+			return ErrBudgetState
+		}
+		if _, err := bucket.spent.Add(bucket.active); err != nil {
+			return ErrBudgetState
+		}
+		if state.hasDayLimit {
+			fits, err := bucket.active.LessOrEqual(state.dayLimit)
+			if err != nil || !fits {
+				return ErrBudgetState
+			}
+		}
+	}
 	return nil
 }
 
@@ -720,6 +992,10 @@ func (limiter *BudgetLimiter) unlockAllShards() {
 		limiter.shards[index].mu.Unlock()
 	}
 }
-func newBudgetReservation(limiter *BudgetLimiter, keyID string, state *budgetState, generation uint64, amount accounting.Money) *BudgetReservation {
-	return &BudgetReservation{ownership: &budgetReservationOwnership{limiter: limiter, keyID: keyID, state: state, generation: generation, amount: amount}}
+func newBudgetReservation(limiter *BudgetLimiter, keyID string, state *budgetState, generation uint64, amount accounting.Money, dayStart ...time.Time) *BudgetReservation {
+	start := time.Time{}
+	if len(dayStart) != 0 {
+		start = dayStart[0]
+	}
+	return &BudgetReservation{ownership: &budgetReservationOwnership{limiter: limiter, keyID: keyID, state: state, generation: generation, amount: amount, dayStart: start}}
 }
