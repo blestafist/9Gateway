@@ -740,6 +740,31 @@ Transport/streaming слой Bifrost копировать концептуаль
 
 Предпочтительный подход: заимствовать проверенные алгоритмы и структуры данных там, где они хорошо отделены, но не переносить Bifrost architecture целиком.
 
+Для задач, связанных с tokenizer, accounting, limiter, pricing, budget и
+observability, перед реализацией необходимо выполнить короткий reuse-check:
+
+1. Найти эквивалентную функциональность в зафиксированном локальном checkout
+   `.references/bifrost`, если он доступен.
+2. Зафиксировать просмотренный commit и конкретные source paths.
+3. Проверить не только корневую лицензию Bifrost, но и происхождение конкретного
+   файла, embedded data и лицензии прямых/транзитивных зависимостей.
+4. Сравнить семантику с требованиями этого gateway: single-instance SQLite,
+   reservation/reconciliation, client cancellation и отсутствие влияния
+   accounting на transport lifecycle.
+5. Выбрать один из вариантов: использовать поддерживаемую permissive dependency,
+   адаптировать маленький изолированный фрагмент либо написать минимальную
+   независимую реализацию.
+6. При адаптации сохранить обязательные copyright/license/NOTICE attribution,
+   явно отметить изменённые файлы и указать происхождение в commit или рядом с
+   кодом.
+
+Наличие аналога в Bifrost не означает, что его нужно копировать. Локальный
+`.references/bifrost` является только ignored development reference и не должен
+становиться build/runtime dependency, git submodule или частью release artifact.
+Если реализация Bifrost связана с provider routing, protocol translation,
+cluster/plugin infrastructure или его streaming lifecycle, предпочтительна
+собственная узкая реализация под контракт этого проекта.
+
 ## 30. MVP scope
 
 Первая реально используемая версия должна включать:

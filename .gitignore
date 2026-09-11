@@ -31,6 +31,9 @@ coverage.html
 *.log
 /tmp/
 
+# Local source checkouts used as implementation references
+/.references/
+
 # Editor and operating-system files
 .DS_Store
 .idea/
