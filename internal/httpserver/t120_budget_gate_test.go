@@ -461,8 +461,6 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 	cancelSeen := make(chan struct{})
 	var cancelOnce sync.Once
 	var calls atomic.Int32
-	settlementSeen := make(chan struct{})
-	settlementError := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
 		if request.Header.Get("Authorization") != "Bearer cancel-upstream" {
@@ -482,24 +480,7 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	process := t120StartProcessWithBudgetSink(t, databasePath, clock, t120Pricing(t), upstream.URL, "cancel-upstream", "cancel-admin", string(pepper), io.Discard, func(delta limiter.CommittedBudgetDelta) {
-		if delta.Delta == 0 {
-			return
-		}
-		select {
-		case <-cancelSeen:
-			select {
-			case <-settlementSeen:
-			default:
-				close(settlementSeen)
-			}
-		default:
-			select {
-			case settlementError <- "budget settlement arrived before upstream cancellation was observed":
-			default:
-			}
-		}
-	})
+	process := t120StartProcess(t, databasePath, clock, t120Pricing(t), upstream.URL, "cancel-upstream", "cancel-admin", string(pepper), io.Discard)
 	client := transport.NewClient()
 	ctx, cancel := context.WithCancel(context.Background())
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, process.gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"exact","messages":[{"role":"user","content":"cancel prompt sentinel"}],"stream":true}`))
@@ -520,11 +501,9 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 	cancel()
 	response.Body.Close()
 	select {
-	case <-settlementSeen:
-	case errText := <-settlementError:
-		t.Fatal(errText)
+	case <-cancelSeen:
 	case <-time.After(time.Second):
-		t.Fatal("upstream cancellation and subsequent budget settlement were not observed")
+		t.Fatal("upstream did not observe client cancellation")
 	}
 	t120WaitFor(t, func() bool { return t120BudgetTotal(t, databasePath, "cancel-key") == 1 })
 	t120WaitFor(t, func() bool { return t120TokenCommitted(t, databasePath, clock.Now(), "cancel-key") == 2 })
@@ -591,6 +570,80 @@ func TestT120PersistentCancellationSettlesAndRestoresWithoutLease(t *testing.T) 
 		t.Fatalf("restart settlement persisted tokens = %d, want exact 4", got)
 	}
 	t120StopProcess(t, process)
+}
+
+func TestT120LocalCancellationIsObservedBeforeBudgetSettlement(t *testing.T) {
+	key, authenticator := t110Key(t, `{"allowed_models":["exact"],"budget_limits":[{"amount_micros":3,"period":"total"},{"amount_micros":3,"period":"day"},{"amount_micros":3,"period":"month"}]}`)
+	const (
+		t120CancellationPending int32 = iota
+		t120CancellationObservedBeforeDelta
+		t120CancellationDeltaBeforeObservation
+	)
+	upstream := &t120CancellationRoundTripper{received: make(chan struct{}), observedDone: make(chan struct{})}
+	budget := limiter.NewBudgetLimiter()
+	policy, err := auth.ParsePolicyJSON([]byte(`{"allowed_models":["exact"],"budget_limits":[{"amount_micros":3,"period":"total"},{"amount_micros":3,"period":"day"},{"amount_micros":3,"period":"month"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget.RegisterPolicy("t110-key-a", budgetPolicy(policy))
+	var firstTerminal atomic.Int32
+	budget.SetCommittedDeltaSink(func(delta limiter.CommittedBudgetDelta) {
+		if delta.Delta == 0 {
+			return
+		}
+		observation := int32(t120CancellationDeltaBeforeObservation)
+		if upstream.observed.Load() {
+			observation = t120CancellationObservedBeforeDelta
+		}
+		// The first non-zero period delta is the ordering proof. Do not let a
+		// later total/day/month callback hide an earlier bad observation.
+		firstTerminal.CompareAndSwap(t120CancellationPending, observation)
+	})
+	proxy := newProxyHandlerWithLimitersAndTokenConfig(
+		&http.Client{Transport: upstream}, "http://upstream.invalid", "upstream-secret",
+		limiter.NewRequestLimiter(nil), limiter.NewConcurrencyLimiter(),
+		TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, PricingResolver: accounting.NewPricingResolver(t120Pricing(t)), BudgetLimiter: budget},
+	)
+	principal, err := authenticator.Authenticate(key.RawKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		proxy.ServeHTTP(response, request.WithContext(context.WithValue(request.Context(), principalContextKey{}, principal)))
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://gateway.test/v1/chat/completions", strings.NewReader(`{"model":"exact","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+key.RawKey)
+	request.Header.Set("Content-Type", "application/json")
+	requestDone := make(chan struct{})
+	recorder := httptest.NewRecorder()
+	go func() {
+		handler.ServeHTTP(recorder, request)
+		close(requestDone)
+	}()
+	select {
+	case <-upstream.received:
+	case <-time.After(time.Second):
+		t.Fatalf("local upstream RoundTrip was not started: status %d body %q", recorder.Code, recorder.Body.String())
+	}
+	cancel()
+	select {
+	case <-upstream.observedDone:
+	case <-time.After(time.Second):
+		t.Fatal("local upstream RoundTrip did not observe cancellation")
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled gateway request did not return")
+	}
+	if got := firstTerminal.Load(); got != t120CancellationObservedBeforeDelta {
+		t.Fatalf("first budget settlement observation = %d, want cancellation observation before first delta", got)
+	}
 }
 
 // TestT120BlockedObservationAndSQLiteWritersAreOffTheTransportPath proves the
@@ -904,7 +957,25 @@ func t120WaitFor(t *testing.T, predicate func() bool) {
 	t.Fatal("condition did not become true")
 }
 
-func t120StartProcess(t *testing.T, path string, clock *requestLimitTestClock, pricing config.PricingConfig, upstreamURL, upstreamCredential, adminCredential, pepper string, logs io.Writer, budgetSinks ...func(limiter.CommittedBudgetDelta)) *t120Process {
+// t120CancellationRoundTripper proves the local ordering contract without
+// depending on an httptest server goroutine being scheduled before settlement.
+// RoundTrip acknowledges cancellation synchronously, before it returns the
+// context error that causes the handler's cleanup defer to run.
+type t120CancellationRoundTripper struct {
+	received     chan struct{}
+	observed     atomic.Bool
+	observedDone chan struct{}
+}
+
+func (roundTripper *t120CancellationRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	close(roundTripper.received)
+	<-request.Context().Done()
+	roundTripper.observed.Store(true)
+	close(roundTripper.observedDone)
+	return nil, request.Context().Err()
+}
+
+func t120StartProcess(t *testing.T, path string, clock *requestLimitTestClock, pricing config.PricingConfig, upstreamURL, upstreamCredential, adminCredential, pepper string, logs io.Writer) *t120Process {
 	t.Helper()
 	database, err := storage.Open(context.Background(), path)
 	if err != nil {
@@ -977,23 +1048,12 @@ func t120StartProcess(t *testing.T, path string, clock *requestLimitTestClock, p
 	tokenAccumulator := storage.NewUsageAggregateAccumulator(usageRepository)
 	tokens.SetCommittedDeltaSink(tokenAccumulator.Sink)
 	budgetAccumulator := storage.NewBudgetAccumulator(budgetRepository)
-	budget.SetCommittedDeltaSink(func(delta limiter.CommittedBudgetDelta) {
-		budgetAccumulator.Sink(delta)
-		for _, sink := range budgetSinks {
-			if sink != nil {
-				sink(delta)
-			}
-		}
-	})
+	budget.SetCommittedDeltaSink(budgetAccumulator.Sink)
 	handler, err := NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(transport.NewClient(), upstreamURL, upstreamCredential, adminCredential, pepper, repository, limiter.NewRequestLimiter(clock.Now), limiter.NewConcurrencyLimiter(), logger, tokens, TokenAdmissionConfig{FallbackUnknownInputTokens: 1, FallbackMaxOutputTokens: 1, PricingResolver: accounting.NewPricingResolver(pricing), BudgetLimiter: budget}, worker, auth.TokenModeUsageOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &t120Process{database: database, gateway: httptest.NewServer(handler), worker: worker, logger: logger, tokenAccumulator: tokenAccumulator, budgetAccumulator: budgetAccumulator}
-}
-
-func t120StartProcessWithBudgetSink(t *testing.T, path string, clock *requestLimitTestClock, pricing config.PricingConfig, upstreamURL, upstreamCredential, adminCredential, pepper string, logs io.Writer, sink func(limiter.CommittedBudgetDelta)) *t120Process {
-	return t120StartProcess(t, path, clock, pricing, upstreamURL, upstreamCredential, adminCredential, pepper, logs, sink)
 }
 
 func t120StopProcess(t *testing.T, process *t120Process) {
