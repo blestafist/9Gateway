@@ -64,12 +64,15 @@ type BudgetPricingSource struct {
 // admission. Reservation is known zero for a deliberately matched all-zero
 // rule; an unrestricted skip has an unknown Reservation and Skipped is true.
 type BudgetReservationPlan struct {
-	Reservation  Money
-	Pricing      BudgetPricingSource
-	InputSource  ReservationInputSource
-	OutputSource ReservationOutputSource
-	InputQuality EstimateQuality
-	Skipped      bool
+	Reservation Money
+	// Pricing is the immutable selected rule retained for post-response
+	// reconciliation. It is copied by value and contains no resolver state.
+	SelectedPricing PricingResolution
+	Pricing         BudgetPricingSource
+	InputSource     ReservationInputSource
+	OutputSource    ReservationOutputSource
+	InputQuality    EstimateQuality
+	Skipped         bool
 }
 
 // Known reports whether Reservation is a resolved monetary amount. A skipped
@@ -125,7 +128,8 @@ func PlanBudgetReservation(options BudgetReservationOptions) (BudgetReservationP
 		return BudgetReservationPlan{}, ErrBudgetCostInvalid
 	}
 	return BudgetReservationPlan{
-		Reservation: cost,
+		Reservation:     cost,
+		SelectedPricing: pricing,
 		Pricing: BudgetPricingSource{
 			Selector:            rule.Model(),
 			Exact:               rule.IsExact(),

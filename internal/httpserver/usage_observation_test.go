@@ -10,8 +10,79 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pestit/9gateway/internal/accounting"
+	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/limiter"
+	"gopkg.in/yaml.v3"
 )
+
+func TestT111UsageObservationReconcilesTokenAndBudgetIndependently(t *testing.T) {
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	var pricingConfig config.PricingConfig
+	if err := yaml.Unmarshal([]byte("rules:\n  - model: test\n    input_per_million_micros: 500000\n    output_per_million_micros: 500000\n"), &pricingConfig); err != nil {
+		t.Fatal(err)
+	}
+	pricing := accounting.NewPricingResolver(pricingConfig).Resolve("test")
+	budget := limiter.NewBudgetLimiter()
+	var budgetDelta int64
+	budget.SetCommittedDeltaSink(func(delta limiter.CommittedBudgetDelta) { budgetDelta += delta.Delta })
+	tokens := limiter.NewTokenLimiter(clock.Now)
+	coordinator := limiter.NewResourceLeaseCoordinator(nil, tokens, budget)
+	reserved, err := accounting.NewMoneyMicros(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, rejection := coordinator.Acquire(limiter.ResourceLeaseOptions{
+		KeyID: "t111", TokenWindows: []limiter.TokenWindow{{Amount: 100, Duration: time.Minute}}, TokenAmount: 10,
+		BudgetPolicy: limiter.LimitedBudgetPolicy(reserved), BudgetCandidate: reserved,
+	})
+	if rejection != nil {
+		t.Fatalf("admission rejection = %v", rejection)
+	}
+	worker := NewUsageObservationWorker(UsageObservationWorkerOptions{Capacity: 1})
+	t.Cleanup(func() { shutdownObservationWorker(t, worker) })
+	tickets, err := lease.TransportCompleteWithAdjustments()
+	if err != nil || tickets.Token == nil || tickets.Budget == nil {
+		t.Fatalf("deferred tickets = (%+v, %v)", tickets, err)
+	}
+	if !worker.Submit(NewUsageObservationJobWithPricing([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), ContentCodingIdentity, tickets, pricing)) {
+		t.Fatal("observation was dropped")
+	}
+	waitForObservationCount(t, worker, 1)
+	if got := budgetDelta; got != 1 {
+		t.Fatalf("budget net charge = %d, want 1 micro", got)
+	}
+	if got := bucketForObservationTest(t, tokens, "t111"); got != 2 {
+		t.Fatalf("token adjustment = %d, want 2", got)
+	}
+}
+
+func TestT111MissingCostComponentKeepsBudgetConservative(t *testing.T) {
+	var pricingConfig config.PricingConfig
+	if err := yaml.Unmarshal([]byte("rules:\n  - model: test\n    input_per_million_micros: 500000\n    output_per_million_micros: 500000\n"), &pricingConfig); err != nil {
+		t.Fatal(err)
+	}
+	pricing := accounting.NewPricingResolver(pricingConfig).Resolve("test")
+	budget := limiter.NewBudgetLimiter()
+	var budgetDelta int64
+	budget.SetCommittedDeltaSink(func(delta limiter.CommittedBudgetDelta) { budgetDelta += delta.Delta })
+	reserved, _ := accounting.NewMoneyMicros(10)
+	coordinator := limiter.NewResourceLeaseCoordinator(nil, nil, budget)
+	lease, rejection := coordinator.Acquire(limiter.ResourceLeaseOptions{KeyID: "t111-missing", BudgetPolicy: limiter.LimitedBudgetPolicy(reserved), BudgetCandidate: reserved})
+	if rejection != nil {
+		t.Fatalf("admission rejection = %v", rejection)
+	}
+	worker := NewUsageObservationWorker(UsageObservationWorkerOptions{Capacity: 1})
+	t.Cleanup(func() { shutdownObservationWorker(t, worker) })
+	tickets, _ := lease.TransportCompleteWithAdjustments()
+	if !worker.Submit(NewUsageObservationJobWithPricing([]byte(`{"usage":{"total_tokens":2}}`), ContentCodingIdentity, tickets, pricing)) {
+		t.Fatal("observation was dropped")
+	}
+	waitForObservationCount(t, worker, 1)
+	if budgetDelta != 10 {
+		t.Fatalf("unknown cost changed budget by %d, want conservative charge", budgetDelta)
+	}
+}
 
 func TestUsageObservationParsesBoundedJSONAndGzip(t *testing.T) {
 	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}

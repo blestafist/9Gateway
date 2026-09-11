@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/limiter"
 )
 
@@ -17,13 +18,18 @@ type responseObservation struct {
 	bytes    []byte
 	overflow bool
 	eligible bool
+	pricing  accounting.PricingResolution
 }
 
-func newResponseObservation(maxBytes int64, coding ContentCoding) *responseObservation {
+func newResponseObservation(maxBytes int64, coding ContentCoding, pricing ...accounting.PricingResolution) *responseObservation {
 	if maxBytes <= 0 {
 		maxBytes = DefaultUsageObservationMaxBytes
 	}
-	return &responseObservation{maxBytes: maxBytes, coding: coding}
+	observation := &responseObservation{maxBytes: maxBytes, coding: coding}
+	if len(pricing) != 0 {
+		observation.pricing = pricing[0]
+	}
+	return observation
 }
 
 func responseObservationCoding(header http.Header) (ContentCoding, error) {
@@ -72,24 +78,24 @@ func (observation *responseObservation) settle(lease *limiter.ResourceLease, wor
 	if observation.eligible {
 		budgetSettled := len(budgetConservative) != 0 && budgetConservative[0]
 		if worker == nil {
-			// The convenience constructors do not own an observation worker. Keep
-			// transport completion conservative rather than dereferencing a nil
-			// optional dependency or delaying delivery for synchronous parsing.
-			if budgetSettled {
-				_, _ = lease.TransportCompleteTokenDeferredBudgetConservative()
-			} else {
-				_, _ = lease.TransportComplete()
-			}
+			// The convenience constructors do not own an observation worker. Both
+			// resources must settle conservatively; creating an unowned ticket
+			// here would leave deferred ownership stranded.
+			_ = lease.CompleteConservative()
 			return
 		}
 		if budgetSettled {
-			worker.CompleteAndSubmitTokenDeferredBudgetConservative(lease, observation.bytes, observation.coding)
+			if observation.pricing.Known() {
+				worker.CompleteAndSubmitWithPricing(lease, observation.bytes, observation.coding, observation.pricing)
+			} else {
+				worker.CompleteAndSubmitTokenDeferredBudgetConservative(lease, observation.bytes, observation.coding)
+			}
 		} else {
 			worker.CompleteAndSubmit(lease, observation.bytes, observation.coding)
 		}
 		return
 	}
-	lease.TransportComplete()
+	_ = lease.CompleteConservative()
 }
 
 type observedResponseWriter struct {

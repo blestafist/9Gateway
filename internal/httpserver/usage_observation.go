@@ -2,9 +2,12 @@ package httpserver
 
 // This handoff was implemented independently after inspecting the optional
 // Bifrost reference at commit 03ab391865710462302bbcf52dca2f32682b91b5
-// (Apache-2.0; .references/bifrost/LICENSE). Bifrost's governance worker was
-// not copied: this path has a bounded immutable byte job, a pre-settled
-// one-shot ticket, and conservative drop semantics specific to this gateway.
+// (Apache-2.0; .references/bifrost/LICENSE). Inspected source paths were
+// .references/bifrost/plugins/governance/tracker.go and
+// .references/bifrost/framework/modelcatalog/datasheet/cost.go. Bifrost's
+// governance worker was not copied: this path has a bounded immutable byte
+// job, a pre-settled one-shot ticket, and conservative drop semantics specific
+// to this gateway.
 
 import (
 	"bytes"
@@ -16,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/protocol/openai"
 )
@@ -79,6 +83,8 @@ type UsageObservationJob struct {
 	Bytes         []byte
 	ContentCoding ContentCoding
 	Ticket        *limiter.TokenAdjustmentTicket
+	BudgetTicket  *limiter.BudgetAdjustmentTicket
+	Pricing       accounting.PricingResolution
 }
 
 // NewUsageObservationJobWithCoding validates a wire Content-Encoding value
@@ -95,6 +101,17 @@ func NewUsageObservationJobWithCoding(captured []byte, contentEncoding string, t
 	return NewUsageObservationJob(captured, coding, ticket), nil
 }
 
+// NewUsageObservationJobWithPricingCoding is the validated-coding variant for
+// budget-aware callers.
+func NewUsageObservationJobWithPricingCoding(captured []byte, contentEncoding string, tickets limiter.LeaseAdjustmentTickets, pricing accounting.PricingResolution) (UsageObservationJob, error) {
+	coding, err := ValidateContentCoding(contentEncoding)
+	if err != nil {
+		invalidateObservationJob(UsageObservationJob{Ticket: tickets.Token, BudgetTicket: tickets.Budget})
+		return UsageObservationJob{}, err
+	}
+	return NewUsageObservationJobWithPricing(captured, coding, tickets, pricing), nil
+}
+
 // NewUsageObservationJob bounds captured bytes and transfers their ownership
 // to the returned job. Submit makes an immutable copy only when it accepts the
 // job; callers must not mutate captured after submitting it.
@@ -103,6 +120,15 @@ func NewUsageObservationJob(captured []byte, coding ContentCoding, ticket *limit
 		captured = captured[:DefaultUsageObservationMaxBytes]
 	}
 	return UsageObservationJob{Bytes: captured, ContentCoding: coding, Ticket: ticket}
+}
+
+// NewUsageObservationJobWithPricing carries both independently owned deferred
+// settlements. Pricing is immutable and contains no request identity or body.
+func NewUsageObservationJobWithPricing(captured []byte, coding ContentCoding, tickets limiter.LeaseAdjustmentTickets, pricing accounting.PricingResolution) UsageObservationJob {
+	job := NewUsageObservationJob(captured, coding, tickets.Token)
+	job.BudgetTicket = tickets.Budget
+	job.Pricing = pricing
+	return job
 }
 
 // UsageObservationStats contains safe scalar worker counters.
@@ -121,6 +147,9 @@ type UsageObservationWorkerOptions struct {
 	Capacity int
 	MaxBytes int64
 	Parse    func([]byte, ContentCoding) (int64, error)
+	// ParseUsage is the canonical usage parser used for actual cost
+	// reconciliation. Parse remains a compatibility hook for token-only tests.
+	ParseUsage func([]byte, ContentCoding) (accounting.Usage, error)
 	// beforeAdjust is test-only lifecycle instrumentation; production callers
 	// leave it nil. It runs after parsing and before the terminal gate.
 	beforeAdjust func()
@@ -137,6 +166,7 @@ type UsageObservationWorker struct {
 
 	maxBytes     int64
 	parse        func([]byte, ContentCoding) (int64, error)
+	parseUsage   func([]byte, ContentCoding) (accounting.Usage, error)
 	beforeAdjust func()
 
 	mu        sync.Mutex
@@ -170,6 +200,7 @@ func NewUsageObservationWorker(options UsageObservationWorkerOptions) *UsageObse
 		done:         make(chan struct{}),
 		maxBytes:     options.MaxBytes,
 		parse:        options.Parse,
+		parseUsage:   options.ParseUsage,
 		beforeAdjust: options.beforeAdjust,
 		accepting:    true,
 	}
@@ -179,6 +210,11 @@ func NewUsageObservationWorker(options UsageObservationWorkerOptions) *UsageObse
 	if worker.parse == nil {
 		worker.parse = func(data []byte, coding ContentCoding) (int64, error) {
 			return parseUsageObservation(data, coding, worker.maxBytes)
+		}
+	}
+	if worker.parseUsage == nil {
+		worker.parseUsage = func(data []byte, coding ContentCoding) (accounting.Usage, error) {
+			return parseCanonicalUsageObservation(data, coding, worker.maxBytes)
 		}
 	}
 	go worker.run()
@@ -229,20 +265,29 @@ func (worker *UsageObservationWorker) run() {
 
 func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	worker.processed.Add(1)
-	if job.Ticket == nil {
+	if job.Ticket == nil && job.BudgetTicket == nil {
 		worker.failed.Add(1)
 		return
 	}
 
 	var actual int64
+	var usage accounting.Usage
 	var err error
+	canonical := job.BudgetTicket != nil || job.Pricing.Known()
 	func() {
 		defer func() {
 			if recover() != nil {
 				err = errUsageObservationMalformed
 			}
 		}()
-		actual, err = worker.parse(job.Bytes, job.ContentCoding)
+		if canonical {
+			usage, err = worker.parseUsage(job.Bytes, job.ContentCoding)
+			if err == nil && usage.Total().Known() {
+				actual = usage.Total().Int64()
+			}
+		} else {
+			actual, err = worker.parse(job.Bytes, job.ContentCoding)
+		}
 	}()
 	// Release the worker's bounded byte copy before accounting, and make sure
 	// a parser failure never consumes the ticket or changes its conservative
@@ -261,12 +306,33 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	// A claimed slot is explicit terminal ownership: it may finish after a
 	// timed-out Shutdown, but no unclaimed ticket can adjust after that point.
 	if !worker.beginAdjust() {
-		job.Ticket.Invalidate()
+		invalidateObservationJob(job)
 		worker.failed.Add(1)
 		return
 	}
 	defer worker.finishAdjust()
-	if err := job.Ticket.Adjust(actual); err != nil {
+	var settleErr error
+	if job.Ticket != nil && (!canonical || usage.Total().Known()) {
+		if err := job.Ticket.Adjust(actual); err != nil {
+			settleErr = err
+		}
+	} else if job.Ticket != nil {
+		job.Ticket.Invalidate()
+	}
+	if job.BudgetTicket != nil {
+		cost, costErr := accounting.CalculateActualCost(usage, job.Pricing)
+		if costErr != nil || !cost.Known() {
+			job.BudgetTicket.Invalidate()
+			settleErr = errors.Join(settleErr, errUsageObservationMalformed)
+		} else if err := job.BudgetTicket.Adjust(cost); err != nil {
+			settleErr = errors.Join(settleErr, err)
+		}
+	}
+	if settleErr != nil {
+		worker.failed.Add(1)
+		return
+	}
+	if job.Ticket == nil && job.BudgetTicket == nil {
 		worker.failed.Add(1)
 		return
 	}
@@ -285,9 +351,7 @@ func (worker *UsageObservationWorker) discardQueuedLocked() {
 		case job := <-worker.queue:
 			worker.releaseSlot()
 			worker.dropped.Add(1)
-			if job.Ticket != nil {
-				job.Ticket.Invalidate()
-			}
+			invalidateObservationJob(job)
 		default:
 			return
 		}
@@ -299,23 +363,19 @@ func (worker *UsageObservationWorker) discardQueuedLocked() {
 // accounting charge.
 func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
 	if worker == nil {
-		if job.Ticket != nil {
-			job.Ticket.Invalidate()
-		}
+		invalidateObservationJob(job)
 		return false
 	}
-	if job.Ticket == nil || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
+	if (job.Ticket == nil && job.BudgetTicket == nil) || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
 		worker.dropped.Add(1)
-		if job.Ticket != nil {
-			job.Ticket.Invalidate()
-		}
+		invalidateObservationJob(job)
 		return false
 	}
 	select {
 	case <-worker.slots:
 	default:
 		worker.dropped.Add(1)
-		job.Ticket.Invalidate()
+		invalidateObservationJob(job)
 		return false
 	}
 	worker.mu.Lock()
@@ -323,7 +383,7 @@ func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
 		worker.mu.Unlock()
 		worker.releaseSlot()
 		worker.dropped.Add(1)
-		job.Ticket.Invalidate()
+		invalidateObservationJob(job)
 		return false
 	}
 	worker.mu.Unlock()
@@ -337,7 +397,7 @@ func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
 	if !worker.accepting {
 		worker.releaseSlot()
 		worker.dropped.Add(1)
-		job.Ticket.Invalidate()
+		invalidateObservationJob(job)
 		return false
 	}
 	select {
@@ -351,7 +411,7 @@ func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
 	default:
 		worker.releaseSlot()
 		worker.dropped.Add(1)
-		job.Ticket.Invalidate()
+		invalidateObservationJob(job)
 		return false
 	}
 }
@@ -375,6 +435,20 @@ func (worker *UsageObservationWorker) CompleteAndSubmit(lease *limiter.ResourceL
 		return false
 	}
 	return worker.Submit(NewUsageObservationJob(captured, coding, ticket))
+}
+
+// CompleteAndSubmitWithPricing releases the composite lease before making a
+// nonblocking handoff, retaining independent token and budget ownership in the
+// bounded job. The lease itself is never retained by the worker.
+func (worker *UsageObservationWorker) CompleteAndSubmitWithPricing(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution) bool {
+	if lease == nil {
+		return false
+	}
+	tickets, _ := lease.TransportCompleteWithAdjustments()
+	if tickets.Token == nil && tickets.Budget == nil {
+		return false
+	}
+	return worker.Submit(NewUsageObservationJobWithPricing(captured, coding, tickets, pricing))
 }
 
 // CompleteAndSubmitTokenDeferredBudgetConservative keeps token observation
@@ -485,6 +559,41 @@ func parseUsageObservation(data []byte, coding ContentCoding, maxBytes int64) (i
 		return result.State.Usage.Total().Int64(), nil
 	}
 	return 0, errUsageObservationMalformed
+}
+
+func parseCanonicalUsageObservation(data []byte, coding ContentCoding, maxBytes int64) (accounting.Usage, error) {
+	if !validContentCoding(coding) {
+		return accounting.Usage{}, errUsageObservationUnsupported
+	}
+	decoded, err := decodeObservedBytes(data, coding, maxBytes)
+	if err != nil {
+		return accounting.Usage{}, err
+	}
+	trimmed := bytes.TrimSpace(decoded)
+	if len(trimmed) == 0 {
+		return accounting.Usage{}, errUsageObservationMalformed
+	}
+	if trimmed[0] == '{' {
+		result, err := openai.ParseJSONUsage(trimmed)
+		if err != nil || !result.Observed {
+			return accounting.Usage{}, errUsageObservationMalformed
+		}
+		return result.Usage, nil
+	}
+	result, err := openai.ObserveStream(bytes.NewReader(decoded), 64*1024, nil)
+	if err != nil || len(result.Errors) != 0 || !result.State.Usage.Total().Known() {
+		return accounting.Usage{}, errUsageObservationMalformed
+	}
+	return result.State.Usage.Usage, nil
+}
+
+func invalidateObservationJob(job UsageObservationJob) {
+	if job.Ticket != nil {
+		job.Ticket.Invalidate()
+	}
+	if job.BudgetTicket != nil {
+		job.BudgetTicket.Invalidate()
+	}
 }
 
 func decodeObservedBytes(data []byte, coding ContentCoding, maxBytes int64) ([]byte, error) {

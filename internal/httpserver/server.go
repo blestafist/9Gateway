@@ -447,6 +447,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		}
 	}
 	var budgetPlan *accounting.BudgetReservationPlan
+	var selectedPricing accounting.PricingResolution
 	if authenticated {
 		if total, limited := principal.Policy.TotalBudget(); limited {
 			// Lifetime budget admission is intentionally restricted to known
@@ -482,6 +483,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				}
 				budgetAdmission = true
 				budgetPlan = &plan
+				selectedPricing = plan.SelectedPricing
 				_ = total // the policy value is read again when building lease options
 			}
 		}
@@ -529,9 +531,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	responseMode := classifyResponseHeader(upstreamResponse.Header)
-	if tokenAdmission && (responseMode == ResponseModeJSON || responseMode == ResponseModeSSE) {
+	if (tokenAdmission || budgetAdmission) && (responseMode == ResponseModeJSON || responseMode == ResponseModeSSE) {
 		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
-			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding)
+			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding, selectedPricing)
 			if responseMode == ResponseModeJSON {
 				response = responseObservation.wrap(response)
 			}
