@@ -42,6 +42,78 @@ func TestBudgetBucketRepositoryAppliesAtomicSignedDeltas(t *testing.T) {
 	}
 }
 
+func TestBudgetBucketRepositoryRequiresZeroTimeForTotalIdentity(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	insertBudgetTestKey(t, database, "key")
+	repository := NewBudgetBucketRepository(database)
+
+	if err := repository.ApplyDelta(context.Background(), BudgetBucketDelta{
+		APIKeyID: "key", SpentDelta: 4, Period: limiter.BudgetPeriodTotal,
+	}); err != nil {
+		t.Fatalf("zero-value total start: %v", err)
+	}
+	if err := repository.ApplyDelta(context.Background(), BudgetBucketDelta{
+		APIKeyID: "key", SpentDelta: 1, Period: limiter.BudgetPeriodTotal,
+		PeriodStart: time.Unix(0, 0).UTC(),
+	}); !errors.Is(err, ErrInvalidBudgetBucket) {
+		t.Fatalf("epoch total start = %v, want invalid bucket", err)
+	}
+	buckets, err := repository.LoadTotal(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || !buckets[0].PeriodStart.IsZero() || buckets[0].SpentMicros != 4 {
+		t.Fatalf("total buckets = %#v, want one zero-start bucket with four micros", buckets)
+	}
+}
+
+func TestBudgetBucketRepositoryValidatesAllDurableRowsBeforeFiltering(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	insertBudgetTestKey(t, database, "key")
+	// Simulate a manual/constraint-bypass corruption. The malformed day is
+	// expired relative to the loader below, so a current-only query must not be
+	// allowed to hide it from startup validation.
+	if _, err := database.Exec(`PRAGMA ignore_check_constraints = ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO budget_buckets
+		(api_key_id, period_kind, period_start, spent_micros, created_at, updated_at)
+		VALUES ('key', 'day', 1, 99, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewBudgetBucketRepository(database)
+	if _, err := repository.LoadDay(context.Background(), time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)); !errors.Is(err, ErrInvalidBudgetBucket) {
+		t.Fatalf("expired malformed row load = %v, want invalid bucket", err)
+	}
+}
+
+func TestBudgetBucketRepositoryRejectsCorruptUnknownKeyAndTimestampRows(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`PRAGMA ignore_check_constraints = ON; PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO budget_buckets
+		(api_key_id, period_kind, period_start, spent_micros, created_at, updated_at)
+		VALUES ('missing', 'total', 0, 1, -1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewBudgetBucketRepository(database).LoadTotal(context.Background()); !errors.Is(err, ErrInvalidBudgetBucket) {
+		t.Fatalf("corrupt unknown-key/timestamp row load = %v, want invalid bucket", err)
+	}
+}
+
 func TestBudgetBucketRepositoryRejectsUnknownAndUnrepresentableDeltas(t *testing.T) {
 	database, err := Open(context.Background(), ":memory:")
 	if err != nil {

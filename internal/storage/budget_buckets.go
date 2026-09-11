@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pestit/9gateway/internal/limiter"
@@ -36,6 +38,8 @@ var (
 	ErrBudgetBucketOverflow    = errors.New("budget bucket overflow")
 	ErrBudgetBucketUnknownKey  = errors.New("budget bucket key unavailable")
 )
+
+const maxBudgetUnixTimestamp int64 = 253402300799
 
 // BudgetBucketRepository is the narrow SQLite boundary for lifetime spend.
 //
@@ -81,13 +85,20 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 		if delta.SpentDelta == 0 {
 			continue
 		}
-		if delta.APIKeyID == "" {
-			return ErrInvalidBudgetBucket
-		}
 		if delta.Period == "" {
 			delta.Period = limiter.BudgetPeriodTotal
 		}
+		// Total buckets have one in-memory identity: the zero time. SQLite
+		// stores that identity as Unix epoch (0), but accepting epoch here as a
+		// second representation would make equal buckets distinguishable to
+		// accumulator callers and hide malformed input.
+		if delta.Period == limiter.BudgetPeriodTotal && !delta.PeriodStart.IsZero() {
+			return ErrInvalidBudgetBucket
+		}
 		if delta.Period != limiter.BudgetPeriodTotal && (delta.Period == limiter.BudgetPeriodDay && !validDayStart(delta.PeriodStart) || delta.Period == limiter.BudgetPeriodMonth && !validMonthStart(delta.PeriodStart) || delta.Period != limiter.BudgetPeriodDay && delta.Period != limiter.BudgetPeriodMonth) {
+			return ErrInvalidBudgetBucket
+		}
+		if delta.APIKeyID == "" {
 			return ErrInvalidBudgetBucket
 		}
 		if delta.SpentDelta == math.MinInt64 {
@@ -192,6 +203,9 @@ func (repository *BudgetBucketRepository) LoadTotal(ctx context.Context) ([]Budg
 	if repository == nil || repository.database == nil {
 		return nil, ErrBudgetBucketUnavailable
 	}
+	if err := repository.validateAll(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := repository.database.QueryContext(ctx, `
 		SELECT budget_buckets.api_key_id, budget_buckets.spent_micros,
 		       CASE WHEN api_keys.id IS NULL THEN 0 ELSE 1 END
@@ -214,7 +228,7 @@ func (repository *BudgetBucketRepository) LoadTotal(ctx context.Context) ([]Budg
 			return nil, ErrInvalidBudgetBucket
 		}
 		bucket.Period = limiter.BudgetPeriodTotal
-		bucket.PeriodStart = time.Unix(0, 0).UTC()
+		bucket.PeriodStart = time.Time{}
 		result = append(result, bucket)
 	}
 	if err := rows.Err(); err != nil {
@@ -252,6 +266,9 @@ func (repository *BudgetBucketRepository) LoadDay(ctx context.Context, now time.
 	if ctx == nil || repository == nil || repository.database == nil {
 		return nil, ErrBudgetBucketUnavailable
 	}
+	if err := repository.validateAll(ctx); err != nil {
+		return nil, err
+	}
 	start := currentDay(now)
 	rows, err := repository.database.QueryContext(ctx, `SELECT budget_buckets.api_key_id, budget_buckets.spent_micros, CASE WHEN api_keys.id IS NULL THEN 0 ELSE 1 END FROM budget_buckets LEFT JOIN api_keys ON api_keys.id=budget_buckets.api_key_id WHERE period_kind='day' AND period_start=? ORDER BY budget_buckets.api_key_id`, start.Unix())
 	if err != nil {
@@ -272,8 +289,11 @@ func (repository *BudgetBucketRepository) LoadDay(ctx context.Context, now time.
 	return result, rows.Err()
 }
 func (repository *BudgetBucketRepository) DeleteExpiredDays(ctx context.Context, before time.Time) error {
-	if repository == nil || repository.database == nil {
+	if ctx == nil || repository == nil || repository.database == nil {
 		return ErrBudgetBucketUnavailable
+	}
+	if err := repository.validateAll(ctx); err != nil {
+		return err
 	}
 	_, err := repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='day' AND period_start < ?`, currentDay(before).Unix())
 	return err
@@ -285,10 +305,79 @@ func currentMonth(t time.Time) time.Time {
 }
 func validMonthStart(t time.Time) bool { return !t.IsZero() && t.Equal(currentMonth(t)) }
 
+// validateAll checks every durable row before any loader narrows the result to
+// a current period. Filtering first would allow a malformed expired row (or a
+// row for an unknown key) to disappear during startup and leave its debt
+// unaccounted for if cleanup or a future clock change later exposed it.
+func (repository *BudgetBucketRepository) validateAll(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("validate budget buckets: nil context")
+	}
+	rows, err := repository.database.QueryContext(ctx, `
+		SELECT b.api_key_id, b.period_kind, b.period_start, b.spent_micros,
+		       b.created_at, b.updated_at,
+		       CASE WHEN k.id IS NULL THEN 0 ELSE 1 END,
+		       typeof(b.api_key_id), typeof(b.period_kind), typeof(b.period_start),
+		       typeof(b.spent_micros), typeof(b.created_at), typeof(b.updated_at)
+		FROM budget_buckets AS b
+		LEFT JOIN api_keys AS k ON k.id = b.api_key_id
+		ORDER BY b.api_key_id, b.period_kind, b.period_start`)
+	if err != nil {
+		return errors.New("validate budget buckets: query failed")
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var apiKeyID, period string
+		var start, spent, created, updated int64
+		var known int
+		var apiKeyType, periodType, startType, spentType, createdType, updatedType string
+		if err := rows.Scan(&apiKeyID, &period, &start, &spent, &created, &updated, &known,
+			&apiKeyType, &periodType, &startType, &spentType, &createdType, &updatedType); err != nil {
+			return ErrInvalidBudgetBucket
+		}
+		if apiKeyType != "text" || periodType != "text" || startType != "integer" ||
+			spentType != "integer" || createdType != "integer" || updatedType != "integer" ||
+			strings.TrimSpace(apiKeyID) == "" || known != 1 || spent < 0 || created < 0 ||
+			updated < created || created > maxBudgetUnixTimestamp || updated > maxBudgetUnixTimestamp ||
+			start < 0 || start > maxBudgetUnixTimestamp {
+			return ErrInvalidBudgetBucket
+		}
+		var validStart bool
+		switch limiter.BudgetPeriod(period) {
+		case limiter.BudgetPeriodTotal:
+			validStart = start == 0
+		case limiter.BudgetPeriodDay:
+			value := time.Unix(start, 0).UTC()
+			validStart = value.Unix() == start && validDayStart(value)
+		case limiter.BudgetPeriodMonth:
+			value := time.Unix(start, 0).UTC()
+			validStart = value.Unix() == start && validMonthStart(value)
+		default:
+			return ErrInvalidBudgetBucket
+		}
+		if !validStart {
+			return ErrInvalidBudgetBucket
+		}
+		identity := apiKeyID + "\x00" + period + "\x00" + strconv.FormatInt(start, 10)
+		if _, duplicate := seen[identity]; duplicate {
+			return ErrInvalidBudgetBucket
+		}
+		seen[identity] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("validate budget buckets: rows failed")
+	}
+	return nil
+}
+
 // LoadMonth restores only the current UTC calendar-month bucket.
 func (repository *BudgetBucketRepository) LoadMonth(ctx context.Context, now time.Time) ([]BudgetBucket, error) {
 	if ctx == nil || repository == nil || repository.database == nil {
 		return nil, ErrBudgetBucketUnavailable
+	}
+	if err := repository.validateAll(ctx); err != nil {
+		return nil, err
 	}
 	start := currentMonth(now)
 	rows, err := repository.database.QueryContext(ctx, `SELECT budget_buckets.api_key_id, budget_buckets.spent_micros, CASE WHEN api_keys.id IS NULL THEN 0 ELSE 1 END FROM budget_buckets LEFT JOIN api_keys ON api_keys.id=budget_buckets.api_key_id WHERE period_kind='month' AND period_start=? ORDER BY budget_buckets.api_key_id`, start.Unix())
@@ -310,8 +399,11 @@ func (repository *BudgetBucketRepository) LoadMonth(ctx context.Context, now tim
 	return result, rows.Err()
 }
 func (repository *BudgetBucketRepository) DeleteExpiredMonths(ctx context.Context, before time.Time) error {
-	if repository == nil || repository.database == nil {
+	if ctx == nil || repository == nil || repository.database == nil {
 		return ErrBudgetBucketUnavailable
+	}
+	if err := repository.validateAll(ctx); err != nil {
+		return err
 	}
 	_, err := repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='month' AND period_start < ?`, currentMonth(before).Unix())
 	return err
