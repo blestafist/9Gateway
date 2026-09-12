@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T120`.
+Done: `T001`-`T121`.
 
-Current: `T121` - define the canonical request trace record.
+Current: `T122` - add request-local trace state.
 
-Queued: `T122`-`T140` in dependency order from `TASKS.md`.
+Queued: `T123`-`T140` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

@@ -6,20 +6,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"time"
 )
-
-// CompletionRecord is the immutable, bounded data handed from HTTP handling to
-// the structured logger. It intentionally contains no request headers or
-// credentials.
-type CompletionRecord struct {
-	RequestID string
-	Method    string
-	Path      string
-	Status    int
-	Duration  time.Duration
-	Terminal  TerminalMetadata
-}
 
 // TerminalOutcome is a bounded, non-sensitive description of the request's
 // final transport state. It is deliberately an enum-like string: completion
