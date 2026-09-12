@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T123`.
+Done: `T001`-`T124`.
 
-Current: `T124` - trace downstream status bytes and TTFT.
+Current: `T125` - trace identity route and request metadata.
 
-Queued: `T124`-`T140` in dependency order from `TASKS.md`.
+Queued: `T125`-`T140` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

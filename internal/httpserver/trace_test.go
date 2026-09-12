@@ -254,6 +254,19 @@ func TestRequestIDBoundaryInstallsAndFreezesTrace(t *testing.T) {
 	if state.SetRequestMetadata("POST", RouteResponses, "late", RequestModeJSON) {
 		t.Fatal("trace was not frozen at handler end")
 	}
+	record, err := state.FreezeBase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, ok := record.DownstreamStatus.Value(); !ok || status != http.StatusOK {
+		t.Fatalf("downstream status = %d/%v, want 200/true", status, ok)
+	}
+	if delivered, ok := record.DeliveredBytes.Value(); !ok || delivered != 2 {
+		t.Fatalf("delivered bytes = %d/%v, want 2/true", delivered, ok)
+	}
+	if !record.Timing.FirstByteAt.Known() || !record.Timing.FinishedAt.Known() {
+		t.Fatal("trace did not record body-byte and completion milestones")
+	}
 }
 
 func TestRequestTraceRejectsUnsafeAndOverflowingInputs(t *testing.T) {
@@ -287,6 +300,50 @@ func TestRequestTraceRejectsUnsafeAndOverflowingInputs(t *testing.T) {
 	}
 	if _, err := NewDurationMicros(-time.Microsecond); err == nil {
 		t.Fatal("negative duration was accepted")
+	}
+}
+
+func TestRequestTraceRecordsOnlyAcceptedDownstreamBytesAndTTFT(t *testing.T) {
+	state, clock := traceTestState(t)
+	clock.advance(4*time.Millisecond, 9*time.Millisecond)
+	if state.recordDownstreamWrite(0, false, false) {
+		t.Fatal("empty write recorded")
+	}
+	if !state.recordDownstreamWrite(0, false, true) {
+		t.Fatal("successful empty write was not recorded")
+	}
+	if !state.recordDownstreamWrite(2, false, false) || state.recordDownstreamWrite(-1, false, false) {
+		t.Fatal("accepted byte accounting rejected or invalid write recorded")
+	}
+	clock.advance(3*time.Millisecond, 6*time.Millisecond)
+	if !state.recordDownstreamWrite(1, true, false) {
+		t.Fatal("second accepted write was not recorded")
+	}
+	record, err := state.Complete()
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered, known := record.DeliveredBytes.Value()
+	if !known || delivered != 3 {
+		t.Fatalf("delivered bytes = %d/%v, want 3/true", delivered, known)
+	}
+	ttft, known := record.Timing.TimeToFirstByte.Value()
+	if !known || ttft != 15_000 {
+		t.Fatalf("TTFT = %d/%v, want 15000/true", ttft, known)
+	}
+}
+
+func TestRequestTraceHeaderOnlyRetainsUnknownTTFT(t *testing.T) {
+	state, _ := traceTestState(t)
+	if !state.SetDownstreamStatus(httpStatusNoContent) {
+		t.Fatal("status was not recorded")
+	}
+	record, err := state.Complete()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Timing.TimeToFirstByte.Known() || record.Timing.FirstByteAt.Known() {
+		t.Fatal("header-only response unexpectedly has TTFT")
 	}
 }
 

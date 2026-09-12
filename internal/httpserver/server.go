@@ -1338,7 +1338,8 @@ func withRequestID(next http.Handler) http.Handler {
 		requestContext := context.WithValue(request.Context(), requestIDContextKey{}, id)
 		requestContext = context.WithValue(requestContext, terminalMetadataContextKey{}, terminal)
 		request = request.WithContext(withTrace(requestContext, trace))
-		next.ServeHTTP(&completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}, request)
+		writer := &completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}
+		next.ServeHTTP(writer, request)
 		// The request-ID boundary owns the final trace handoff. This is outside
 		// the transport path and remains idempotent when the completion wrapper
 		// also completes the trace.
@@ -1348,7 +1349,7 @@ func withRequestID(next http.Handler) http.Handler {
 				trace.SetTerminalMetadata(metadata)
 			}
 		}
-		_, _ = trace.FreezeBase()
+		writer.complete()
 	})
 }
 
@@ -1360,7 +1361,7 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
-		writer := &completionResponseWriter{ResponseWriter: response, trace: TraceFromContext(request.Context()), terminal: terminal}
+		writer := completionWriter(response, TraceFromContext(request.Context()), terminal)
 		next.ServeHTTP(writer, request)
 
 		logger.Info("request completed",
@@ -1389,7 +1390,7 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
-		writer := &completionResponseWriter{ResponseWriter: response, trace: TraceFromContext(request.Context()), terminal: terminal}
+		writer := completionWriter(response, TraceFromContext(request.Context()), terminal)
 		next.ServeHTTP(writer, request)
 
 		// Copy only safe scalar values into the record before handing it to the
@@ -1413,6 +1414,17 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 	})
 }
 
+// completionWriter reuses the request-bound wrapper when completion logging is
+// layered inside the request-ID boundary. A response must have one owner for
+// transport bookkeeping: nesting two completionResponseWriters would count
+// every downstream write twice while still exposing the same controller.
+func completionWriter(response http.ResponseWriter, trace *RequestTraceState, terminal *terminalMetadataState) *completionResponseWriter {
+	if writer, ok := response.(*completionResponseWriter); ok {
+		return writer
+	}
+	return &completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}
+}
+
 func requestIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(requestIDContextKey{}).(string)
 	return id
@@ -1425,8 +1437,19 @@ type completionResponseWriter struct {
 	terminal *terminalMetadataState
 }
 
+// Bifrost provenance review: commit 03ab391865710462302bbcf52dca2f32682b91b5,
+// .references/bifrost/plugins/logging/writer.go, was inspected for bounded
+// observability handoff patterns. Nothing was copied or adapted here; this
+// writer remains the sole response wrapper and records only scalar trace facts.
+
 func (writer *completionResponseWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
+}
+
+func (writer *completionResponseWriter) complete() {
+	if writer.trace != nil {
+		_, _ = writer.trace.Complete()
+	}
 }
 
 func (writer *completionResponseWriter) setGatewayErrorCode(code SafeErrorCode) {
@@ -1465,8 +1488,12 @@ func (writer *completionResponseWriter) Write(body []byte) (int, error) {
 		writer.WriteHeader(http.StatusOK)
 	}
 	written, err := writer.ResponseWriter.Write(body)
-	if written > 0 && writer.trace != nil {
-		writer.trace.SetFirstDownstreamByte()
+	if writer.trace != nil && written >= 0 && written <= len(body) {
+		if written > 0 || err == nil {
+			// n is the number accepted by the underlying writer, even when a
+			// short write or error accompanies it. Never substitute len(body).
+			writer.trace.recordDownstreamWrite(written, err == nil && written == len(body) && written > 0, written == 0 && err == nil)
+		}
 	}
 	return written, err
 }

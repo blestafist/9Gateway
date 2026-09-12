@@ -414,6 +414,43 @@ func (state *RequestTraceState) SetFirstDownstreamByte(written ...bool) bool {
 	return true
 }
 
+// recordDownstreamWrite records bytes accepted by the downstream writer and,
+// when successful is true, the first-byte milestone. The write count is
+// supplied by http.ResponseWriter.Write; it is deliberately not inferred from
+// the input buffer so short and failed writes cannot be reported as complete
+// delivery.
+// Keeping both facts under the trace lock also makes a concurrent finalization
+// observe either both updates or neither update.
+func (state *RequestTraceState) recordDownstreamWrite(written int, successful, countZero bool) bool {
+	if state == nil || written < 0 || written == 0 && !countZero {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.baseFrozen {
+		return false
+	}
+	current := int64(0)
+	if state.input.DeliveredBytes.Known() {
+		current, _ = state.input.DeliveredBytes.Value()
+	}
+	if int64(written) > math.MaxInt64-current {
+		return false
+	}
+	count, err := NewByteCount(current + int64(written))
+	if err != nil {
+		return false
+	}
+	state.input.DeliveredBytes = count
+	if successful && written > 0 && !state.firstByte {
+		wall, mono := state.reading()
+		state.firstByte = true
+		state.input.Timing.FirstByteAt = state.wallStamp(wall)
+		state.input.Timing.TimeToFirstByte = durationMicros(state.startedMono, mono)
+	}
+	return true
+}
+
 func (state *RequestTraceState) setUsageLocked(usage accounting.Usage) bool {
 	if state.usageSet {
 		return false
