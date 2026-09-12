@@ -209,7 +209,7 @@ func run() error {
 			log.Printf("completion logger shutdown: %v", err)
 		}
 	}()
-	usageObservationWorker := httpserver.NewUsageObservationWorker(httpserver.UsageObservationWorkerOptions{})
+	usageObservationWorker := httpserver.NewUsageObservationWorker(httpserver.UsageObservationWorkerOptions{Capacity: cfg.Observability.TelemetryQueueCapacity})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

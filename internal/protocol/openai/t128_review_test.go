@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 	"time"
+
+	"github.com/pestit/9gateway/internal/streaming"
 )
 
 func TestT128MeaningfulTimingIgnoresMetadataHeartbeatsAndKeepsUsageOnlyTerminal(t *testing.T) {
@@ -53,5 +55,27 @@ func TestT128MeaningfulTimingIgnoresEmptyAndMetadataOnlyEvents(t *testing.T) {
 	})
 	if err != nil || calls != 1 {
 		t.Fatalf("observation error/callbacks = (%v, %d), want nil/1", err, calls)
+	}
+}
+
+func TestT128MeaningfulEventRequiresNonEmptyValidToolCallArray(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{name: "non-empty array", data: `{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`, want: true},
+		{name: "empty array", data: `{"choices":[{"delta":{"tool_calls":[]}}]}`},
+		{name: "malformed array", data: `{"choices":[{"delta":{"tool_calls":[}}]}`},
+		{name: "non-array", data: `{"choices":[{"delta":{"tool_calls":{}}}]}`},
+		{name: "null", data: `{"choices":[{"delta":{"tool_calls":null}}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := meaningfulEvent(streaming.SSEEvent{Data: test.data}, ObserverState{}, 0, false)
+			if got != test.want {
+				t.Fatalf("meaningfulEvent() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }

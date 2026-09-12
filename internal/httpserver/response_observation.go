@@ -29,6 +29,8 @@ type responseObservation struct {
 	checkpointOverflow bool
 	wireOffset         int64
 	checkpointAt       func() time.Time
+	requestPricing     accounting.PricingResolver
+	requestBody        *telemetryRequestBody
 }
 
 type streamCheckpoint struct {
@@ -133,7 +135,7 @@ func (observation *responseObservation) settle(lease *limiter.ResourceLease, wor
 			return
 		}
 		if lease == nil && observation.completion != nil {
-			if worker == nil || !worker.submitForCompletionWithTimingOwned(observation.completion, observation.bytes, observation.coding, observation.checkpoints, observation.checkpointOverflow) {
+			if worker == nil || !worker.submitForCompletionWithRequestOwned(observation.completion, observation.bytes, observation.coding, observation.checkpoints, observation.checkpointOverflow, observation.requestBody, observation.requestPricing) {
 				observation.completion.finish(accounting.Usage{}, accounting.UnknownMoney())
 			}
 			return
@@ -151,12 +153,12 @@ func (observation *responseObservation) settle(lease *limiter.ResourceLease, wor
 		}
 		if budgetSettled {
 			if observation.pricing.Known() {
-				worker.completeAndSubmitWithPricingTiming(lease, observation.bytes, observation.coding, observation.pricing, observation.completion, observation.checkpoints, observation.checkpointOverflow)
+				worker.completeAndSubmitWithPricingTimingAndRequest(lease, observation.bytes, observation.coding, observation.pricing, observation.completion, observation.checkpoints, observation.checkpointOverflow, observation.requestBody, observation.requestPricing)
 			} else {
-				worker.completeAndSubmitWithTiming(lease, observation.bytes, observation.coding, observation.completion, accounting.UnknownPricingResolution(), observation.checkpoints, observation.checkpointOverflow)
+				worker.completeAndSubmitWithPricingTimingAndRequest(lease, observation.bytes, observation.coding, accounting.UnknownPricingResolution(), observation.completion, observation.checkpoints, observation.checkpointOverflow, observation.requestBody, observation.requestPricing)
 			}
 		} else {
-			worker.completeAndSubmitWithTiming(lease, observation.bytes, observation.coding, observation.completion, observation.pricing, observation.checkpoints, observation.checkpointOverflow)
+			worker.completeAndSubmitWithPricingTimingAndRequest(lease, observation.bytes, observation.coding, observation.pricing, observation.completion, observation.checkpoints, observation.checkpointOverflow, observation.requestBody, observation.requestPricing)
 		}
 		return
 	}

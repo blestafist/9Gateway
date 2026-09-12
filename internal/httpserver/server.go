@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
@@ -400,6 +401,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var tokenAdmission bool
 	var budgetAdmission bool
 	var responseObservation *responseObservation
+	var telemetryBody *telemetryRequestBody
 	completion := completionOwnershipFromContext(request.Context())
 	var dispatchErr error
 	// client.Do owns the ambiguous boundary. Before it is called, cleanup can
@@ -427,7 +429,13 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		if upstreamResponse != nil && upstreamResponse.Body != nil {
 			_ = upstreamResponse.Body.Close()
 		}
-		if request.Body != nil {
+		if telemetryBody != nil {
+			// A response may complete before the client upload reaches EOF. Close
+			// publishes the bounded capture's terminal state without waiting for
+			// the upload; the observation worker only consumes that immutable
+			// state.
+			_ = telemetryBody.Close()
+		} else if request.Body != nil {
 			_ = request.Body.Close()
 		}
 		inspectionLease.Release()
@@ -471,8 +479,16 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	requestBody, metadata := request.Body, (*openai.RequestMetadata)(nil)
 	var inspected []byte
 	var inspectionAvailable bool
-	if shouldInspectRequestMetadata(request) || shouldInspectRequestMetadataForTelemetry(request, handler.pricingResolver) {
+	policyInspection := shouldInspectRequestMetadata(request)
+	if policyInspection {
 		requestBody, metadata, inspected, inspectionAvailable = inspectRequest(request, handler.tokenConfig.MaxInspectedRequestBytes)
+	} else if shouldObserveRequestPricing(request, handler.pricingResolver) {
+		// Pricing-only telemetry must not read ahead of client.Do. The wrapper
+		// records only bytes the normal upstream transport has already requested;
+		// metadata and pricing are resolved by the existing bounded observation
+		// worker after the response path.
+		telemetryBody = newTelemetryRequestBody(request.Body, request.ContentLength, handler.tokenConfig.MaxInspectedRequestBytes)
+		requestBody = telemetryBody
 	}
 	if trace != nil {
 		mode := RequestModeUnknown
@@ -619,6 +635,15 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	upstreamRequest.ContentLength = request.ContentLength
+	if telemetryBody != nil && request.GetBody != nil {
+		upstreamRequest.GetBody = func() (io.ReadCloser, error) {
+			body, err := request.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			return newTelemetryRequestBody(body, request.ContentLength, handler.tokenConfig.MaxInspectedRequestBytes), nil
+		}
+	}
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
 
@@ -685,6 +710,10 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
 			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding, selectedPricing)
 			responseObservation.completion = completion
+			responseObservation.requestPricing = handler.pricingResolver
+			if telemetryBody != nil {
+				responseObservation.requestBody = telemetryBody
+			}
 			if trace != nil {
 				responseObservation.checkpointAt = trace.monotonicNow
 			}
@@ -850,12 +879,116 @@ func shouldInspectRequestMetadata(request *http.Request) bool {
 // unrestricted key can still receive model-specific trace cost enrichment.
 // Generic and unknown /v1 routes remain byte-transparent and are never read
 // solely for telemetry.
-func shouldInspectRequestMetadataForTelemetry(request *http.Request, resolver accounting.PricingResolver) bool {
+func shouldObserveRequestPricing(request *http.Request, resolver accounting.PricingResolver) bool {
 	if request == nil || request.URL == nil {
 		return false
 	}
 	_, authenticated := PrincipalFromContext(request.Context())
 	return authenticated && resolver.Present() && resolver.HasRules() && eligibleTokenRequest(request)
+}
+
+// telemetryRequestBody is a bounded, passive side observation of the bytes
+// requested by the normal upstream transport. It never reads ahead, and a
+// partial, malformed, or over-bound upload simply cannot produce a price.
+type telemetryRequestBody struct {
+	mu          sync.Mutex
+	source      io.ReadCloser
+	limit       int64
+	expected    int64
+	observed    int64
+	bytes       []byte
+	complete    bool
+	readError   bool
+	transferred bool
+	closed      bool
+}
+
+func newTelemetryRequestBody(source io.ReadCloser, expected, limit int64) *telemetryRequestBody {
+	if limit <= 0 {
+		limit = config.DefaultMaxInspectedRequestBytes
+	}
+	return &telemetryRequestBody{source: source, expected: expected, limit: limit}
+}
+
+func (body *telemetryRequestBody) Read(p []byte) (int, error) {
+	if body == nil {
+		return 0, io.EOF
+	}
+	body.mu.Lock()
+	if body.source == nil || body.closed {
+		body.mu.Unlock()
+		return 0, io.EOF
+	}
+	source := body.source
+	body.mu.Unlock()
+	n, err := source.Read(p)
+	body.mu.Lock()
+	defer body.mu.Unlock()
+	if body.closed {
+		return n, err
+	}
+	body.observed += int64(n)
+	if n > 0 && !body.readError && !body.transferred && int64(len(body.bytes)) < body.limit+1 {
+		keep := n
+		if remaining := body.limit + 1 - int64(len(body.bytes)); int64(keep) > remaining {
+			keep = int(remaining)
+		}
+		body.bytes = append(body.bytes, p[:keep]...)
+	}
+	if body.expected >= 0 && body.observed >= body.expected {
+		body.complete = body.observed == body.expected
+		if body.observed > body.expected {
+			body.readError = true
+		}
+	}
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			body.complete = body.expected < 0 || body.observed == body.expected
+		} else {
+			body.readError = true
+		}
+	}
+	return n, err
+}
+
+func (body *telemetryRequestBody) Close() error {
+	if body == nil || body.source == nil {
+		return nil
+	}
+	body.mu.Lock()
+	if body.closed {
+		body.mu.Unlock()
+		return nil
+	}
+	body.closed = true
+	if !body.readError && body.expected >= 0 && body.observed == body.expected {
+		body.complete = true
+	}
+	source := body.source
+	body.mu.Unlock()
+	err := source.Close()
+	if err != nil {
+		body.mu.Lock()
+		body.readError = true
+		body.complete = false
+		body.mu.Unlock()
+	}
+	return err
+}
+
+func (body *telemetryRequestBody) snapshot() ([]byte, bool) {
+	if body == nil {
+		return nil, false
+	}
+	body.mu.Lock()
+	defer body.mu.Unlock()
+	if body.transferred || !body.complete || body.readError || int64(len(body.bytes)) > body.limit {
+		return nil, false
+	}
+	body.transferred = true
+	request := body.bytes
+	body.bytes = nil
+	return request, true
 }
 
 func eligibleTokenRequest(request *http.Request) bool {

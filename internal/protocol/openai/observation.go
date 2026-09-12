@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"time"
@@ -142,11 +143,22 @@ func meaningfulEvent(event streaming.SSEEvent, state ObserverState, previousChoi
 		if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
 			return true
 		}
-		if len(choice.Delta.ToolCalls) != 0 && string(choice.Delta.ToolCalls) != "null" {
+		if nonEmptyJSONArray(choice.Delta.ToolCalls) {
 			return true
 		}
 	}
 	return false
+}
+
+func nonEmptyJSONArray(raw json.RawMessage) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false
+	}
+	var values []json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return false
+	}
+	return len(values) != 0
 }
 
 type meaningfulChunk struct {

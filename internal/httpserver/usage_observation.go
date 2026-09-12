@@ -88,6 +88,9 @@ type UsageObservationJob struct {
 	Completion        *completionOwnership
 	TimingCheckpoints []streamCheckpoint
 	TimingOverflow    bool
+	RequestBytes      []byte
+	RequestPricing    accounting.PricingResolver
+	ResolveRequest    bool
 }
 
 // NewUsageObservationJobWithCoding validates a wire Content-Encoding value
@@ -296,6 +299,11 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	var actual int64
 	var usage accounting.Usage
 	var err error
+	if job.ResolveRequest {
+		if metadata, metadataErr := openai.ParseRequestMetadata(job.RequestBytes); metadataErr == nil {
+			job.Pricing = job.RequestPricing.Resolve(metadata.Model)
+		}
+	}
 	canonical := job.Completion != nil || job.BudgetTicket != nil || job.Pricing.Known()
 	var lastMeaningful time.Time
 	func() {
@@ -484,6 +492,10 @@ func (worker *UsageObservationWorker) completeAndSubmit(lease *limiter.ResourceL
 }
 
 func (worker *UsageObservationWorker) completeAndSubmitWithTiming(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, completion *completionOwnership, pricing accounting.PricingResolution, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
+	return worker.completeAndSubmitWithTimingAndRequest(lease, captured, coding, completion, pricing, checkpoints, checkpointOverflow, nil, accounting.PricingResolver{})
+}
+
+func (worker *UsageObservationWorker) completeAndSubmitWithTimingAndRequest(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, completion *completionOwnership, pricing accounting.PricingResolution, checkpoints []streamCheckpoint, checkpointOverflow bool, requestBody *telemetryRequestBody, resolver accounting.PricingResolver) bool {
 	if lease == nil {
 		return false
 	}
@@ -504,6 +516,11 @@ func (worker *UsageObservationWorker) completeAndSubmitWithTiming(lease *limiter
 	job.Completion, job.Pricing = completion, pricing
 	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
 	job.TimingOverflow = checkpointOverflow
+	if request, ok := requestBody.snapshot(); ok {
+		job.RequestBytes = request
+		job.RequestPricing = resolver
+		job.ResolveRequest = true
+	}
 	return worker.submit(job)
 }
 
@@ -519,6 +536,10 @@ func (worker *UsageObservationWorker) SubmitForCompletionWithTiming(completion *
 }
 
 func (worker *UsageObservationWorker) submitForCompletionWithTimingOwned(completion *completionOwnership, captured []byte, coding ContentCoding, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
+	return worker.submitForCompletionWithRequestOwned(completion, captured, coding, checkpoints, checkpointOverflow, nil, accounting.PricingResolver{})
+}
+
+func (worker *UsageObservationWorker) submitForCompletionWithRequestOwned(completion *completionOwnership, captured []byte, coding ContentCoding, checkpoints []streamCheckpoint, checkpointOverflow bool, requestBody *telemetryRequestBody, resolver accounting.PricingResolver) bool {
 	if completion == nil || !completion.transfer() {
 		return false
 	}
@@ -529,6 +550,11 @@ func (worker *UsageObservationWorker) submitForCompletionWithTimingOwned(complet
 	job := NewUsageObservationJobForCompletion(captured, coding, completion)
 	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
 	job.TimingOverflow = checkpointOverflow
+	if request, ok := requestBody.snapshot(); ok {
+		job.RequestBytes = request
+		job.RequestPricing = resolver
+		job.ResolveRequest = true
+	}
 	return worker.submit(job)
 }
 
@@ -550,11 +576,15 @@ func (worker *UsageObservationWorker) completeAndSubmitWithPricing(lease *limite
 }
 
 func (worker *UsageObservationWorker) completeAndSubmitWithPricingTiming(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution, completion *completionOwnership, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
+	return worker.completeAndSubmitWithPricingTimingAndRequest(lease, captured, coding, pricing, completion, checkpoints, checkpointOverflow, nil, accounting.PricingResolver{})
+}
+
+func (worker *UsageObservationWorker) completeAndSubmitWithPricingTimingAndRequest(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution, completion *completionOwnership, checkpoints []streamCheckpoint, checkpointOverflow bool, requestBody *telemetryRequestBody, resolver accounting.PricingResolver) bool {
 	if lease == nil {
 		return false
 	}
 	tickets, _ := lease.TransportCompleteWithAdjustments()
-	if tickets.Token == nil && tickets.Budget == nil {
+	if tickets.Token == nil && tickets.Budget == nil && completion == nil {
 		return false
 	}
 	if completion != nil && !completion.transfer() {
@@ -565,6 +595,11 @@ func (worker *UsageObservationWorker) completeAndSubmitWithPricingTiming(lease *
 	job.Completion = completion
 	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
 	job.TimingOverflow = checkpointOverflow
+	if request, ok := requestBody.snapshot(); ok {
+		job.RequestBytes = request
+		job.RequestPricing = resolver
+		job.ResolveRequest = true
+	}
 	return worker.submit(job)
 }
 
