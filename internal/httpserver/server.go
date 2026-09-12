@@ -729,15 +729,18 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	if dispatchErr != nil {
 		if proxyContext.Err() != nil || errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
 			setTerminal(TerminalOutcomeCancelled)
-		} else if trace.errorCode() == ErrorCodeUnknown {
-			if errors.Is(dispatchErr, errDecodedRepresentationTooLarge) || errors.Is(dispatchErr, errCompressedWireTooLarge) {
-				if trace != nil {
-					trace.SetErrorCode(ErrorCodeConversion)
-				}
-			} else if trace != nil {
-				trace.SetErrorCode(ErrorCodeResponseTransport)
-			}
 		} else {
+			// A dispatch failure is terminal independently of whether writing the
+			// bounded public error envelope already selected an error code (as the
+			// conversion path does). Otherwise the deferred fallback completion can
+			// incorrectly turn a failed response into a successful one.
+			if trace != nil && trace.errorCode() == ErrorCodeUnknown {
+				if errors.Is(dispatchErr, errDecodedRepresentationTooLarge) || errors.Is(dispatchErr, errCompressedWireTooLarge) {
+					trace.SetErrorCode(ErrorCodeConversion)
+				} else {
+					trace.SetErrorCode(ErrorCodeResponseTransport)
+				}
+			}
 			setTerminal(TerminalOutcomeResponseError)
 		}
 	} else {
