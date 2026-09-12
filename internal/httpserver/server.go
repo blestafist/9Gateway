@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/auth"
@@ -1428,7 +1427,7 @@ func boundedEscapedPath(request *http.Request) string {
 		return ""
 	}
 	path := request.URL.EscapedPath()
-	if !utf8.ValidString(path) || utf8.RuneCountInString(path) > 2048 {
+	if !validBoundedText(path, 2048) {
 		return ""
 	}
 	return path

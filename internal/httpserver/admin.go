@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/limiter"
@@ -152,7 +151,7 @@ func (service *adminKeyService) create(ctx context.Context, name string, expires
 	if service == nil || service.repository == nil || service.generator == nil || len(service.pepper) == 0 || service.auth == nil {
 		return createdAdminKey{}, errAdminKeyCreation
 	}
-	if strings.TrimSpace(name) == "" || !utf8.ValidString(name) || utf8.RuneCountInString(name) > 256 {
+	if strings.TrimSpace(name) == "" || !validBoundedText(name, 256) {
 		return createdAdminKey{}, errInvalidAdminRequest
 	}
 	if expiresAt != nil {

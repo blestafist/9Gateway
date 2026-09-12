@@ -75,8 +75,13 @@ func TestBoundedTextUsesUnicodeCodePointsAndRejectsControls(t *testing.T) {
 	if !validBoundedText("模型", 2) || validBoundedText("模型a", 2) {
 		t.Fatal("bounded text did not use code-point count")
 	}
-	if validBoundedText("ok\u0000", 3) || validBoundedText(string([]byte{0xff}), 1) {
-		t.Fatal("unsafe bounded text was accepted")
+	for _, value := range []string{"ok\u0000", "ok\u007f", "ok\u0081", "ok\u0085"} {
+		if validBoundedText(value, 3) {
+			t.Fatalf("control bounded text was accepted: %q", value)
+		}
+	}
+	if validBoundedText(string([]byte{0xff}), 1) {
+		t.Fatal("invalid UTF-8 bounded text was accepted")
 	}
 }
 

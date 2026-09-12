@@ -278,6 +278,21 @@ func TestRequestTraceRejectsUnsafeAndOverflowingInputs(t *testing.T) {
 	if state.SetAuthentication(string(make([]byte, 257)), "name") {
 		t.Fatal("oversized key identity was accepted")
 	}
+	for name, set := range map[string]func(*RequestTraceState) bool{
+		"key ID":   func(state *RequestTraceState) bool { return state.SetAuthentication("key\u0081", "name") },
+		"key name": func(state *RequestTraceState) bool { return state.SetAuthentication("key", "name\u0085") },
+		"model": func(state *RequestTraceState) bool {
+			return state.SetRequestMetadata("POST", RouteChatCompletions, "model\u0081", RequestModeJSON)
+		},
+		"path": func(state *RequestTraceState) bool { return state.SetRouteMetadata("GET", "/v1/\u0085", RouteGeneric) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			state, _ := traceTestState(t)
+			if set(state) {
+				t.Fatalf("C1 control in %s was accepted", name)
+			}
+		})
+	}
 	if state.SetRequestMetadata("POST", RouteClass(99), "model", RequestModeJSON) {
 		t.Fatal("invalid route was accepted")
 	}

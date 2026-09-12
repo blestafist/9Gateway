@@ -8,6 +8,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/pestit/9gateway/internal/accounting"
@@ -658,7 +659,7 @@ func validBoundedText(value string, max int) bool {
 		return false
 	}
 	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) {
 			return false
 		}
 	}
