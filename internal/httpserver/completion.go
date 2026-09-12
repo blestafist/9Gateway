@@ -53,7 +53,7 @@ func terminalMetadataFromContext(ctx context.Context) *terminalMetadataState {
 func (state *terminalMetadataState) set(metadata TerminalMetadata) {
 	if state != nil {
 		state.mu.Lock()
-		if state.metadata.Outcome != TerminalOutcomeUnknown {
+		if state.metadata.Outcome != TerminalOutcomeUnknown && !(metadata.Outcome == TerminalOutcomeCancelled && state.metadata.UpstreamStarted) {
 			state.mu.Unlock()
 			return
 		}
@@ -142,6 +142,7 @@ func (completionLogger *CompletionLogger) write(record CompletionRecord) {
 		"duration", record.Duration,
 		"terminal_outcome", record.Terminal.Outcome,
 		"upstream_started", record.Terminal.UpstreamStarted,
+		"error_code", record.ErrorCode.String(),
 	)
 }
 

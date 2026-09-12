@@ -373,7 +373,7 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	if request.Method != http.MethodPost || request.URL.Path != "/admin/v1/keys" {
-		http.NotFound(response, request)
+		writeAdminError(response, http.StatusNotFound, gatewayErrorNotFound, "")
 		return
 	}
 	if !adminBearerMatches(request, handler.credential) {

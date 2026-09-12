@@ -268,7 +268,7 @@ func route(proxy http.Handler) http.Handler {
 		case strings.HasPrefix(request.URL.Path, "/v1/"):
 			proxy.ServeHTTP(response, request)
 		default:
-			http.NotFound(response, request)
+			writeGatewayError(response, gatewayErrorNotFound, "")
 		}
 	})
 }
@@ -292,7 +292,7 @@ func routeWithAuthenticator(proxy http.Handler, admin http.Handler, authenticato
 		case strings.HasPrefix(request.URL.Path, "/v1/"):
 			publicV1.ServeHTTP(response, request)
 		default:
-			http.NotFound(response, request)
+			writeGatewayError(response, gatewayErrorNotFound, "")
 		}
 	})
 }
@@ -332,6 +332,7 @@ const (
 
 var errDecodedRepresentationTooLarge = errors.New("decoded representation exceeds limit")
 var errCompressedWireTooLarge = errors.New("compressed wire representation exceeds limit")
+var errUnsupportedResponse = errors.New("unsupported upstream response")
 
 func newProxyHandler(client *http.Client, baseURL, apiKey string) *proxyHandler {
 	return newProxyHandlerWithRequestLimiter(client, baseURL, apiKey, nil)
@@ -405,6 +406,13 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	upstreamStarted := false
 	setTerminal := func(outcome TerminalOutcome) {
 		terminal.set(TerminalMetadata{Outcome: outcome, UpstreamStarted: upstreamStarted})
+		if trace != nil {
+			if outcome == TerminalOutcomeCancelled {
+				trace.setCancellation()
+			} else {
+				trace.SetTerminalOutcome(outcome)
+			}
+		}
 	}
 	proxyContext, cancelUpstream := context.WithCancel(request.Context())
 	// Restricted inspection may block while reading a client body. Reserve a
@@ -612,10 +620,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	if err != nil {
 		if proxyContext.Err() != nil {
 			setTerminal(TerminalOutcomeCancelled)
+			writeGatewayError(response, gatewayErrorCancellation, "")
+		} else if timeoutError(err) {
+			setTerminal(TerminalOutcomeUpstreamError)
+			writeGatewayError(response, gatewayErrorUpstreamTimeout, "")
 		} else {
 			setTerminal(TerminalOutcomeUpstreamError)
+			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 		}
-		writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 		return
 	}
 	if upstreamResponse == nil {
@@ -655,12 +667,36 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	if dispatchErr != nil {
 		if proxyContext.Err() != nil || errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
 			setTerminal(TerminalOutcomeCancelled)
+		} else if trace.errorCode() == ErrorCodeUnknown {
+			if errors.Is(dispatchErr, errDecodedRepresentationTooLarge) || errors.Is(dispatchErr, errCompressedWireTooLarge) {
+				if trace != nil {
+					trace.SetErrorCode(ErrorCodeConversion)
+				}
+			} else if trace != nil {
+				trace.SetErrorCode(ErrorCodeResponseTransport)
+			}
 		} else {
 			setTerminal(TerminalOutcomeResponseError)
 		}
 	} else {
-		setTerminal(TerminalOutcomeComplete)
+		if proxyContext.Err() != nil {
+			setTerminal(TerminalOutcomeCancelled)
+			return
+		}
+		if upstreamResponse.StatusCode >= http.StatusBadRequest {
+			// Upstream application errors remain byte-for-byte transparent. They
+			// are a lifecycle classification, not a gateway-owned error code or
+			// a reason to replace the provider's response body.
+			setTerminal(TerminalOutcomeUpstreamError)
+		} else {
+			setTerminal(TerminalOutcomeComplete)
+		}
 	}
+}
+
+func timeoutError(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 func (handler *proxyHandler) writeAdmissionError(response http.ResponseWriter, rejection *limiter.AdmissionError) {
@@ -859,7 +895,7 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 			// A response transformation cannot safely preserve an unsupported or
 			// malformed representation. Fail before copying upstream headers or
 			// committing any downstream bytes.
-			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
+			writeGatewayError(response, dispatchErrorCode(err), "")
 			finalizeConvertedLeaseConservatively(lease)
 			return err
 		}
@@ -870,7 +906,7 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		if err != nil {
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
-			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
+			writeGatewayError(response, dispatchErrorCode(err), "")
 			if errors.Is(err, errCompressedWireTooLarge) {
 				finalizeConvertedLeaseConservatively(lease)
 			} else {
@@ -891,7 +927,7 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		// representation has nothing left to validate and must not wait for EOF.
 		if !done || requiresDrain {
 			if err := drainAggregationBody(aggregationBody, aggregationContext(upstreamResponse, request)); err != nil {
-				writeGatewayError(response, gatewayErrorUpstreamConnection, "")
+				writeGatewayError(response, dispatchErrorCode(err), "")
 				if errors.Is(err, errCompressedWireTooLarge) {
 					finalizeConvertedLeaseConservatively(lease)
 				}
@@ -929,6 +965,13 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 	}
 	_, err := io.Copy(response, upstreamResponse.Body)
 	return err
+}
+
+func dispatchErrorCode(err error) string {
+	if errors.Is(err, errUnsupportedResponse) {
+		return gatewayErrorUnsupportedResponse
+	}
+	return gatewayErrorConversion
 }
 
 // finalizeConvertedLeaseConservatively settles a conversion that cannot use a
@@ -980,7 +1023,7 @@ func aggregationReaderWithDrain(upstreamResponse *http.Response) (io.Reader, fun
 		for _, part := range strings.Split(value, ",") {
 			coding := strings.TrimSpace(part)
 			if coding == "" {
-				return nil, nil, false, errors.New("invalid content encoding")
+				return nil, nil, false, errUnsupportedResponse
 			}
 			codings = append(codings, coding)
 		}
@@ -1008,7 +1051,7 @@ func aggregationReaderWithDrain(upstreamResponse *http.Response) (io.Reader, fun
 		requiresDrain = true
 		if !strings.EqualFold(codings[index], "gzip") {
 			closeReaders(closers)
-			return nil, nil, false, errors.New("unsupported content encoding")
+			return nil, nil, false, errUnsupportedResponse
 		}
 		decoded, err := gzip.NewReader(reader)
 		if err != nil {
@@ -1295,7 +1338,7 @@ func withRequestID(next http.Handler) http.Handler {
 		requestContext := context.WithValue(request.Context(), requestIDContextKey{}, id)
 		requestContext = context.WithValue(requestContext, terminalMetadataContextKey{}, terminal)
 		request = request.WithContext(withTrace(requestContext, trace))
-		next.ServeHTTP(&completionResponseWriter{ResponseWriter: response, trace: trace}, request)
+		next.ServeHTTP(&completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}, request)
 		// The request-ID boundary owns the final trace handoff. This is outside
 		// the transport path and remains idempotent when the completion wrapper
 		// also completes the trace.
@@ -1317,7 +1360,7 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
-		writer := &completionResponseWriter{ResponseWriter: response}
+		writer := &completionResponseWriter{ResponseWriter: response, trace: TraceFromContext(request.Context()), terminal: terminal}
 		next.ServeHTTP(writer, request)
 
 		logger.Info("request completed",
@@ -1328,6 +1371,12 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 			"duration", time.Since(startedAt),
 			"terminal_outcome", terminal.get().Outcome,
 			"upstream_started", terminal.get().UpstreamStarted,
+			"error_code", func() SafeErrorCode {
+				if trace := TraceFromContext(request.Context()); trace != nil {
+					return trace.errorCode()
+				}
+				return ErrorCodeUnknown
+			}().String(),
 		)
 	})
 }
@@ -1340,7 +1389,7 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
-		writer := &completionResponseWriter{ResponseWriter: response}
+		writer := &completionResponseWriter{ResponseWriter: response, trace: TraceFromContext(request.Context()), terminal: terminal}
 		next.ServeHTTP(writer, request)
 
 		// Copy only safe scalar values into the record before handing it to the
@@ -1353,6 +1402,12 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 				Status:    writer.statusCode(),
 				Duration:  time.Since(startedAt),
 				Terminal:  terminal.get(),
+				ErrorCode: func() SafeErrorCode {
+					if trace := TraceFromContext(request.Context()); trace != nil {
+						return trace.errorCode()
+					}
+					return ErrorCodeUnknown
+				}(),
 			})
 		}
 	})
@@ -1365,12 +1420,22 @@ func requestIDFromContext(ctx context.Context) string {
 
 type completionResponseWriter struct {
 	http.ResponseWriter
-	status int
-	trace  *RequestTraceState
+	status   int
+	trace    *RequestTraceState
+	terminal *terminalMetadataState
 }
 
 func (writer *completionResponseWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
+}
+
+func (writer *completionResponseWriter) setGatewayErrorCode(code SafeErrorCode) {
+	if writer.trace != nil && code != ErrorCodeUnknown {
+		writer.trace.SetErrorCode(code)
+	}
+	if recorder, ok := writer.ResponseWriter.(gatewayErrorTraceRecorder); ok {
+		recorder.setGatewayErrorCode(code)
+	}
 }
 
 func (writer *completionResponseWriter) FlushError() error {

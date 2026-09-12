@@ -484,6 +484,43 @@ func (state *RequestTraceState) SetErrorCode(code SafeErrorCode) bool {
 
 func (state *RequestTraceState) SetError(code SafeErrorCode) bool { return state.SetErrorCode(code) }
 
+func (state *RequestTraceState) errorCode() SafeErrorCode {
+	if state == nil {
+		return ErrorCodeUnknown
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.input.ErrorCode
+}
+
+func (state *RequestTraceState) upstreamStarted() bool {
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.upstream
+}
+
+// setCancellation is used by the transport cleanup path. Cancellation is a
+// terminal fact, so it may replace an earlier provisional response error (for
+// example when a client disconnects after upstream headers were written).
+func (state *RequestTraceState) setCancellation() bool {
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.baseFrozen || !state.upstream {
+		return false
+	}
+	state.input.ErrorCode, state.input.SafeErrorCode = ErrorCodeCancellation, ErrorCodeCancellation
+	state.errorSet = true
+	state.input.Terminal = TerminalMetadata{Outcome: TerminalOutcomeCancelled, UpstreamStarted: true}
+	state.terminalSet = true
+	return true
+}
+
 func (state *RequestTraceState) SetTerminalMetadata(metadata TerminalMetadata) bool {
 	if state == nil || !validTerminalOutcome(metadata.Outcome) {
 		return false
@@ -492,6 +529,10 @@ func (state *RequestTraceState) SetTerminalMetadata(metadata TerminalMetadata) b
 	defer state.mu.Unlock()
 	if state.baseFrozen || state.terminalSet || metadata.UpstreamStarted != state.upstream || metadata.Outcome == TerminalOutcomePreUpstream && state.upstream || metadata.Outcome != TerminalOutcomeUnknown && metadata.Outcome != TerminalOutcomePreUpstream && !state.upstream {
 		return false
+	}
+	if metadata.Outcome == TerminalOutcomeCancelled {
+		state.input.ErrorCode, state.input.SafeErrorCode = ErrorCodeCancellation, ErrorCodeCancellation
+		state.errorSet = true
 	}
 	state.input.Terminal, state.terminalSet = metadata, true
 	return true
@@ -507,6 +548,10 @@ func (state *RequestTraceState) SetTerminalOutcome(outcome TerminalOutcome) bool
 		return false
 	}
 	started := state.upstream
+	if outcome == TerminalOutcomeCancelled {
+		state.input.ErrorCode, state.input.SafeErrorCode = ErrorCodeCancellation, ErrorCodeCancellation
+		state.errorSet = true
+	}
 	state.input.Terminal, state.terminalSet = TerminalMetadata{Outcome: outcome, UpstreamStarted: started}, true
 	return true
 }

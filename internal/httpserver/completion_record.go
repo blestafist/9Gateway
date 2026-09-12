@@ -273,6 +273,10 @@ func (timing CompletionTiming) MarshalJSON() ([]byte, error) {
 // an error message, URL, SQL detail, credential, or payload fragment.
 type SafeErrorCode uint8
 
+// GatewayErrorCode is the public name for the closed gateway-owned error
+// vocabulary. Values outside the constants are rejected at record boundaries.
+type GatewayErrorCode = SafeErrorCode
+
 const (
 	ErrorCodeUnknown SafeErrorCode = iota
 	ErrorCodeInvalidAPIKey
@@ -291,10 +295,34 @@ const (
 	ErrorCodeCancellation
 	ErrorCodeUnsupportedResponse
 	ErrorCodeInternal
+	ErrorCodeNotFound
+	ErrorCodeConflict
+)
+
+const (
+	GatewayErrorUnknown             = ErrorCodeUnknown
+	GatewayErrorInvalidAPIKey       = ErrorCodeInvalidAPIKey
+	GatewayErrorKeyDisabled         = ErrorCodeKeyDisabled
+	GatewayErrorKeyExpired          = ErrorCodeKeyExpired
+	GatewayErrorInvalidRequest      = ErrorCodeInvalidRequest
+	GatewayErrorModelNotAllowed     = ErrorCodeModelNotAllowed
+	GatewayErrorRequestLimit        = ErrorCodeRequestLimit
+	GatewayErrorConcurrencyLimit    = ErrorCodeConcurrencyLimit
+	GatewayErrorTokenLimit          = ErrorCodeTokenLimit
+	GatewayErrorBudgetLimit         = ErrorCodeBudgetLimit
+	GatewayErrorUpstreamConnection  = ErrorCodeUpstreamConnection
+	GatewayErrorUpstreamTimeout     = ErrorCodeUpstreamTimeout
+	GatewayErrorResponseTransport   = ErrorCodeResponseTransport
+	GatewayErrorConversion          = ErrorCodeConversion
+	GatewayErrorCancellation        = ErrorCodeCancellation
+	GatewayErrorUnsupportedResponse = ErrorCodeUnsupportedResponse
+	GatewayErrorInternal            = ErrorCodeInternal
+	GatewayErrorNotFound            = ErrorCodeNotFound
+	GatewayErrorConflict            = ErrorCodeConflict
 )
 
 func (code SafeErrorCode) String() string {
-	names := [...]string{"unknown", "invalid_api_key", "key_disabled", "key_expired", "invalid_request", "model_not_allowed", "request_limit_exceeded", "concurrency_limit_exceeded", "token_limit_exceeded", "budget_exceeded", "upstream_connection_error", "upstream_timeout", "response_transport_error", "conversion_error", "cancelled", "unsupported_response", "gateway_internal_error"}
+	names := [...]string{"unknown", "invalid_api_key", "key_disabled", "key_expired", "invalid_request", "model_not_allowed", "request_limit_exceeded", "concurrency_limit_exceeded", "token_limit_exceeded", "budget_exceeded", "upstream_connection_error", "upstream_timeout", "response_transport_error", "conversion_error", "cancelled", "unsupported_response", "gateway_internal_error", "not_found", "conflict"}
 	if int(code) >= len(names) {
 		return "unknown"
 	}
@@ -632,7 +660,7 @@ func validBoundedText(value string, max int) bool {
 	return true
 }
 
-func validErrorCode(code SafeErrorCode) bool { return code <= ErrorCodeInternal }
+func validErrorCode(code SafeErrorCode) bool { return code <= ErrorCodeConflict }
 func validTerminalOutcome(outcome TerminalOutcome) bool {
 	switch outcome {
 	case TerminalOutcomeUnknown, TerminalOutcomePreUpstream, TerminalOutcomeUpstreamError, TerminalOutcomeResponseError, TerminalOutcomeComplete, TerminalOutcomeCustomDispatch, TerminalOutcomeCancelled:
