@@ -43,6 +43,22 @@ func classifyResponseHeader(header http.Header) ResponseMode {
 	return classifyResponse(contentTypes[0])
 }
 
+// classifyActualResponseHeader is the observability classifier. Transport
+// deliberately falls back to opaque for missing, repeated, or malformed
+// Content-Type values, but those headers do not prove an actual representation
+// and must remain unknown in a trace. A valid, unrecognized media type is
+// confidently opaque. Neither classifier reads response bytes.
+func classifyActualResponseHeader(header http.Header) ResponseMode {
+	contentTypes := header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		return ResponseModeUnknown
+	}
+	if _, _, err := mime.ParseMediaType(contentTypes[0]); err != nil {
+		return ResponseModeUnknown
+	}
+	return classifyResponse(contentTypes[0])
+}
+
 // shouldAggregateSSE reports whether a known chat-completions request asked
 // for a non-streaming response while upstream actually returned SSE.
 func shouldAggregateSSE(request *http.Request, metadata *openai.RequestMetadata, responseMode ResponseMode) bool {

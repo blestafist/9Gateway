@@ -643,15 +643,36 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 		return
 	}
+	// Capture the response-header boundary before classification or dispatch.
+	// The mode used by transport remains the existing fallback classifier;
+	// telemetry is stricter and leaves malformed/ambiguous headers unknown.
+	if trace != nil {
+		trace.SetUpstreamHeaders(upstreamResponse.StatusCode)
+	}
+	responseMode := classifyResponseHeader(upstreamResponse.Header)
+	actualResponseMode := classifyActualResponseHeader(upstreamResponse.Header)
+	if trace != nil {
+		if actualResponseMode != ResponseModeUnknown {
+			trace.SetUpstreamResponseMode(actualResponseMode)
+		}
+	}
 	if handler.responseDispatch != nil {
 		setTerminal(TerminalOutcomeCustomDispatch)
 		handler.responseDispatch(response, upstreamResponse, metadata)
 		return
 	}
-	responseMode := classifyResponseHeader(upstreamResponse.Header)
 	if trace != nil {
-		trace.SetUpstreamHeaders(upstreamResponse.StatusCode)
-		trace.SetUpstreamResponseMode(responseMode)
+		// A malformed or ambiguous header has no provable actual mode, but the
+		// existing transport classifier still selects opaque passthrough. Keep
+		// that delivered fact separate from the unknown actual representation.
+		deliveredMode := responseMode
+		if actualResponseMode == ResponseModeSSE && shouldAggregateSSE(request, metadata, responseMode) {
+			deliveredMode = ResponseModeJSON
+		}
+		// Dispatch selection is the point at which delivered representation is
+		// known. This is intentionally before dispatch so it cannot affect first
+		// byte delivery or response conversion.
+		trace.SetDeliveredMode(deliveredMode)
 	}
 	if (tokenAdmission || budgetAdmission) && (responseMode == ResponseModeJSON || responseMode == ResponseModeSSE) {
 		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
@@ -662,13 +683,6 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		}
 	}
 	dispatchErr = dispatchResponseResultWithLeaseAndObservationAndPricing(response, upstreamResponse, metadata, lifecycleLease, responseObservation, selectedPricing, request.WithContext(proxyContext))
-	if trace != nil && dispatchErr == nil {
-		deliveredMode := responseMode
-		if shouldAggregateSSE(request, metadata, responseMode) {
-			deliveredMode = ResponseModeJSON
-		}
-		trace.SetDeliveredMode(deliveredMode)
-	}
 	if responseObservation != nil {
 		responseObservation.finish(dispatchErr)
 	}

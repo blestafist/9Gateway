@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T125`.
+Done: `T001`-`T126`.
 
-Current: `T126` - trace upstream and response modes.
+Current: `T127` - attach usage and actual cost to traces.
 
-Queued: `T126`-`T140` in dependency order from `TASKS.md`.
+Queued: `T127`-`T140` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -60,6 +60,12 @@ completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion
 Review fix after T125: optional response-writer capabilities remain conditional,
 bounded text uses Unicode code points with control rejection, and trace record
 round trips retain escaped paths; canonical completion logging remains deferred.
+
+T126 records the exact pre-`client.Do` boundary and response-header boundary,
+including upstream-header latency, independent upstream status, and actual
+header-derived response mode. Malformed or ambiguous content types remain
+unknown in telemetry while transport keeps its opaque fallback; delivered mode
+is selected separately before dispatch, including SSE-to-JSON conversion.
 
 The focused T091-T100 review fixes independently bound compressed wire bytes
 during gzip SSE-to-JSON conversion, prevent legacy token checkpoint promotion

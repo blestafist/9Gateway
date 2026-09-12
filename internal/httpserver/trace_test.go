@@ -143,6 +143,31 @@ func TestRequestTraceFakeClockMissingAndBackwardMilestones(t *testing.T) {
 	}
 }
 
+func TestRequestTraceUpstreamHeaderLatencyStartsAtClientBoundary(t *testing.T) {
+	state, clock := traceTestState(t)
+	clock.advance(17*time.Millisecond, 23*time.Millisecond)
+	if !state.SetUpstreamStart() {
+		t.Fatal("upstream start was not recorded")
+	}
+	clock.advance(5*time.Millisecond, 7*time.Millisecond)
+	if !state.SetUpstreamHeaders(httpStatusOK) {
+		t.Fatal("upstream headers were not recorded")
+	}
+	record, err := state.Complete()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Timing.UpstreamStartedAt.Known() || !record.Timing.UpstreamHeadersAt.Known() {
+		t.Fatal("upstream boundary timestamps are unknown")
+	}
+	if got, known := record.Timing.TimeToUpstreamHeaders.Value(); !known || got != 7000 {
+		t.Fatalf("upstream header latency = %d/%v, want 7000/true", got, known)
+	}
+	if got, known := record.Timing.Total.Value(); !known || got != 30000 {
+		t.Fatalf("total latency = %d/%v, want 30000/true", got, known)
+	}
+}
+
 func TestRequestTraceEnrichmentIsIndependentAndOneShot(t *testing.T) {
 	state, _ := traceTestState(t)
 	state.SetRequestMetadata("POST", RouteResponses, "model", RequestModeJSON)

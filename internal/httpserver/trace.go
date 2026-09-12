@@ -87,21 +87,23 @@ type RequestTraceState struct {
 	clock TraceClock
 	input CompletionRecordInput
 
-	startedMono time.Time
-	lastMono    time.Time
-	lastWall    time.Time
-	started     bool
-	upstream    bool
-	headers     bool
-	firstByte   bool
-	finished    bool
-	terminalSet bool
-	authSet     bool
-	metadataSet bool
-	routeSet    bool
-	usageSet    bool
-	costSet     bool
-	errorSet    bool
+	startedMono         time.Time
+	upstreamMono        time.Time
+	lastMono            time.Time
+	lastWall            time.Time
+	started             bool
+	upstream            bool
+	upstreamBoundarySet bool
+	headers             bool
+	firstByte           bool
+	finished            bool
+	terminalSet         bool
+	authSet             bool
+	metadataSet         bool
+	routeSet            bool
+	usageSet            bool
+	costSet             bool
+	errorSet            bool
 
 	base        CompletionRecord
 	baseInvalid bool
@@ -281,7 +283,9 @@ func (state *RequestTraceState) SetRequestMetadataValue(metadata TraceRequestMet
 	return state.SetRequestMetadata(metadata.Method, metadata.Route, metadata.Model, metadata.RequestedMode)
 }
 
-// SetUpstreamStart records the first upstream-start milestone.
+// SetUpstreamStart records the first upstream-start milestone. Callers invoke
+// this immediately before client.Do; the reading is therefore the exact
+// boundary used by TimeToUpstreamHeaders.
 func (state *RequestTraceState) SetUpstreamStart(started ...bool) bool {
 	if state == nil || len(started) != 0 && !started[0] {
 		return false
@@ -291,7 +295,9 @@ func (state *RequestTraceState) SetUpstreamStart(started ...bool) bool {
 	if state.baseFrozen || state.upstream {
 		return false
 	}
-	state.upstream, state.input.Terminal.UpstreamStarted = true, true
+	wall, mono := state.reading()
+	state.upstream, state.upstreamMono, state.upstreamBoundarySet, state.input.Terminal.UpstreamStarted = true, mono, true, true
+	state.input.Timing.UpstreamStartedAt = state.wallStamp(wall)
 	return true
 }
 
@@ -313,12 +319,15 @@ func (state *RequestTraceState) SetUpstreamHeadersStatus(status OptionalStatus) 
 	if state.baseFrozen || state.headers {
 		return false
 	}
-	wall, _ := state.reading()
+	wall, mono := state.reading()
 	state.headers = true
 	state.upstream = true
 	state.input.Terminal.UpstreamStarted = true
 	state.input.UpstreamStatus = status
 	state.input.Timing.UpstreamHeadersAt = state.wallStamp(wall)
+	if state.upstreamBoundarySet {
+		state.input.Timing.TimeToUpstreamHeaders = durationMicros(state.upstreamMono, mono)
+	}
 	return true
 }
 

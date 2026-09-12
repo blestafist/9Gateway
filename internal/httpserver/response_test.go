@@ -81,6 +81,31 @@ func TestClassifyResponseHeaderRejectsMultipleContentTypes(t *testing.T) {
 	if got := classifyResponseHeader(header); got != ResponseModeOpaque {
 		t.Fatalf("classifyResponseHeader() = %q, want %q", got, ResponseModeOpaque)
 	}
+	if got := classifyActualResponseHeader(header); got != ResponseModeUnknown {
+		t.Fatalf("classifyActualResponseHeader() = %q, want unknown for ambiguity", got)
+	}
+}
+
+func TestClassifyActualResponseHeaderDistinguishesMalformedFromOpaque(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  ResponseMode
+	}{
+		{name: "valid opaque", value: "application/octet-stream", want: ResponseModeOpaque},
+		{name: "malformed", value: "application/json; charset", want: ResponseModeUnknown},
+		{name: "missing", value: "", want: ResponseModeUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			header := make(http.Header)
+			if test.name != "missing" {
+				header.Set("Content-Type", test.value)
+			}
+			if got := classifyActualResponseHeader(header); got != test.want {
+				t.Fatalf("classifyActualResponseHeader() = %q, want %q", got, test.want)
+			}
+		})
+	}
 }
 
 func TestClassifyResponseDoesNotReadRequestStreamField(t *testing.T) {

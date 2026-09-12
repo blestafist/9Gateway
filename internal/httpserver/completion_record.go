@@ -240,12 +240,19 @@ func (duration DurationMicros) Duration() (time.Duration, bool) {
 // CompletionTiming contains only scalar timing facts. Wall timestamps are
 // canonical Unix microseconds; elapsed values are persistable microseconds.
 type CompletionTiming struct {
-	StartedAt         UnixMicros
+	StartedAt UnixMicros
+	// UpstreamStartedAt is the reading taken immediately before client.Do.
+	// It is intentionally distinct from StartedAt, which is the request
+	// boundary, so upstream-header latency excludes admission and inspection.
+	UpstreamStartedAt UnixMicros
 	UpstreamHeadersAt UnixMicros
 	FirstByteAt       UnixMicros
 	FinishedAt        UnixMicros
 	Total             DurationMicros
-	TimeToFirstByte   DurationMicros
+	// TimeToUpstreamHeaders starts at UpstreamStartedAt, never at request
+	// arrival. It remains unknown when the client did not return headers.
+	TimeToUpstreamHeaders DurationMicros
+	TimeToFirstByte       DurationMicros
 }
 
 func (timing CompletionTiming) MarshalJSON() ([]byte, error) {
@@ -262,13 +269,15 @@ func (timing CompletionTiming) MarshalJSON() ([]byte, error) {
 		return value.value
 	}
 	return json.Marshal(struct {
-		StartedAt             any `json:"started_at"`
-		UpstreamHeadersAt     any `json:"upstream_headers_at"`
-		FirstByteAt           any `json:"first_byte_at"`
-		FinishedAt            any `json:"finished_at"`
-		TotalMicros           any `json:"total_micros"`
-		TimeToFirstByteMicros any `json:"time_to_first_byte_micros"`
-	}{optionalTimestamp(timing.StartedAt), optionalTimestamp(timing.UpstreamHeadersAt), optionalTimestamp(timing.FirstByteAt), optionalTimestamp(timing.FinishedAt), optionalDuration(timing.Total), optionalDuration(timing.TimeToFirstByte)})
+		StartedAt                   any `json:"started_at"`
+		UpstreamStartedAt           any `json:"upstream_started_at"`
+		UpstreamHeadersAt           any `json:"upstream_headers_at"`
+		FirstByteAt                 any `json:"first_byte_at"`
+		FinishedAt                  any `json:"finished_at"`
+		TotalMicros                 any `json:"total_micros"`
+		TimeToUpstreamHeadersMicros any `json:"time_to_upstream_headers_micros"`
+		TimeToFirstByteMicros       any `json:"time_to_first_byte_micros"`
+	}{optionalTimestamp(timing.StartedAt), optionalTimestamp(timing.UpstreamStartedAt), optionalTimestamp(timing.UpstreamHeadersAt), optionalTimestamp(timing.FirstByteAt), optionalTimestamp(timing.FinishedAt), optionalDuration(timing.Total), optionalDuration(timing.TimeToUpstreamHeaders), optionalDuration(timing.TimeToFirstByte)})
 }
 
 // SafeErrorCode is a closed, secret-safe error vocabulary. It never contains
@@ -600,13 +609,16 @@ func validateCompletionInput(input CompletionRecordInput) error {
 	if input.Route > RouteClassAdmin || input.RequestedMode > RequestModeSSE || input.UpstreamMode != ResponseModeUnknown && input.UpstreamMode != ResponseModeJSON && input.UpstreamMode != ResponseModeOpaque && input.UpstreamMode != ResponseModeSSE || input.DeliveredMode != ResponseModeUnknown && input.DeliveredMode != ResponseModeJSON && input.DeliveredMode != ResponseModeOpaque && input.DeliveredMode != ResponseModeSSE {
 		return errors.New("completion: invalid enum")
 	}
-	if input.UpstreamMode == ResponseModeUnknown && input.DeliveredMode != ResponseModeUnknown {
+	// A malformed or ambiguous upstream Content-Type is not evidence of an
+	// actual upstream representation, but transport still deliberately uses its
+	// opaque fallback. Preserve both facts when that fallback was delivered.
+	if input.UpstreamMode == ResponseModeUnknown && input.DeliveredMode != ResponseModeUnknown && input.DeliveredMode != ResponseModeOpaque {
 		return errors.New("completion: delivered mode requires upstream mode")
 	}
 	if input.DeliveredMode == ResponseModeSSE && input.UpstreamMode != ResponseModeSSE {
 		return errors.New("completion: SSE delivery requires upstream SSE")
 	}
-	if input.DeliveredMode == ResponseModeOpaque && input.UpstreamMode != ResponseModeOpaque {
+	if input.DeliveredMode == ResponseModeOpaque && input.UpstreamMode != ResponseModeOpaque && input.UpstreamMode != ResponseModeUnknown {
 		return errors.New("completion: opaque delivery requires opaque upstream")
 	}
 	if input.UpstreamMode == ResponseModeOpaque && input.DeliveredMode != ResponseModeOpaque && input.DeliveredMode != ResponseModeUnknown {
