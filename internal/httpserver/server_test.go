@@ -2250,8 +2250,8 @@ func TestCompletionLogContainsRequestMetadataWithoutAuthorization(t *testing.T) 
 	if record["status"] != float64(http.StatusOK) {
 		t.Fatalf("status = %v, want %d", record["status"], http.StatusOK)
 	}
-	if _, ok := record["duration"]; !ok {
-		t.Fatal("duration is missing")
+	if _, ok := record["total_micros"]; !ok {
+		t.Fatal("total_micros is missing")
 	}
 	if strings.Contains(logs.String(), "Authorization") || strings.Contains(logs.String(), "client-secret") {
 		t.Fatal("completion log contains Authorization data")
@@ -2275,13 +2275,13 @@ func TestCompletionResponseWriterRecordsImplicitStatusFromFlush(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "http://gateway.example.test/stream", nil)
-	withCompletionLog(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	withRequestID(withCompletionLog(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if err := http.NewResponseController(response).Flush(); err != nil {
 			t.Errorf("flush response: %v", err)
 			return
 		}
 		response.WriteHeader(http.StatusInternalServerError)
-	})).ServeHTTP(recorder, request)
+	}))).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
@@ -2310,9 +2310,9 @@ func TestCompletionResponseWriterCapturesStatusThroughLogging(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "http://gateway.example.test/status", nil)
-	withCompletionLog(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	withRequestID(withCompletionLog(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusAccepted)
-	})).ServeHTTP(recorder, request)
+	}))).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusAccepted)

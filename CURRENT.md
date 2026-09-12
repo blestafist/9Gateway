@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T128`.
+Done: `T001`-`T129`.
 
-Current: `T129` - emit canonical structured completion logs.
+Current: `T130` - validate observability configuration.
 
-Queued: `T128`-`T140` in dependency order from `TASKS.md`.
+Queued: `T130`-`T140` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -59,7 +59,9 @@ completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion
 
 Review fix after T125: optional response-writer capabilities remain conditional,
 bounded text uses Unicode code points with control rejection, and trace record
-round trips retain escaped paths; canonical completion logging remains deferred.
+round trips retain escaped paths. T129 projects only frozen canonical final
+records into bounded, nonblocking structured completion logs; unknown optional
+values are omitted and known costs/durations are integer micros.
 
 T126 records the exact pre-`client.Do` boundary and response-header boundary,
 including upstream-header latency, independent upstream status, and actual

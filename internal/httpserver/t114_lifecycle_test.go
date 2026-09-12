@@ -286,11 +286,11 @@ func TestT114CompletionLogCarriesOnlyTypedTerminalMetadata(t *testing.T) {
 	logger := NewCompletionLogger(slog.New(slog.NewJSONHandler(&logs, nil)), 4)
 	request := httptest.NewRequest(http.MethodGet, "http://gateway.test/v1/models", nil)
 	recorder := httptest.NewRecorder()
-	withCompletionLogger(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	withRequestID(withCompletionLogger(logger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		state := terminalMetadataFromContext(request.Context())
 		state.set(TerminalMetadata{Outcome: TerminalOutcomePreUpstream})
 		response.WriteHeader(http.StatusBadRequest)
-	})).ServeHTTP(recorder, request)
+	}))).ServeHTTP(recorder, request)
 	shutdownCompletionLogger(t, logger)
 	text := logs.String()
 	if !strings.Contains(text, `"terminal_outcome":"pre_upstream"`) || !strings.Contains(text, `"upstream_started":false`) {

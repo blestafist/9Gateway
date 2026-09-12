@@ -1412,30 +1412,20 @@ func withRequestID(next http.Handler) http.Handler {
 
 func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		startedAt := time.Now()
 		terminal := newTerminalMetadataState()
 		if existing := terminalMetadataFromContext(request.Context()); existing != nil {
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
-		writer, wrapped := completionWriter(response, TraceFromContext(request.Context()), terminal)
+		_, wrapped := completionWriter(response, TraceFromContext(request.Context()), terminal)
 		next.ServeHTTP(wrapped, request)
 		if trace := TraceFromContext(request.Context()); trace != nil {
 			trace.SetTerminalMetadata(terminal.get())
 			record, err := trace.Complete()
 			if err == nil {
-				logger.Info("request completed", "request_id", record.RequestID, "method", record.Method,
-					"path", record.Path, "route", record.Route.String(), "model", record.Model,
-					"requested_mode", record.RequestedMode.String(), "status", writer.statusCode(),
-					"duration", time.Since(startedAt), "terminal_outcome", record.Terminal.Outcome,
-					"upstream_started", record.Terminal.UpstreamStarted, "error_code", record.ErrorCode.String())
-				return
+				logger.LogAttrs(context.Background(), slog.LevelInfo, "request completed", completionLogAttrs(record)...)
 			}
 		}
-		logger.Info("request completed", "request_id", requestIDFromContext(request.Context()), "method", request.Method,
-			"path", boundedEscapedPath(request), "status", writer.statusCode(), "duration", time.Since(startedAt),
-			"terminal_outcome", terminal.get().Outcome, "upstream_started", terminal.get().UpstreamStarted,
-			"error_code", ErrorCodeUnknown.String())
 	})
 }
 
@@ -1453,10 +1443,6 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 		next.ServeHTTP(wrapped, request)
 		if trace := TraceFromContext(request.Context()); trace != nil {
 			trace.SetTerminalMetadata(terminal.get())
-		} else if completionLogger != nil {
-			completionLogger.Enqueue(CompletionRecord{RequestID: requestIDFromContext(request.Context()), Method: request.Method,
-				Path: boundedEscapedPath(request), Route: ClassifyRoute(request.Method, request.URL.Path), Status: writer.statusCode(),
-				Terminal: terminal.get(), ErrorCode: ErrorCodeUnknown})
 		}
 		writer.complete()
 	})

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/transport"
 )
 
@@ -189,11 +190,11 @@ func TestCompletionRecordPreservesSafeFields(t *testing.T) {
 	logHandler := &completionRecordHandler{records: make(chan slog.Record, 1)}
 	completionLogger := NewCompletionLogger(slog.New(logHandler), 1)
 	request := httptest.NewRequest(http.MethodPost, "http://gateway.test/v1/models?secret=query", nil)
-	request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, "request-id"))
+	request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, "0123456789abcdef0123456789abcdef"))
 	recorder := httptest.NewRecorder()
-	withCompletionLogger(completionLogger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	withRequestID(withCompletionLogger(completionLogger, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusAccepted)
-	})).ServeHTTP(recorder, request)
+	}))).ServeHTTP(recorder, request)
 	shutdownCompletionLogger(t, completionLogger)
 
 	select {
@@ -203,17 +204,104 @@ func TestCompletionRecordPreservesSafeFields(t *testing.T) {
 			values[attribute.Key] = attribute.Value.Any()
 			return true
 		})
-		if values["request_id"] != "request-id" || values["method"] != http.MethodPost || values["path"] != "/v1/models" || values["status"] != int64(http.StatusAccepted) {
+		status, statusOK := values["status"].(int64)
+		if values["request_id"] != recorder.Header().Get(requestIDHeader) || values["method"] != http.MethodPost || values["path"] != "/v1/models" || !statusOK || status != int64(http.StatusAccepted) {
 			t.Fatalf("completion fields = %#v", values)
 		}
-		if _, ok := values["duration"]; !ok {
-			t.Fatal("duration is missing")
+		if _, ok := values["total_micros"]; !ok {
+			t.Fatal("total_micros is missing")
 		}
 		if _, ok := values["Authorization"]; ok {
 			t.Fatal("completion record contains Authorization")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("completion record was not written")
+	}
+}
+
+func TestCompletionLoggerProjectsCanonicalScalarsAndOmitsUnknowns(t *testing.T) {
+	logHandler := &completionRecordHandler{records: make(chan slog.Record, 1)}
+	completionLogger := NewCompletionLogger(slog.New(logHandler), 1)
+	defer shutdownCompletionLogger(t, completionLogger)
+
+	record, err := NewCompletionRecord(validCompletionInput(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completionLogger.Enqueue(record) {
+		t.Fatal("canonical completion record was dropped")
+	}
+	logged := <-logHandler.records
+	values := make(map[string]any)
+	logged.Attrs(func(attribute slog.Attr) bool {
+		values[attribute.Key] = attribute.Value.Any()
+		return true
+	})
+	for key, want := range map[string]any{
+		"route":                     "chat_completions",
+		"requested_mode":            "json",
+		"upstream_mode":             "json",
+		"delivered_mode":            "json",
+		"status":                    int64(200),
+		"upstream_status":           int64(200),
+		"terminal_outcome":          "complete",
+		"client_bytes":              int64(0),
+		"cost_micros":               int64(0),
+		"total_micros":              int64(1),
+		"time_to_first_byte_micros": int64(1),
+		"usage_input":               int64(0),
+		"usage_output":              int64(4),
+		"usage_total":               int64(4),
+	} {
+		if values[key] != want {
+			t.Errorf("%s = %#v, want %#v", key, values[key], want)
+		}
+	}
+	for _, key := range []string{"key_id", "error_code", "finished_at", "upstream_started_at", "stream_close_delay_micros", "Authorization", "body", "pricing", "reservation"} {
+		if _, ok := values[key]; ok {
+			t.Errorf("forbidden or unknown attribute %q was logged", key)
+		}
+	}
+}
+
+func TestCompletionLoggerOmitsUnknownOptionalCanonicalValues(t *testing.T) {
+	logHandler := &completionRecordHandler{records: make(chan slog.Record, 1)}
+	completionLogger := NewCompletionLogger(slog.New(logHandler), 1)
+	defer shutdownCompletionLogger(t, completionLogger)
+
+	input := validCompletionInput(t)
+	input.Cost = accounting.UnknownMoney()
+	input.ClientBytes = UnknownByteCount()
+	input.UpstreamBytes = UnknownByteCount()
+	input.DeliveredBytes = UnknownByteCount()
+	input.UpstreamStatus = UnknownStatus()
+	input.Timing.Total = UnknownDurationMicros()
+	input.Timing.TimeToFirstByte = UnknownDurationMicros()
+	input.Timing.StreamCloseDelay = UnknownDurationMicros()
+	input.Usage, _ = accounting.NewUsage(accounting.UsageInput{})
+	input.UpstreamMode = ResponseModeUnknown
+	input.DeliveredMode = ResponseModeUnknown
+	input.Terminal = TerminalMetadata{Outcome: TerminalOutcomePreUpstream}
+	record, err := NewCompletionRecord(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completionLogger.Enqueue(record) {
+		t.Fatal("canonical completion record was dropped")
+	}
+	logged := <-logHandler.records
+	values := make(map[string]any)
+	logged.Attrs(func(attribute slog.Attr) bool {
+		values[attribute.Key] = attribute.Value.Any()
+		return true
+	})
+	for _, key := range []string{"cost_micros", "client_bytes", "upstream_bytes", "delivered_bytes", "upstream_status", "upstream_mode", "delivered_mode", "total_micros", "time_to_first_byte_micros", "stream_close_delay_micros", "usage_input", "usage_output", "usage_total"} {
+		if _, ok := values[key]; ok {
+			t.Errorf("unknown attribute %q was logged as a value", key)
+		}
+	}
+	if values["terminal_outcome"] != "pre_upstream" {
+		t.Fatalf("terminal_outcome = %#v, want pre_upstream", values["terminal_outcome"])
 	}
 }
 

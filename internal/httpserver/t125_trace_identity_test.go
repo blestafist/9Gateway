@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func TestT125RouteMetadataKeepsEscapedPathSeparateAndBounded(t *testing.T) {
 	}
 }
 
-func TestT125AuthenticatedCompletionLogRemainsLegacySafeProjection(t *testing.T) {
+func TestT125AuthenticatedCompletionLogRemainsCanonicalSafeProjection(t *testing.T) {
 	pepper := []byte("t125-pepper")
 	keyA, err := auth.GenerateGatewayKey(pepper)
 	if err != nil {
@@ -84,14 +85,25 @@ func TestT125AuthenticatedCompletionLogRemainsLegacySafeProjection(t *testing.T)
 		select {
 		case record := <-records:
 			values := make(map[string]any)
-			record.Attrs(func(attribute slog.Attr) bool { values[attribute.Key] = attribute.Value.Any(); return true })
+			var rendered strings.Builder
+			record.Attrs(func(attribute slog.Attr) bool {
+				values[attribute.Key] = attribute.Value.Any()
+				rendered.WriteString(attribute.Key)
+				rendered.WriteByte('=')
+				rendered.WriteString(attribute.Value.String())
+				rendered.WriteByte('\n')
+				return true
+			})
 			if values["path"] != "/v1/models" {
 				t.Fatalf("completion path = %#v", values)
 			}
-			for _, forbidden := range []string{"key_id", "key_name", "route", "model", "requested_mode"} {
-				if _, ok := values[forbidden]; ok {
-					t.Fatalf("premature completion projection included %q: %#v", forbidden, values)
+			for _, forbidden := range []string{"Authorization", "credential=query-secret", "upstream-secret", keyA.RawKey, keyB.RawKey} {
+				if strings.Contains(rendered.String(), forbidden) {
+					t.Fatalf("completion projection included forbidden attribute %q: %#v", forbidden, values)
 				}
+			}
+			if values["route"] != "models" || values["key_name"] == nil {
+				t.Fatalf("canonical completion fields = %#v", values)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("completion record was not written")
