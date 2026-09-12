@@ -98,6 +98,7 @@ type RequestTraceState struct {
 	terminalSet bool
 	authSet     bool
 	metadataSet bool
+	routeSet    bool
 	usageSet    bool
 	costSet     bool
 	errorSet    bool
@@ -228,16 +229,51 @@ func (state *RequestTraceState) SetAuth(keyID, keyName string) bool {
 
 // SetRequestMetadata records bounded request metadata once.
 func (state *RequestTraceState) SetRequestMetadata(method string, route RouteClass, model string, requestedMode RequestMode) bool {
-	if state == nil || !validTraceText(method, 32) || !validTraceText(model, 512) || route > RouteClassAdmin || requestedMode > RequestModeSSE {
+	return state.SetRequestMetadataPath(method, "", route, model, requestedMode)
+}
+
+// SetRequestMetadataPath records the bounded request facts available after
+// policy inspection. Path is an escaped path snapshot and is never a query or
+// complete URL. A route snapshot may have been installed earlier by the
+// request-ID middleware for health/admin requests.
+func (state *RequestTraceState) SetRequestMetadataPath(method, path string, route RouteClass, model string, requestedMode RequestMode) bool {
+	if state == nil || !validTraceText(method, 32) || !validTraceText(path, 2048) || route > RouteClassAdmin || requestedMode > RequestModeSSE {
+		return false
+	}
+	if !validTraceText(model, 512) {
 		return false
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.baseFrozen || state.metadataSet {
+	if state.baseFrozen || state.metadataSet && (state.input.Model != "" || state.input.RequestedMode != RequestModeUnknown) {
+		return false
+	}
+	if state.routeSet && (state.input.Method != method || state.input.Route != route) {
 		return false
 	}
 	state.input.Method, state.input.Route, state.input.Model, state.input.RequestedMode = method, route, model, requestedMode
+	if path != "" {
+		state.input.Path = path
+	}
+	state.routeSet = true
 	state.metadataSet = true
+	return true
+}
+
+// SetRouteMetadata records method, route, and escaped path before authentication
+// or body inspection. It intentionally does not record identity or payload
+// metadata.
+func (state *RequestTraceState) SetRouteMetadata(method, path string, route RouteClass) bool {
+	if state == nil || !validTraceText(method, 32) || !validTraceText(path, 2048) || route > RouteClassAdmin {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.baseFrozen || state.routeSet {
+		return false
+	}
+	state.input.Method, state.input.Path, state.input.Route = method, path, route
+	state.routeSet = true
 	return true
 }
 

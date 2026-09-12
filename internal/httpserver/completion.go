@@ -134,12 +134,41 @@ func (completionLogger *CompletionLogger) drain() {
 }
 
 func (completionLogger *CompletionLogger) write(record CompletionRecord) {
+	keyID := record.KeyID
+	if !validTraceText(keyID, 256) {
+		keyID = ""
+	}
+	keyName := record.KeyName
+	if !validTraceText(keyName, 256) {
+		keyName = ""
+	}
+	path := record.Path
+	if !validTraceText(path, 2048) {
+		path = ""
+	}
+	model := record.Model
+	if !validTraceText(model, 512) {
+		model = ""
+	}
+	status := record.Status
+	if value, known := record.DownstreamStatus.Value(); known {
+		status = value
+	}
+	duration := record.Duration
+	if value, known := record.Timing.Total.Duration(); known {
+		duration = value
+	}
 	completionLogger.logger.Info("request completed",
 		"request_id", record.RequestID,
+		"key_id", keyID,
+		"key_name", keyName,
 		"method", record.Method,
-		"path", record.Path,
-		"status", record.Status,
-		"duration", record.Duration,
+		"path", path,
+		"route", record.Route.String(),
+		"model", model,
+		"requested_mode", record.RequestedMode.String(),
+		"status", status,
+		"duration", duration,
 		"terminal_outcome", record.Terminal.Outcome,
 		"upstream_started", record.Terminal.UpstreamStarted,
 		"error_code", record.ErrorCode.String(),

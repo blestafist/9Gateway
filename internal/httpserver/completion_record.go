@@ -67,7 +67,7 @@ func ClassifyRoute(method, path string) RouteClass {
 		return RouteClassResponses
 	case strings.HasPrefix(path, "/v1/"):
 		return RouteClassGeneric
-	case strings.HasPrefix(path, "/admin"):
+	case path == "/admin" || strings.HasPrefix(path, "/admin/"):
 		return RouteClassAdmin
 	default:
 		return RouteClassUnknown
@@ -337,7 +337,10 @@ type CompletionRecordInput struct {
 	KeyID     string
 	KeyName   string
 	Method    string
-	Route     RouteClass
+	// Path is a bounded escaped client path snapshot. Queries are never
+	// retained; Route is the stable class used for aggregation.
+	Path  string
+	Route RouteClass
 	// RouteClass is the descriptive spelling of Route. If both are supplied,
 	// they must agree.
 	RouteClass RouteClass
@@ -374,6 +377,7 @@ type CompletionRecord struct {
 	KeyID      string
 	KeyName    string
 	Method     string
+	Path       string
 	Route      RouteClass
 	RouteClass RouteClass
 	Model      string
@@ -398,7 +402,6 @@ type CompletionRecord struct {
 
 	// Deprecated compatibility fields. They are copied scalar values and are
 	// not used as canonical state.
-	Path     string
 	Status   int
 	Duration time.Duration
 }
@@ -424,7 +427,7 @@ func NewCompletionRecord(input CompletionRecordInput) (CompletionRecord, error) 
 	}
 	return CompletionRecord{
 		RequestID: input.RequestID, KeyID: input.KeyID, KeyName: input.KeyName,
-		Method: input.Method, Route: input.Route, Model: input.Model,
+		Method: input.Method, Path: input.Path, Route: input.Route, Model: input.Model,
 		RouteClass:    input.Route,
 		RequestedMode: input.RequestedMode, UpstreamMode: input.UpstreamMode,
 		ActualUpstreamMode: input.UpstreamMode,
@@ -494,6 +497,7 @@ func (record CompletionRecord) MarshalJSON() ([]byte, error) {
 		KeyID            string           `json:"key_id,omitempty"`
 		KeyName          string           `json:"key_name,omitempty"`
 		Method           string           `json:"method"`
+		Path             string           `json:"path,omitempty"`
 		Route            string           `json:"route"`
 		Model            string           `json:"model,omitempty"`
 		RequestedMode    any              `json:"requested_mode"`
@@ -511,7 +515,7 @@ func (record CompletionRecord) MarshalJSON() ([]byte, error) {
 		Timing           CompletionTiming `json:"timing"`
 	}{
 		RequestID: safeRequestID(record.RequestID), KeyID: record.KeyID, KeyName: record.KeyName,
-		Method: record.Method, Route: record.Route.String(), Model: record.Model,
+		Method: record.Method, Path: record.Path, Route: record.Route.String(), Model: record.Model,
 		RequestedMode: func() any {
 			if record.RequestedMode == RequestModeUnknown {
 				return nil
@@ -588,8 +592,8 @@ func validateCompletionInput(input CompletionRecordInput) error {
 	if input.KeyID != "" && !validBoundedText(input.KeyID, 256) || input.KeyName != "" && !validBoundedText(input.KeyName, 256) {
 		return errors.New("completion: invalid key identity")
 	}
-	if !validBoundedText(input.Method, 32) || !validBoundedText(input.Model, 512) {
-		return errors.New("completion: invalid method or model")
+	if !validBoundedText(input.Method, 32) || !validBoundedText(input.Path, 2048) || !validBoundedText(input.Model, 512) {
+		return errors.New("completion: invalid method, path, or model")
 	}
 	if input.Route > RouteClassAdmin || input.RequestedMode > RequestModeSSE || input.UpstreamMode != ResponseModeUnknown && input.UpstreamMode != ResponseModeJSON && input.UpstreamMode != ResponseModeOpaque && input.UpstreamMode != ResponseModeSSE || input.DeliveredMode != ResponseModeUnknown && input.DeliveredMode != ResponseModeJSON && input.DeliveredMode != ResponseModeOpaque && input.DeliveredMode != ResponseModeSSE {
 		return errors.New("completion: invalid enum")

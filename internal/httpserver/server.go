@@ -480,7 +480,13 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				}
 			}
 		}
-		trace.SetRequestMetadata(request.Method, ClassifyRoute(request.Method, request.URL.Path), model, mode)
+		// ParseRequestMetadata is intentionally the only body metadata source.
+		// A malformed/oversized or otherwise unbounded model is represented as
+		// unknown, while an independently known boolean stream value is retained.
+		if !validTraceText(model, 512) {
+			model = ""
+		}
+		trace.SetRequestMetadataPath(request.Method, boundedEscapedPath(request), ClassifyRoute(request.Method, request.URL.Path), model, mode)
 	}
 	if metadata != nil && metadata.Model != "" {
 		if authenticated && !principal.Policy.AllowsModel(metadata.Model) {
@@ -1338,6 +1344,10 @@ func withRequestID(next http.Handler) http.Handler {
 		requestContext := context.WithValue(request.Context(), requestIDContextKey{}, id)
 		requestContext = context.WithValue(requestContext, terminalMetadataContextKey{}, terminal)
 		request = request.WithContext(withTrace(requestContext, trace))
+		// Capture only the bounded route facts available from the request line.
+		// EscapedPath deliberately excludes RawQuery, so credentials in queries
+		// can never enter the trace.
+		trace.SetRouteMetadata(request.Method, boundedEscapedPath(request), ClassifyRoute(request.Method, request.URL.Path))
 		writer := &completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}
 		next.ServeHTTP(writer, request)
 		// The request-ID boundary owns the final trace handoff. This is outside
@@ -1363,22 +1373,22 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
 		writer := completionWriter(response, TraceFromContext(request.Context()), terminal)
 		next.ServeHTTP(writer, request)
-
-		logger.Info("request completed",
-			"request_id", requestIDFromContext(request.Context()),
-			"method", request.Method,
-			"path", request.URL.Path,
-			"status", writer.statusCode(),
-			"duration", time.Since(startedAt),
-			"terminal_outcome", terminal.get().Outcome,
-			"upstream_started", terminal.get().UpstreamStarted,
-			"error_code", func() SafeErrorCode {
-				if trace := TraceFromContext(request.Context()); trace != nil {
-					return trace.errorCode()
-				}
-				return ErrorCodeUnknown
-			}().String(),
-		)
+		if trace := TraceFromContext(request.Context()); trace != nil {
+			trace.SetTerminalMetadata(terminal.get())
+			record, err := trace.Complete()
+			if err == nil {
+				logger.Info("request completed", "request_id", record.RequestID, "method", record.Method,
+					"path", record.Path, "route", record.Route.String(), "model", record.Model,
+					"requested_mode", record.RequestedMode.String(), "status", writer.statusCode(),
+					"duration", time.Since(startedAt), "terminal_outcome", record.Terminal.Outcome,
+					"upstream_started", record.Terminal.UpstreamStarted, "error_code", record.ErrorCode.String())
+				return
+			}
+		}
+		logger.Info("request completed", "request_id", requestIDFromContext(request.Context()), "method", request.Method,
+			"path", boundedEscapedPath(request), "status", writer.statusCode(), "duration", time.Since(startedAt),
+			"terminal_outcome", terminal.get().Outcome, "upstream_started", terminal.get().UpstreamStarted,
+			"error_code", ErrorCodeUnknown.String())
 	})
 }
 
@@ -1396,22 +1406,29 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 		// Copy only safe scalar values into the record before handing it to the
 		// worker. No request object or headers are retained by the logger.
 		if completionLogger != nil {
-			completionLogger.Enqueue(CompletionRecord{
-				RequestID: requestIDFromContext(request.Context()),
-				Method:    request.Method,
-				Path:      request.URL.Path,
-				Status:    writer.statusCode(),
-				Duration:  time.Since(startedAt),
-				Terminal:  terminal.get(),
-				ErrorCode: func() SafeErrorCode {
-					if trace := TraceFromContext(request.Context()); trace != nil {
-						return trace.errorCode()
-					}
-					return ErrorCodeUnknown
-				}(),
-			})
+			if trace := TraceFromContext(request.Context()); trace != nil {
+				trace.SetTerminalMetadata(terminal.get())
+				if record, err := trace.Complete(); err == nil {
+					completionLogger.Enqueue(record)
+					return
+				}
+			}
+			completionLogger.Enqueue(CompletionRecord{RequestID: requestIDFromContext(request.Context()), Method: request.Method,
+				Path: boundedEscapedPath(request), Route: ClassifyRoute(request.Method, request.URL.Path), Status: writer.statusCode(),
+				Duration: time.Since(startedAt), Terminal: terminal.get(), ErrorCode: ErrorCodeUnknown})
 		}
 	})
+}
+
+func boundedEscapedPath(request *http.Request) string {
+	if request == nil || request.URL == nil {
+		return ""
+	}
+	path := request.URL.EscapedPath()
+	if len(path) > 2048 {
+		return ""
+	}
+	return path
 }
 
 // completionWriter reuses the request-bound wrapper when completion logging is
