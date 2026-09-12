@@ -369,6 +369,7 @@ func newProxyHandlerWithLimitersAndTokenLimiter(client *http.Client, baseURL, ap
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	terminal := terminalMetadataFromContext(request.Context())
+	trace := TraceFromContext(request.Context())
 	if handler.baseURL == nil {
 		terminal.set(TerminalMetadata{Outcome: TerminalOutcomePreUpstream})
 		writeGatewayError(response, gatewayErrorInternal, "")
@@ -381,6 +382,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	targetURL.Fragment = ""
 
 	principal, authenticated := PrincipalFromContext(request.Context())
+	if trace != nil && authenticated {
+		trace.SetAuthentication(principal.ID, principal.Name)
+	}
 	if authenticated && handler.tokenConfig.BudgetLimiter != nil && !handler.tokenConfig.BudgetLimiter.PolicyCurrent(principal.ID, budgetPolicy(principal.Policy)) {
 		setTerminal := terminalMetadataFromContext(request.Context()).set
 		setTerminal(TerminalMetadata{Outcome: TerminalOutcomePreUpstream})
@@ -455,6 +459,20 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var inspectionAvailable bool
 	if shouldInspectRequestMetadata(request) {
 		requestBody, metadata, inspected, inspectionAvailable = inspectRequest(request, handler.tokenConfig.MaxInspectedRequestBytes)
+	}
+	if trace != nil {
+		mode := RequestModeUnknown
+		model := ""
+		if metadata != nil {
+			model = metadata.Model
+			if metadata.Stream != nil {
+				mode = RequestModeJSON
+				if *metadata.Stream {
+					mode = RequestModeSSE
+				}
+			}
+		}
+		trace.SetRequestMetadata(request.Method, ClassifyRoute(request.Method, request.URL.Path), model, mode)
 	}
 	if metadata != nil && metadata.Model != "" {
 		if authenticated && !principal.Policy.AllowsModel(metadata.Model) {
@@ -587,6 +605,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	upstreamStarted = true
+	if trace != nil {
+		trace.SetUpstreamStart()
+	}
 	upstreamResponse, err = handler.client.Do(upstreamRequest)
 	if err != nil {
 		if proxyContext.Err() != nil {
@@ -608,6 +629,10 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	responseMode := classifyResponseHeader(upstreamResponse.Header)
+	if trace != nil {
+		trace.SetUpstreamHeaders(upstreamResponse.StatusCode)
+		trace.SetUpstreamResponseMode(responseMode)
+	}
 	if (tokenAdmission || budgetAdmission) && (responseMode == ResponseModeJSON || responseMode == ResponseModeSSE) {
 		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
 			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding, selectedPricing)
@@ -617,6 +642,13 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		}
 	}
 	dispatchErr = dispatchResponseResultWithLeaseAndObservationAndPricing(response, upstreamResponse, metadata, lifecycleLease, responseObservation, selectedPricing, request.WithContext(proxyContext))
+	if trace != nil && dispatchErr == nil {
+		deliveredMode := responseMode
+		if shouldAggregateSSE(request, metadata, responseMode) {
+			deliveredMode = ResponseModeJSON
+		}
+		trace.SetDeliveredMode(deliveredMode)
+	}
 	if responseObservation != nil {
 		responseObservation.finish(dispatchErr)
 	}
@@ -1254,8 +1286,26 @@ func withRequestID(next http.Handler) http.Handler {
 		}
 
 		response.Header().Set(requestIDHeader, id)
-		request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, id))
-		next.ServeHTTP(response, request)
+		trace := NewRequestTraceState(id)
+		if trace == nil {
+			writeGatewayError(response, gatewayErrorInternal, "")
+			return
+		}
+		terminal := newTerminalMetadataState()
+		requestContext := context.WithValue(request.Context(), requestIDContextKey{}, id)
+		requestContext = context.WithValue(requestContext, terminalMetadataContextKey{}, terminal)
+		request = request.WithContext(withTrace(requestContext, trace))
+		next.ServeHTTP(&completionResponseWriter{ResponseWriter: response, trace: trace}, request)
+		// The request-ID boundary owns the final trace handoff. This is outside
+		// the transport path and remains idempotent when the completion wrapper
+		// also completes the trace.
+		if terminal := terminalMetadataFromContext(request.Context()); terminal != nil {
+			metadata := terminal.get()
+			if metadata.Outcome != TerminalOutcomeUnknown {
+				trace.SetTerminalMetadata(metadata)
+			}
+		}
+		_, _ = trace.FreezeBase()
 	})
 }
 
@@ -1263,6 +1313,9 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		startedAt := time.Now()
 		terminal := newTerminalMetadataState()
+		if existing := terminalMetadataFromContext(request.Context()); existing != nil {
+			terminal = existing
+		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
 		writer := &completionResponseWriter{ResponseWriter: response}
 		next.ServeHTTP(writer, request)
@@ -1283,6 +1336,9 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		startedAt := time.Now()
 		terminal := newTerminalMetadataState()
+		if existing := terminalMetadataFromContext(request.Context()); existing != nil {
+			terminal = existing
+		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
 		writer := &completionResponseWriter{ResponseWriter: response}
 		next.ServeHTTP(writer, request)
@@ -1310,6 +1366,7 @@ func requestIDFromContext(ctx context.Context) string {
 type completionResponseWriter struct {
 	http.ResponseWriter
 	status int
+	trace  *RequestTraceState
 }
 
 func (writer *completionResponseWriter) Unwrap() http.ResponseWriter {
@@ -1320,6 +1377,9 @@ func (writer *completionResponseWriter) FlushError() error {
 	err := http.NewResponseController(writer.ResponseWriter).Flush()
 	if err == nil && writer.status == 0 {
 		writer.status = http.StatusOK
+		if writer.trace != nil {
+			writer.trace.SetDownstreamStatus(http.StatusOK)
+		}
 	}
 	return err
 }
@@ -1329,6 +1389,9 @@ func (writer *completionResponseWriter) WriteHeader(status int) {
 		return
 	}
 	writer.status = status
+	if writer.trace != nil {
+		writer.trace.SetDownstreamStatus(status)
+	}
 	writer.ResponseWriter.WriteHeader(status)
 }
 
@@ -1336,7 +1399,11 @@ func (writer *completionResponseWriter) Write(body []byte) (int, error) {
 	if writer.status == 0 {
 		writer.WriteHeader(http.StatusOK)
 	}
-	return writer.ResponseWriter.Write(body)
+	written, err := writer.ResponseWriter.Write(body)
+	if written > 0 && writer.trace != nil {
+		writer.trace.SetFirstDownstreamByte()
+	}
+	return written, err
 }
 
 func (writer *completionResponseWriter) statusCode() int {

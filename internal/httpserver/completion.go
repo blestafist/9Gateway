@@ -34,6 +34,7 @@ type TerminalMetadata struct {
 type terminalMetadataContextKey struct{}
 
 type terminalMetadataState struct {
+	mu       sync.Mutex
 	metadata TerminalMetadata
 }
 
@@ -51,7 +52,13 @@ func terminalMetadataFromContext(ctx context.Context) *terminalMetadataState {
 
 func (state *terminalMetadataState) set(metadata TerminalMetadata) {
 	if state != nil {
+		state.mu.Lock()
+		if state.metadata.Outcome != TerminalOutcomeUnknown {
+			state.mu.Unlock()
+			return
+		}
 		state.metadata = metadata
+		state.mu.Unlock()
 	}
 }
 
@@ -59,6 +66,8 @@ func (state *terminalMetadataState) get() TerminalMetadata {
 	if state == nil {
 		return TerminalMetadata{Outcome: TerminalOutcomeUnknown}
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	return state.metadata
 }
 

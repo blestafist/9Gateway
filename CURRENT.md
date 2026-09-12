@@ -3,9 +3,9 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T121`.
+Done: `T001`-`T122`.
 
-Current: `T122` - add request-local trace state.
+Current: `T123` - record safe gateway error codes.
 
 Queued: `T123`-`T140` in dependency order from `TASKS.md`.
 
