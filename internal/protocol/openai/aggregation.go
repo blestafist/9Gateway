@@ -84,6 +84,8 @@ func aggregateSSEToJSONWithTiming(input io.Reader, maxEventSize int, maxPayloadB
 	}
 	observer := NewObserver()
 	var lastMeaningfulAt time.Time
+	timingInvalid := false
+	previousUsageKnown := false
 
 	events := 0
 	for {
@@ -96,6 +98,9 @@ func aggregateSSEToJSONWithTiming(input io.Reader, maxEventSize int, maxPayloadB
 				// Render performs the meaningful-response check. In particular,
 				// usage may be supplied after a terminal choice event, and a
 				// finish reason is not required for EOF completion.
+				if timingInvalid {
+					lastMeaningfulAt = time.Time{}
+				}
 				return aggregationResultWithTiming(accumulator, false, lastMeaningfulAt)
 			}
 			if errors.Is(err, streaming.ErrEventIncomplete) {
@@ -110,6 +115,9 @@ func aggregateSSEToJSONWithTiming(input io.Reader, maxEventSize int, maxPayloadB
 			if events == 0 {
 				return AggregationResult{}, fmt.Errorf("%w: DONE arrived without response data", ErrInvalidAccumulatorState)
 			}
+			if timingInvalid {
+				lastMeaningfulAt = time.Time{}
+			}
 			result, renderErr := aggregationResultWithTiming(accumulator, true, lastMeaningfulAt)
 			if renderErr != nil {
 				return partialAggregationResult(accumulator), renderErr
@@ -123,24 +131,31 @@ func aggregateSSEToJSONWithTiming(input io.Reader, maxEventSize int, maxPayloadB
 		}
 		events++
 
-		state := observer.State()
+		fullState := observer.State()
 		result := ObservationResult{
-			State:    state,
+			State:    fullState,
 			Metadata: observer.Metadata(),
 		}
-		if previousChoices < len(state.Choices) {
-			result.State.Choices = state.Choices[previousChoices:]
+		if previousChoices < len(fullState.Choices) {
+			result.State.Choices = fullState.Choices[previousChoices:]
 		} else {
 			result.State.Choices = nil
 		}
 		if err := accumulator.Accumulate(result); err != nil {
 			return partialAggregationResult(accumulator), err
 		}
-		if meaningful != nil {
+		if meaningful != nil && meaningfulEvent(event, fullState, previousChoices, previousUsageKnown) {
 			resultAt := meaningful()
-			// Store the latest successful event timing. [DONE] is handled above.
-			lastMeaningfulAt = resultAt
+			// Store the latest meaningful event timing. [DONE] is handled above.
+			if !resultAt.IsZero() {
+				if !lastMeaningfulAt.IsZero() && resultAt.Before(lastMeaningfulAt) {
+					timingInvalid = true
+				} else if !timingInvalid {
+					lastMeaningfulAt = resultAt
+				}
+			}
 		}
+		previousUsageKnown = meaningfulUsage(fullState.Usage)
 	}
 }
 

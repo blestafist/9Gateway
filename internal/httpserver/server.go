@@ -471,7 +471,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	requestBody, metadata := request.Body, (*openai.RequestMetadata)(nil)
 	var inspected []byte
 	var inspectionAvailable bool
-	if shouldInspectRequestMetadata(request) {
+	if shouldInspectRequestMetadata(request) || shouldInspectRequestMetadataForTelemetry(request, handler.pricingResolver) {
 		requestBody, metadata, inspected, inspectionAvailable = inspectRequest(request, handler.tokenConfig.MaxInspectedRequestBytes)
 	}
 	if trace != nil {
@@ -825,6 +825,9 @@ func (handler *proxyHandler) tokenPlan(request *http.Request, principal auth.Pri
 }
 
 func shouldInspectRequestMetadata(request *http.Request) bool {
+	if request == nil || request.URL == nil {
+		return false
+	}
 	if request.Method != http.MethodPost || (request.URL.Path != "/v1/chat/completions" && request.URL.Path != "/v1/responses") || !isJSONMediaType(request.Header) {
 		return false
 	}
@@ -839,6 +842,20 @@ func shouldInspectRequestMetadata(request *http.Request) bool {
 	_, dayLimited := principal.Policy.DailyBudget()
 	_, monthLimited := principal.Policy.MonthlyBudget()
 	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited || dayLimited || monthLimited
+}
+
+// shouldInspectRequestMetadataForTelemetry is deliberately narrower than the
+// policy path. It permits one bounded metadata read for authenticated, known
+// generation endpoints when a startup pricing table exists, so an otherwise
+// unrestricted key can still receive model-specific trace cost enrichment.
+// Generic and unknown /v1 routes remain byte-transparent and are never read
+// solely for telemetry.
+func shouldInspectRequestMetadataForTelemetry(request *http.Request, resolver accounting.PricingResolver) bool {
+	if request == nil || request.URL == nil {
+		return false
+	}
+	_, authenticated := PrincipalFromContext(request.Context())
+	return authenticated && resolver.Present() && resolver.HasRules() && eligibleTokenRequest(request)
 }
 
 func eligibleTokenRequest(request *http.Request) bool {
@@ -1437,7 +1454,9 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
 		if trace := TraceFromContext(request.Context()); trace != nil {
-			trace.setCompletionOwnership(newCompletionOwnership(trace, completionLogger))
+			ownership := newCompletionOwnership(trace, completionLogger)
+			trace.setCompletionOwnership(ownership)
+			request = request.WithContext(context.WithValue(request.Context(), completionOwnershipContextKey{}, ownership))
 		}
 		writer, wrapped := completionWriter(response, TraceFromContext(request.Context()), terminal)
 		next.ServeHTTP(wrapped, request)

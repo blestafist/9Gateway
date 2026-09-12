@@ -260,6 +260,13 @@ type PricingResolver struct {
 // zero value represents an omitted startup dependency.
 func (resolver PricingResolver) Present() bool { return resolver.present }
 
+// HasRules reports whether telemetry can resolve a model to a configured
+// price. An explicitly validated empty pricing table is present, but does not
+// require request metadata inspection.
+func (resolver PricingResolver) HasRules() bool {
+	return len(resolver.exact) != 0 || len(resolver.globs) != 0
+}
+
 // NewPricingResolver constructs a resolver only from PricingConfig, the
 // validated representation produced by the configuration loader. It copies
 // the selected table, so later configuration values cannot affect lookups.

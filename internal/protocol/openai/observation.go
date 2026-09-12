@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"io"
 	"time"
 
@@ -64,6 +65,8 @@ func ObserveStreamWithTiming(input io.Reader, maxEventSize int, reportError func
 			}
 			continue
 		}
+		previousChoices := len(observer.state.Choices)
+		previousUsageKnown := meaningfulUsage(observer.state.Usage)
 		observed := false
 		if err := observer.Observe(event); err != nil {
 			result.Errors = append(result.Errors, err)
@@ -71,7 +74,8 @@ func ObserveStreamWithTiming(input io.Reader, maxEventSize int, reportError func
 				reportError(err)
 			}
 		} else if event.Data != "[DONE]" {
-			observed = true
+			state := observer.State()
+			observed = meaningfulEvent(event, state, previousChoices, previousUsageKnown)
 		}
 		if observed {
 			result.LastMeaningfulOffset = reader.LastEventEndOffset()
@@ -80,6 +84,97 @@ func ObserveStreamWithTiming(input io.Reader, maxEventSize int, reportError func
 			}
 		}
 	}
+}
+
+// meaningfulObservation mirrors the response aggregation semantics rather than
+// treating every valid JSON object as a response event. Metadata-only objects,
+// empty deltas, comments, and [DONE] do not advance stream timing.
+func meaningfulObservation(state ObserverState, previousChoices int, previousUsageKnown bool) bool {
+	if meaningfulUsage(state.Usage) && !previousUsageKnown {
+		return true
+	}
+	if previousChoices < 0 || previousChoices > len(state.Choices) {
+		previousChoices = len(state.Choices)
+	}
+	for _, choice := range state.Choices[previousChoices:] {
+		if choice.FinishReasonPresent || choice.FinishReason != nil ||
+			(choice.Delta.Content != nil && *choice.Delta.Content != "") || len(choice.Delta.ToolCalls) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// meaningfulEvent preserves event-level semantics that are lost in the
+// cumulative observer snapshot, notably a usage-only terminal event after an
+// earlier usage event. The extra bounded decode is off the transport path.
+func meaningfulEvent(event streaming.SSEEvent, state ObserverState, previousChoices int, previousUsageKnown bool) bool {
+	if meaningfulObservation(state, previousChoices, previousUsageKnown) {
+		return true
+	}
+	var chunk meaningfulChunk
+	if json.Unmarshal([]byte(event.Data), &chunk) != nil {
+		return false
+	}
+	if jsonUsageMeaningful(chunk.Usage) {
+		return true
+	}
+	if chunk.Response != nil {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(chunk.Response, &nested) == nil {
+			if usage, ok := nested["usage"]; ok {
+				if jsonUsageMeaningful(usage) {
+					return true
+				}
+			}
+		}
+	}
+	for _, choice := range chunk.Choices {
+		if choice.FinishReason != nil {
+			return true
+		}
+		if choice.Delta.Content != nil && *choice.Delta.Content != "" {
+			return true
+		}
+		if choice.Delta.Reasoning != nil && *choice.Delta.Reasoning != "" {
+			return true
+		}
+		if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
+			return true
+		}
+		if len(choice.Delta.ToolCalls) != 0 && string(choice.Delta.ToolCalls) != "null" {
+			return true
+		}
+	}
+	return false
+}
+
+type meaningfulChunk struct {
+	Choices  []meaningfulChoice `json:"choices"`
+	Usage    json.RawMessage    `json:"usage"`
+	Response json.RawMessage    `json:"response"`
+}
+
+type meaningfulChoice struct {
+	Delta        meaningfulDelta `json:"delta"`
+	FinishReason json.RawMessage `json:"finish_reason"`
+}
+
+type meaningfulDelta struct {
+	Content          *string         `json:"content"`
+	Reasoning        *string         `json:"reasoning"`
+	ReasoningContent *string         `json:"reasoning_content"`
+	ToolCalls        json.RawMessage `json:"tool_calls"`
+}
+
+func jsonUsageMeaningful(raw json.RawMessage) bool {
+	parsed, err := parseJSONUsageObject(raw)
+	return err == nil && parsed.Observed
+}
+
+func meaningfulUsage(usage UsageObservation) bool {
+	return usage.Input().Known() || usage.Output().Known() || usage.Total().Known() ||
+		usage.CachedInput().Known() || usage.ReasoningOutput().Known()
 }
 
 func normalizeObservationEOF(err error) error {

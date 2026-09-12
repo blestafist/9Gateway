@@ -372,6 +372,31 @@ func TestUsageObservationAcceptedJobOwnsOneImmutableCopy(t *testing.T) {
 	}
 }
 
+func TestUsageObservationOwnedSubmitDoesNotCopyCapture(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	seen := make(chan byte, 1)
+	worker := NewUsageObservationWorker(UsageObservationWorkerOptions{Capacity: 1, Parse: func(data []byte, _ ContentCoding) (int64, error) {
+		close(started)
+		<-release
+		seen <- data[0]
+		return 1, nil
+	}})
+	defer shutdownObservationWorker(t, worker)
+	clock := &requestLimitTestClock{now: time.Unix(30, 0).UTC()}
+	lease := mustObservationLease(t, limiter.NewResourceLeaseCoordinator(nil, limiter.NewTokenLimiter(clock.Now)), []limiter.TokenWindow{{Amount: 10, Duration: time.Minute}}, 1)
+	captured := []byte("owned")
+	if !worker.completeAndSubmitWithTiming(lease, captured, ContentCodingIdentity, nil, accounting.UnknownPricingResolution(), nil, true) {
+		t.Fatal("owned observation was dropped")
+	}
+	<-started
+	captured[0] = 'x'
+	close(release)
+	if got := <-seen; got != 'x' {
+		t.Fatalf("owned handoff copied capture byte %q; want ownership transfer", got)
+	}
+}
+
 func TestUsageObservationJobBoundsAndValidatesCoding(t *testing.T) {
 	if _, err := ValidateContentCoding("br"); !errors.Is(err, ErrUsageObservationUnsupported) {
 		t.Fatalf("unsupported coding error = %v", err)

@@ -76,10 +76,9 @@ func ParseContentCoding(value string) (ContentCoding, error) {
 }
 
 // UsageObservationJob is the complete handoff to the usage worker. Submit takes
-// ownership of Bytes and makes the one immutable queue copy only after a queue
-// slot has been admitted. No request, headers, reservation, or concurrency
-// lease is part of this value; the ticket is the already-settled one-shot
-// adjustment handle only.
+// ownership of Bytes; callers must not mutate the bounded capture after the
+// handoff. No request, headers, reservation, or concurrency lease is part of
+// this value; the ticket is the already-settled one-shot adjustment handle only.
 type UsageObservationJob struct {
 	Bytes             []byte
 	ContentCoding     ContentCoding
@@ -116,14 +115,29 @@ func NewUsageObservationJobWithPricingCoding(captured []byte, contentEncoding st
 	return NewUsageObservationJobWithPricing(captured, coding, tickets, pricing), nil
 }
 
-// NewUsageObservationJob bounds captured bytes and transfers their ownership
-// to the returned job. Submit makes an immutable copy only when it accepts the
-// job; callers must not mutate captured after submitting it.
+// NewUsageObservationJob creates an immutable job for callers that provide a
+// capture slice. Completed response paths use the private ownership constructor
+// after their capture is already isolated, avoiding a second body-sized copy at
+// EOF.
 func NewUsageObservationJob(captured []byte, coding ContentCoding, ticket *limiter.TokenAdjustmentTicket) UsageObservationJob {
 	if int64(len(captured)) > DefaultUsageObservationMaxBytes {
 		captured = captured[:DefaultUsageObservationMaxBytes]
 	}
+	return UsageObservationJob{Bytes: append([]byte(nil), captured...), ContentCoding: coding, Ticket: ticket}
+}
+
+func newUsageObservationJobOwned(captured []byte, coding ContentCoding, ticket *limiter.TokenAdjustmentTicket) UsageObservationJob {
+	if int64(len(captured)) > DefaultUsageObservationMaxBytes {
+		captured = captured[:DefaultUsageObservationMaxBytes]
+	}
 	return UsageObservationJob{Bytes: captured, ContentCoding: coding, Ticket: ticket}
+}
+
+func newUsageObservationJobWithPricingOwned(captured []byte, coding ContentCoding, tickets limiter.LeaseAdjustmentTickets, pricing accounting.PricingResolution) UsageObservationJob {
+	job := newUsageObservationJobOwned(captured, coding, tickets.Token)
+	job.BudgetTicket = tickets.Budget
+	job.Pricing = pricing
+	return job
 }
 
 // NewUsageObservationJobWithPricing carries both independently owned deferred
@@ -391,6 +405,16 @@ func (worker *UsageObservationWorker) discardQueuedLocked() {
 // post-shutdown jobs invalidate their ticket and retain the conservative
 // accounting charge.
 func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
+	if job.Bytes != nil {
+		job.Bytes = append([]byte(nil), job.Bytes...)
+	}
+	return worker.submit(job)
+}
+
+// submit is the O(1) ownership handoff used by completed response captures.
+// The bytes have already been bounded while the response was forwarded, so a
+// second body-sized copy here would put work back on the response/EOF path.
+func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 	if worker == nil {
 		invalidateObservationJob(job)
 		return false
@@ -417,10 +441,6 @@ func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
 	}
 	worker.mu.Unlock()
 
-	// Make the sole immutable ownership copy outside the contended lifecycle
-	// gate. Shutdown may race this copy; the final gate below invalidates the
-	// ticket instead of allowing a late queue adjustment.
-	job.Bytes = append([]byte(nil), job.Bytes...)
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 	if !worker.accepting {
@@ -456,7 +476,7 @@ func (worker *UsageObservationWorker) Enqueue(job UsageObservationJob) bool {
 // A nil worker still settles and invalidates the ticket, preserving the
 // conservative charge without leaking request resources.
 func (worker *UsageObservationWorker) CompleteAndSubmit(lease *limiter.ResourceLease, captured []byte, coding ContentCoding) bool {
-	return worker.completeAndSubmitWithTiming(lease, captured, coding, nil, accounting.UnknownPricingResolution(), nil, true)
+	return worker.completeAndSubmitWithTiming(lease, append([]byte(nil), captured...), coding, nil, accounting.UnknownPricingResolution(), nil, true)
 }
 
 func (worker *UsageObservationWorker) completeAndSubmit(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, completion *completionOwnership, pricing accounting.PricingResolution) bool {
@@ -467,19 +487,24 @@ func (worker *UsageObservationWorker) completeAndSubmitWithTiming(lease *limiter
 	if lease == nil {
 		return false
 	}
-	ticket, _ := lease.TransportComplete()
-	if ticket == nil {
+	var ticket *limiter.TokenAdjustmentTicket
+	if lease != nil {
+		ticket, _ = lease.TransportComplete()
+	}
+	if ticket == nil && completion == nil {
 		return false
 	}
 	if completion != nil && !completion.transfer() {
-		ticket.Invalidate()
+		if ticket != nil {
+			ticket.Invalidate()
+		}
 		return false
 	}
-	job := NewUsageObservationJob(captured, coding, ticket)
+	job := newUsageObservationJobOwned(captured, coding, ticket)
 	job.Completion, job.Pricing = completion, pricing
 	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
 	job.TimingOverflow = checkpointOverflow
-	return worker.Submit(job)
+	return worker.submit(job)
 }
 
 // SubmitForCompletion hands an already-settled response observation to the
@@ -490,6 +515,10 @@ func (worker *UsageObservationWorker) SubmitForCompletion(completion *completion
 }
 
 func (worker *UsageObservationWorker) SubmitForCompletionWithTiming(completion *completionOwnership, captured []byte, coding ContentCoding, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
+	return worker.submitForCompletionWithTimingOwned(completion, append([]byte(nil), captured...), coding, checkpoints, checkpointOverflow)
+}
+
+func (worker *UsageObservationWorker) submitForCompletionWithTimingOwned(completion *completionOwnership, captured []byte, coding ContentCoding, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
 	if completion == nil || !completion.transfer() {
 		return false
 	}
@@ -500,11 +529,11 @@ func (worker *UsageObservationWorker) SubmitForCompletionWithTiming(completion *
 	job := NewUsageObservationJobForCompletion(captured, coding, completion)
 	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
 	job.TimingOverflow = checkpointOverflow
-	return worker.Submit(job)
+	return worker.submit(job)
 }
 
 func NewUsageObservationJobForCompletion(captured []byte, coding ContentCoding, completion *completionOwnership) UsageObservationJob {
-	job := NewUsageObservationJob(captured, coding, nil)
+	job := newUsageObservationJobOwned(captured, coding, nil)
 	job.Completion = completion
 	return job
 }
@@ -513,7 +542,7 @@ func NewUsageObservationJobForCompletion(captured []byte, coding ContentCoding, 
 // nonblocking handoff, retaining independent token and budget ownership in the
 // bounded job. The lease itself is never retained by the worker.
 func (worker *UsageObservationWorker) CompleteAndSubmitWithPricing(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution) bool {
-	return worker.completeAndSubmitWithPricing(lease, captured, coding, pricing, nil)
+	return worker.completeAndSubmitWithPricing(lease, append([]byte(nil), captured...), coding, pricing, nil)
 }
 
 func (worker *UsageObservationWorker) completeAndSubmitWithPricing(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution, completion *completionOwnership) bool {
@@ -532,11 +561,11 @@ func (worker *UsageObservationWorker) completeAndSubmitWithPricingTiming(lease *
 		invalidateObservationJob(UsageObservationJob{Ticket: tickets.Token, BudgetTicket: tickets.Budget})
 		return false
 	}
-	job := NewUsageObservationJobWithPricing(captured, coding, tickets, pricing)
+	job := newUsageObservationJobWithPricingOwned(captured, coding, tickets, pricing)
 	job.Completion = completion
 	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
 	job.TimingOverflow = checkpointOverflow
-	return worker.Submit(job)
+	return worker.submit(job)
 }
 
 // CompleteAndSubmitTokenDeferredBudgetConservative keeps token observation
@@ -550,7 +579,7 @@ func (worker *UsageObservationWorker) CompleteAndSubmitTokenDeferredBudgetConser
 	if ticket == nil {
 		return false
 	}
-	return worker.Submit(NewUsageObservationJob(captured, coding, ticket))
+	return worker.submit(newUsageObservationJobOwned(append([]byte(nil), captured...), coding, ticket))
 }
 
 // Stats returns only bounded scalar counters.
@@ -678,18 +707,24 @@ func parseCanonicalUsageObservationWithTiming(data []byte, coding ContentCoding,
 		return result.Usage, time.Time{}, nil
 	}
 	result, err := openai.ObserveStream(bytes.NewReader(decoded), 64*1024, nil)
-	if err != nil || len(result.Errors) != 0 || !canonicalUsageKnown(result.State.Usage) {
+	if err != nil || len(result.Errors) != 0 || result.LastMeaningfulOffset <= 0 {
 		return accounting.Usage{}, time.Time{}, errUsageObservationMalformed
 	}
+	usage := result.State.Usage.Usage
 	if coding != ContentCodingIdentity || checkpointOverflow || len(checkpoints) == 0 || result.LastMeaningfulOffset <= 0 {
-		return result.State.Usage.Usage, time.Time{}, nil
+		return usage, time.Time{}, nil
 	}
-	for i := len(checkpoints) - 1; i >= 0; i-- {
-		if result.LastMeaningfulOffset <= checkpoints[i].offset {
-			return result.State.Usage.Usage, checkpoints[i].at, nil
+	for i := 1; i < len(checkpoints); i++ {
+		if checkpoints[i].at.Before(checkpoints[i-1].at) {
+			return usage, time.Time{}, nil
 		}
 	}
-	return result.State.Usage.Usage, time.Time{}, nil
+	for i := 0; i < len(checkpoints); i++ {
+		if result.LastMeaningfulOffset <= checkpoints[i].offset {
+			return usage, checkpoints[i].at, nil
+		}
+	}
+	return usage, time.Time{}, nil
 }
 
 func canonicalUsageKnown(usage openai.UsageObservation) bool {

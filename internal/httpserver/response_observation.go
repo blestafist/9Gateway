@@ -133,7 +133,7 @@ func (observation *responseObservation) settle(lease *limiter.ResourceLease, wor
 			return
 		}
 		if lease == nil && observation.completion != nil {
-			if worker == nil || !worker.SubmitForCompletionWithTiming(observation.completion, observation.bytes, observation.coding, observation.checkpoints, observation.checkpointOverflow) {
+			if worker == nil || !worker.submitForCompletionWithTimingOwned(observation.completion, observation.bytes, observation.coding, observation.checkpoints, observation.checkpointOverflow) {
 				observation.completion.finish(accounting.Usage{}, accounting.UnknownMoney())
 			}
 			return

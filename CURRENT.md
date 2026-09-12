@@ -57,7 +57,11 @@ of scope.
 Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
 completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion.
 
-Review fix after T125: optional response-writer capabilities remain conditional,
+Review fix after T130: priced unrestricted known-generation telemetry uses one
+bounded metadata replay, completed observation captures transfer immutable
+ownership without a response-path copy, and SSE timing separates meaningful
+framing from usage availability while rejecting clock regressions and metadata
+heartbeats. Optional response-writer capabilities remain conditional,
 bounded text uses Unicode code points with control rejection, and trace record
 round trips retain escaped paths. T129 projects only frozen canonical final
 records into bounded, nonblocking structured completion logs; unknown optional
