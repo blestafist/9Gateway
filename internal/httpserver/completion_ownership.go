@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
 )
@@ -15,12 +16,15 @@ type completionOwnership struct {
 	trace  *RequestTraceState
 	logger *CompletionLogger
 
-	completed   bool
-	transferred bool
-	enriched    bool
-	finalized   bool
-	usage       accounting.Usage
-	cost        accounting.Money
+	completed          bool
+	transferred        bool
+	enriched           bool
+	finalized          bool
+	usage              accounting.Usage
+	cost               accounting.Money
+	lastMeaningfulMono time.Time
+	meaningfulKnown    bool
+	timingInvalid      bool
 }
 
 func newCompletionOwnership(trace *RequestTraceState, logger *CompletionLogger) *completionOwnership {
@@ -43,6 +47,10 @@ func (ownership *completionOwnership) transfer() bool {
 // finish freezes the base and emits the immutable final record exactly once.
 // Unknown enrichment is represented by leaving the trace enrichment empty.
 func (ownership *completionOwnership) finish(usage accounting.Usage, cost accounting.Money) {
+	ownership.finishWithTiming(usage, cost, time.Time{}, false)
+}
+
+func (ownership *completionOwnership) finishWithTiming(usage accounting.Usage, cost accounting.Money, lastMeaningful time.Time, timingKnown bool) {
 	if ownership == nil {
 		return
 	}
@@ -53,6 +61,11 @@ func (ownership *completionOwnership) finish(usage accounting.Usage, cost accoun
 	}
 	ownership.enriched = true
 	ownership.usage, ownership.cost = usage, cost
+	if timingKnown && !lastMeaningful.IsZero() {
+		ownership.lastMeaningfulMono, ownership.meaningfulKnown = lastMeaningful, true
+	} else {
+		ownership.timingInvalid = true
+	}
 	if !ownership.completed {
 		ownership.mu.Unlock()
 		return
@@ -60,10 +73,23 @@ func (ownership *completionOwnership) finish(usage accounting.Usage, cost accoun
 	ownership.finalized = true
 	trace, logger := ownership.trace, ownership.logger
 	ownership.mu.Unlock()
-	ownership.emit(trace, logger, usage, cost)
+	ownership.emit(trace, logger, usage, cost, ownership.streamCloseDelay(trace))
 }
 
-func (ownership *completionOwnership) emit(trace *RequestTraceState, logger *CompletionLogger, usage accounting.Usage, cost accounting.Money) {
+func (ownership *completionOwnership) streamCloseDelay(trace *RequestTraceState) DurationMicros {
+	if ownership == nil || trace == nil {
+		return UnknownDurationMicros()
+	}
+	ownership.mu.Lock()
+	invalid, known, last := ownership.timingInvalid, ownership.meaningfulKnown, ownership.lastMeaningfulMono
+	ownership.mu.Unlock()
+	if invalid || !known {
+		return UnknownDurationMicros()
+	}
+	return durationMicros(last, trace.finishedMonotonic())
+}
+
+func (ownership *completionOwnership) emit(trace *RequestTraceState, logger *CompletionLogger, usage accounting.Usage, cost accounting.Money, delay DurationMicros) {
 	if trace == nil {
 		return
 	}
@@ -72,6 +98,9 @@ func (ownership *completionOwnership) emit(trace *RequestTraceState, logger *Com
 	}
 	if cost.Known() {
 		trace.SetCost(cost)
+	}
+	if delay.Known() {
+		trace.SetTimingEnrichment(CompletionTiming{StreamCloseDelay: delay})
 	}
 	record, err := trace.Final()
 	if err != nil || logger == nil {
@@ -98,8 +127,21 @@ func (ownership *completionOwnership) complete() {
 	}
 	ownership.mu.Unlock()
 	if !transferred || enriched {
-		ownership.emit(ownership.trace, ownership.logger, usage, cost)
+		ownership.emit(ownership.trace, ownership.logger, usage, cost, ownership.streamCloseDelay(ownership.trace))
 	}
+}
+
+func (ownership *completionOwnership) observeMeaningfulEvent(at time.Time) {
+	if ownership == nil || at.IsZero() {
+		return
+	}
+	ownership.mu.Lock()
+	defer ownership.mu.Unlock()
+	if ownership.meaningfulKnown && at.Before(ownership.lastMeaningfulMono) {
+		ownership.timingInvalid = true
+		return
+	}
+	ownership.lastMeaningfulMono, ownership.meaningfulKnown = at, true
 }
 
 func completionOwnershipFromContext(ctx context.Context) *completionOwnership {

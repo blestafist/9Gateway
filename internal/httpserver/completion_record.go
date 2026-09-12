@@ -253,6 +253,7 @@ type CompletionTiming struct {
 	// arrival. It remains unknown when the client did not return headers.
 	TimeToUpstreamHeaders DurationMicros
 	TimeToFirstByte       DurationMicros
+	StreamCloseDelay      DurationMicros
 }
 
 func (timing CompletionTiming) MarshalJSON() ([]byte, error) {
@@ -277,7 +278,8 @@ func (timing CompletionTiming) MarshalJSON() ([]byte, error) {
 		TotalMicros                 any `json:"total_micros"`
 		TimeToUpstreamHeadersMicros any `json:"time_to_upstream_headers_micros"`
 		TimeToFirstByteMicros       any `json:"time_to_first_byte_micros"`
-	}{optionalTimestamp(timing.StartedAt), optionalTimestamp(timing.UpstreamStartedAt), optionalTimestamp(timing.UpstreamHeadersAt), optionalTimestamp(timing.FirstByteAt), optionalTimestamp(timing.FinishedAt), optionalDuration(timing.Total), optionalDuration(timing.TimeToUpstreamHeaders), optionalDuration(timing.TimeToFirstByte)})
+		StreamCloseDelayMicros      any `json:"stream_close_delay_micros"`
+	}{optionalTimestamp(timing.StartedAt), optionalTimestamp(timing.UpstreamStartedAt), optionalTimestamp(timing.UpstreamHeadersAt), optionalTimestamp(timing.FirstByteAt), optionalTimestamp(timing.FinishedAt), optionalDuration(timing.Total), optionalDuration(timing.TimeToUpstreamHeaders), optionalDuration(timing.TimeToFirstByte), optionalDuration(timing.StreamCloseDelay)})
 }
 
 // SafeErrorCode is a closed, secret-safe error vocabulary. It never contains
@@ -698,7 +700,7 @@ func validateStatuses(statuses ...OptionalStatus) error {
 }
 
 func validateTiming(timing CompletionTiming) error {
-	for _, duration := range []DurationMicros{timing.Total, timing.TimeToFirstByte} {
+	for _, duration := range []DurationMicros{timing.Total, timing.TimeToFirstByte, timing.StreamCloseDelay} {
 		if duration.known && duration.value < 0 {
 			return errors.New("completion: duration is negative")
 		}

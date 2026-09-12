@@ -40,6 +40,8 @@ type Reader struct {
 	hasField     bool
 	line         []byte
 	terminalErr  error
+	offset       int64
+	lastEventEnd int64
 }
 
 // NewReader creates an SSE reader with a positive maximum framed event size.
@@ -79,6 +81,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 	for {
 		part, readErr := reader.input.ReadSlice('\n')
 		reader.eventSize += len(part)
+		reader.offset += int64(len(part))
 		if reader.eventSize > reader.maxEventSize {
 			reader.terminalErr = ErrEventTooLarge
 			return SSEEvent{}, ErrEventTooLarge
@@ -95,6 +98,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 		if isBlankLine(reader.line) {
 			if reader.hasContent {
 				event := SSEEvent{Event: reader.eventName, Data: strings.Join(reader.dataLines, "\n")}
+				reader.lastEventEnd = reader.offset
 				reader.resetEvent()
 				return event, nil
 			}
@@ -131,6 +135,10 @@ func (reader *Reader) Next() (SSEEvent, error) {
 		reader.line = reader.line[:0]
 	}
 }
+
+// LastEventEndOffset returns the consumed wire offset of the most recently
+// returned complete event.
+func (reader *Reader) LastEventEndOffset() int64 { return reader.lastEventEnd }
 
 func (reader *Reader) resetEvent() {
 	reader.eventSize = 0

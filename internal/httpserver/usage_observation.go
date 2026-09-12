@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/limiter"
@@ -80,12 +81,14 @@ func ParseContentCoding(value string) (ContentCoding, error) {
 // lease is part of this value; the ticket is the already-settled one-shot
 // adjustment handle only.
 type UsageObservationJob struct {
-	Bytes         []byte
-	ContentCoding ContentCoding
-	Ticket        *limiter.TokenAdjustmentTicket
-	BudgetTicket  *limiter.BudgetAdjustmentTicket
-	Pricing       accounting.PricingResolution
-	Completion    *completionOwnership
+	Bytes             []byte
+	ContentCoding     ContentCoding
+	Ticket            *limiter.TokenAdjustmentTicket
+	BudgetTicket      *limiter.BudgetAdjustmentTicket
+	Pricing           accounting.PricingResolution
+	Completion        *completionOwnership
+	TimingCheckpoints []streamCheckpoint
+	TimingOverflow    bool
 }
 
 // NewUsageObservationJobWithCoding validates a wire Content-Encoding value
@@ -280,6 +283,7 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	var usage accounting.Usage
 	var err error
 	canonical := job.Completion != nil || job.BudgetTicket != nil || job.Pricing.Known()
+	var lastMeaningful time.Time
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -287,7 +291,11 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 			}
 		}()
 		if canonical {
-			usage, err = worker.parseUsage(job.Bytes, job.ContentCoding)
+			if job.Completion == nil {
+				usage, err = worker.parseUsage(job.Bytes, job.ContentCoding)
+			} else {
+				usage, lastMeaningful, err = parseCanonicalUsageObservationWithTiming(job.Bytes, job.ContentCoding, worker.maxBytes, job.TimingCheckpoints, job.TimingOverflow)
+			}
 			if err == nil && usage.Total().Known() {
 				actual = usage.Total().Int64()
 			}
@@ -343,7 +351,11 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 		if costValue, costErr := accounting.CalculateActualCost(usage, job.Pricing); costErr == nil {
 			cost = costValue
 		}
-		job.Completion.finish(usage, cost)
+		if lastMeaningful.IsZero() {
+			job.Completion.finish(usage, cost)
+		} else {
+			job.Completion.finishWithTiming(usage, cost, lastMeaningful, true)
+		}
 	}
 	if settleErr != nil {
 		worker.failed.Add(1)
@@ -444,10 +456,14 @@ func (worker *UsageObservationWorker) Enqueue(job UsageObservationJob) bool {
 // A nil worker still settles and invalidates the ticket, preserving the
 // conservative charge without leaking request resources.
 func (worker *UsageObservationWorker) CompleteAndSubmit(lease *limiter.ResourceLease, captured []byte, coding ContentCoding) bool {
-	return worker.completeAndSubmit(lease, captured, coding, nil, accounting.UnknownPricingResolution())
+	return worker.completeAndSubmitWithTiming(lease, captured, coding, nil, accounting.UnknownPricingResolution(), nil, true)
 }
 
 func (worker *UsageObservationWorker) completeAndSubmit(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, completion *completionOwnership, pricing accounting.PricingResolution) bool {
+	return worker.completeAndSubmitWithTiming(lease, captured, coding, completion, pricing, nil, true)
+}
+
+func (worker *UsageObservationWorker) completeAndSubmitWithTiming(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, completion *completionOwnership, pricing accounting.PricingResolution, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
 	if lease == nil {
 		return false
 	}
@@ -461,6 +477,8 @@ func (worker *UsageObservationWorker) completeAndSubmit(lease *limiter.ResourceL
 	}
 	job := NewUsageObservationJob(captured, coding, ticket)
 	job.Completion, job.Pricing = completion, pricing
+	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
+	job.TimingOverflow = checkpointOverflow
 	return worker.Submit(job)
 }
 
@@ -468,6 +486,10 @@ func (worker *UsageObservationWorker) completeAndSubmit(lease *limiter.ResourceL
 // worker. Unrestricted requests have no accounting ticket, but their traces
 // still use the same bounded canonical parser.
 func (worker *UsageObservationWorker) SubmitForCompletion(completion *completionOwnership, captured []byte, coding ContentCoding) bool {
+	return worker.SubmitForCompletionWithTiming(completion, captured, coding, nil, true)
+}
+
+func (worker *UsageObservationWorker) SubmitForCompletionWithTiming(completion *completionOwnership, captured []byte, coding ContentCoding, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
 	if completion == nil || !completion.transfer() {
 		return false
 	}
@@ -475,7 +497,10 @@ func (worker *UsageObservationWorker) SubmitForCompletion(completion *completion
 		completion.finish(accounting.Usage{}, accounting.UnknownMoney())
 		return false
 	}
-	return worker.Submit(NewUsageObservationJobForCompletion(captured, coding, completion))
+	job := NewUsageObservationJobForCompletion(captured, coding, completion)
+	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
+	job.TimingOverflow = checkpointOverflow
+	return worker.Submit(job)
 }
 
 func NewUsageObservationJobForCompletion(captured []byte, coding ContentCoding, completion *completionOwnership) UsageObservationJob {
@@ -492,6 +517,10 @@ func (worker *UsageObservationWorker) CompleteAndSubmitWithPricing(lease *limite
 }
 
 func (worker *UsageObservationWorker) completeAndSubmitWithPricing(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution, completion *completionOwnership) bool {
+	return worker.completeAndSubmitWithPricingTiming(lease, captured, coding, pricing, completion, nil, true)
+}
+
+func (worker *UsageObservationWorker) completeAndSubmitWithPricingTiming(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution, completion *completionOwnership, checkpoints []streamCheckpoint, checkpointOverflow bool) bool {
 	if lease == nil {
 		return false
 	}
@@ -505,6 +534,8 @@ func (worker *UsageObservationWorker) completeAndSubmitWithPricing(lease *limite
 	}
 	job := NewUsageObservationJobWithPricing(captured, coding, tickets, pricing)
 	job.Completion = completion
+	job.TimingCheckpoints = append([]streamCheckpoint(nil), checkpoints...)
+	job.TimingOverflow = checkpointOverflow
 	return worker.Submit(job)
 }
 
@@ -623,29 +654,42 @@ func parseUsageObservation(data []byte, coding ContentCoding, maxBytes int64) (i
 }
 
 func parseCanonicalUsageObservation(data []byte, coding ContentCoding, maxBytes int64) (accounting.Usage, error) {
+	usage, _, err := parseCanonicalUsageObservationWithTiming(data, coding, maxBytes, nil, true)
+	return usage, err
+}
+
+func parseCanonicalUsageObservationWithTiming(data []byte, coding ContentCoding, maxBytes int64, checkpoints []streamCheckpoint, checkpointOverflow bool) (accounting.Usage, time.Time, error) {
 	if !validContentCoding(coding) {
-		return accounting.Usage{}, errUsageObservationUnsupported
+		return accounting.Usage{}, time.Time{}, errUsageObservationUnsupported
 	}
 	decoded, err := decodeObservedBytes(data, coding, maxBytes)
 	if err != nil {
-		return accounting.Usage{}, err
+		return accounting.Usage{}, time.Time{}, err
 	}
 	trimmed := bytes.TrimSpace(decoded)
 	if len(trimmed) == 0 {
-		return accounting.Usage{}, errUsageObservationMalformed
+		return accounting.Usage{}, time.Time{}, errUsageObservationMalformed
 	}
 	if trimmed[0] == '{' {
 		result, err := openai.ParseJSONUsage(trimmed)
 		if err != nil || !result.Observed {
-			return accounting.Usage{}, errUsageObservationMalformed
+			return accounting.Usage{}, time.Time{}, errUsageObservationMalformed
 		}
-		return result.Usage, nil
+		return result.Usage, time.Time{}, nil
 	}
 	result, err := openai.ObserveStream(bytes.NewReader(decoded), 64*1024, nil)
 	if err != nil || len(result.Errors) != 0 || !canonicalUsageKnown(result.State.Usage) {
-		return accounting.Usage{}, errUsageObservationMalformed
+		return accounting.Usage{}, time.Time{}, errUsageObservationMalformed
 	}
-	return result.State.Usage.Usage, nil
+	if coding != ContentCodingIdentity || checkpointOverflow || len(checkpoints) == 0 || result.LastMeaningfulOffset <= 0 {
+		return result.State.Usage.Usage, time.Time{}, nil
+	}
+	for i := len(checkpoints) - 1; i >= 0; i-- {
+		if result.LastMeaningfulOffset <= checkpoints[i].offset {
+			return result.State.Usage.Usage, checkpoints[i].at, nil
+		}
+	}
+	return result.State.Usage.Usage, time.Time{}, nil
 }
 
 func canonicalUsageKnown(usage openai.UsageObservation) bool {

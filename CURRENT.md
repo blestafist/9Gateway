@@ -3,9 +3,9 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T127`.
+Done: `T001`-`T128`.
 
-Current: `T128` - measure SSE stream-close delay safely.
+Current: `T129` - emit canonical structured completion logs.
 
 Queued: `T128`-`T140` in dependency order from `TASKS.md`.
 

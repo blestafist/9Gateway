@@ -3,6 +3,7 @@ package httpserver
 import (
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/limiter"
@@ -15,15 +16,30 @@ type responseObservation struct {
 	maxBytes int64
 	coding   ContentCoding
 
-	bytes          []byte
-	overflow       bool
-	eligible       bool
-	pricing        accounting.PricingResolution
-	completion     *completionOwnership
-	canonical      accounting.Usage
-	canonicalKnown bool
-	canonicalCost  accounting.Money
+	bytes              []byte
+	overflow           bool
+	eligible           bool
+	pricing            accounting.PricingResolution
+	completion         *completionOwnership
+	canonical          accounting.Usage
+	canonicalKnown     bool
+	canonicalCost      accounting.Money
+	checkpoints        []streamCheckpoint
+	checkpointBytes    int64
+	checkpointOverflow bool
+	wireOffset         int64
+	checkpointAt       func() time.Time
 }
+
+type streamCheckpoint struct {
+	offset int64
+	at     time.Time
+}
+
+const (
+	maxStreamCheckpointCount       = 256
+	maxStreamCheckpointBytes int64 = 8 * 1024 * 1024
+)
 
 func (observation *responseObservation) setCanonical(usage accounting.Usage, cost accounting.Money) {
 	if observation != nil {
@@ -74,6 +90,29 @@ func (observation *responseObservation) record(written []byte) {
 	observation.bytes = append(observation.bytes, written...)
 }
 
+func (observation *responseObservation) checkpoint(written int) {
+	if observation == nil || written <= 0 || observation.checkpointOverflow {
+		return
+	}
+	if int64(written) > maxStreamCheckpointBytes-observation.checkpointBytes || len(observation.checkpoints) >= maxStreamCheckpointCount {
+		observation.checkpointOverflow = true
+		observation.checkpoints = nil
+		return
+	}
+	observation.wireOffset += int64(written)
+	observation.checkpointBytes += int64(written)
+	if observation.checkpointAt != nil {
+		observation.addCheckpoint(observation.checkpointAt())
+	}
+}
+
+func (observation *responseObservation) addCheckpoint(at time.Time) {
+	if observation == nil || observation.checkpointOverflow || len(observation.checkpoints) >= maxStreamCheckpointCount {
+		return
+	}
+	observation.checkpoints = append(observation.checkpoints, streamCheckpoint{offset: observation.wireOffset, at: at})
+}
+
 func (observation *responseObservation) finish(err error) {
 	if observation == nil {
 		return
@@ -94,7 +133,7 @@ func (observation *responseObservation) settle(lease *limiter.ResourceLease, wor
 			return
 		}
 		if lease == nil && observation.completion != nil {
-			if worker == nil || !worker.SubmitForCompletion(observation.completion, observation.bytes, observation.coding) {
+			if worker == nil || !worker.SubmitForCompletionWithTiming(observation.completion, observation.bytes, observation.coding, observation.checkpoints, observation.checkpointOverflow) {
 				observation.completion.finish(accounting.Usage{}, accounting.UnknownMoney())
 			}
 			return
@@ -112,12 +151,12 @@ func (observation *responseObservation) settle(lease *limiter.ResourceLease, wor
 		}
 		if budgetSettled {
 			if observation.pricing.Known() {
-				worker.CompleteAndSubmitWithPricing(lease, observation.bytes, observation.coding, observation.pricing)
+				worker.completeAndSubmitWithPricingTiming(lease, observation.bytes, observation.coding, observation.pricing, observation.completion, observation.checkpoints, observation.checkpointOverflow)
 			} else {
-				worker.CompleteAndSubmitTokenDeferredBudgetConservative(lease, observation.bytes, observation.coding)
+				worker.completeAndSubmitWithTiming(lease, observation.bytes, observation.coding, observation.completion, accounting.UnknownPricingResolution(), observation.checkpoints, observation.checkpointOverflow)
 			}
 		} else {
-			worker.CompleteAndSubmit(lease, observation.bytes, observation.coding)
+			worker.completeAndSubmitWithTiming(lease, observation.bytes, observation.coding, observation.completion, observation.pricing, observation.checkpoints, observation.checkpointOverflow)
 		}
 		return
 	}

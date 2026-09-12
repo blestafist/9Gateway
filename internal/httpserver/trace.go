@@ -68,8 +68,9 @@ type TraceRequestMetadata struct {
 // request trace. Observation may complete after the handler has returned;
 // this value is constructed once and merged into a separate final record.
 type RequestTraceEnrichment struct {
-	Usage accounting.Usage
-	Cost  accounting.Money
+	Usage  accounting.Usage
+	Cost   accounting.Money
+	Timing CompletionTiming
 }
 
 // TraceEnrichment is a descriptive alias.
@@ -97,6 +98,7 @@ type RequestTraceState struct {
 	headers             bool
 	firstByte           bool
 	finished            bool
+	finishedMono        time.Time
 	terminalSet         bool
 	authSet             bool
 	metadataSet         bool
@@ -665,6 +667,7 @@ func (state *RequestTraceState) completeLocked() {
 	}
 	wall, mono := state.reading()
 	state.finished = true
+	state.finishedMono = mono
 	state.input.Timing.FinishedAt = state.wallStamp(wall)
 	state.input.Timing.Total = durationMicros(state.startedMono, mono)
 	if !state.terminalSet {
@@ -722,6 +725,36 @@ func (state *RequestTraceState) FreezeEnrichment() RequestTraceEnrichment {
 	return state.enrichmentSnap
 }
 
+func (state *RequestTraceState) SetTimingEnrichment(timing CompletionTiming) bool {
+	if state == nil || !timing.StreamCloseDelay.Known() {
+		return false
+	}
+	state.enrichmentMu.Lock()
+	defer state.enrichmentMu.Unlock()
+	if state.enrichmentFrozen || state.enrichment.Timing.StreamCloseDelay.Known() {
+		return false
+	}
+	state.enrichment.Timing.StreamCloseDelay = timing.StreamCloseDelay
+	return true
+}
+
+func (state *RequestTraceState) monotonicNow() time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	_, mono := state.clock.readings()
+	return mono
+}
+
+func (state *RequestTraceState) finishedMonotonic() time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.finishedMono
+}
+
 func MergeRequestTraceEnrichment(base CompletionRecord, enrichment RequestTraceEnrichment) (CompletionRecord, error) {
 	input := base.input()
 	if enrichment.Usage.Input().Known() || enrichment.Usage.Output().Known() || enrichment.Usage.Total().Known() || enrichment.Usage.CachedInput().Known() || enrichment.Usage.ReasoningOutput().Known() {
@@ -729,6 +762,9 @@ func MergeRequestTraceEnrichment(base CompletionRecord, enrichment RequestTraceE
 	}
 	if enrichment.Cost.Known() {
 		input.Cost = enrichment.Cost
+	}
+	if enrichment.Timing.StreamCloseDelay.Known() {
+		input.Timing.StreamCloseDelay = enrichment.Timing.StreamCloseDelay
 	}
 	return NewCompletionRecord(input)
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/streaming"
@@ -26,10 +27,11 @@ var ErrInvalidAggregationLimit = errors.New("openai: invalid aggregation limit")
 // reparse JSON to reconcile it. Observed remains separate so a response
 // with no usage cannot be mistaken for an explicit zero.
 type AggregationResult struct {
-	JSON     []byte
-	Usage    accounting.Usage
-	Observed bool
-	Done     bool
+	JSON             []byte
+	Usage            accounting.Usage
+	Observed         bool
+	Done             bool
+	LastMeaningfulAt time.Time
 }
 
 // AggregateSSEToJSON consumes complete SSE events until an exact [DONE] data
@@ -60,6 +62,14 @@ func AggregateSSEToJSONWithTermination(input io.Reader, maxEventSize int, maxPay
 // callers that need both the rendered response and the canonical usage
 // observed while rendering it.
 func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadBytes int64) (AggregationResult, error) {
+	return aggregateSSEToJSONWithTiming(input, maxEventSize, maxPayloadBytes, nil)
+}
+
+func AggregateSSEToJSONWithTiming(input io.Reader, maxEventSize int, maxPayloadBytes int64, meaningful func() time.Time) (AggregationResult, error) {
+	return aggregateSSEToJSONWithTiming(input, maxEventSize, maxPayloadBytes, meaningful)
+}
+
+func aggregateSSEToJSONWithTiming(input io.Reader, maxEventSize int, maxPayloadBytes int64, meaningful func() time.Time) (AggregationResult, error) {
 	if maxEventSize <= 0 || maxPayloadBytes <= 0 {
 		return AggregationResult{}, fmt.Errorf("%w: event size=%d payload=%d", ErrInvalidAggregationLimit, maxEventSize, maxPayloadBytes)
 	}
@@ -73,6 +83,7 @@ func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadB
 		return AggregationResult{}, err
 	}
 	observer := NewObserver()
+	var lastMeaningfulAt time.Time
 
 	events := 0
 	for {
@@ -85,7 +96,7 @@ func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadB
 				// Render performs the meaningful-response check. In particular,
 				// usage may be supplied after a terminal choice event, and a
 				// finish reason is not required for EOF completion.
-				return aggregationResult(accumulator, false)
+				return aggregationResultWithTiming(accumulator, false, lastMeaningfulAt)
 			}
 			if errors.Is(err, streaming.ErrEventIncomplete) {
 				return partialAggregationResult(accumulator), fmt.Errorf("%w: %w", ErrStreamIncomplete, err)
@@ -99,7 +110,7 @@ func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadB
 			if events == 0 {
 				return AggregationResult{}, fmt.Errorf("%w: DONE arrived without response data", ErrInvalidAccumulatorState)
 			}
-			result, renderErr := aggregationResult(accumulator, true)
+			result, renderErr := aggregationResultWithTiming(accumulator, true, lastMeaningfulAt)
 			if renderErr != nil {
 				return partialAggregationResult(accumulator), renderErr
 			}
@@ -125,20 +136,30 @@ func AggregateSSEToJSONWithResult(input io.Reader, maxEventSize int, maxPayloadB
 		if err := accumulator.Accumulate(result); err != nil {
 			return partialAggregationResult(accumulator), err
 		}
+		if meaningful != nil {
+			resultAt := meaningful()
+			// Store the latest successful event timing. [DONE] is handled above.
+			lastMeaningfulAt = resultAt
+		}
 	}
 }
 
 func aggregationResult(accumulator *ChatAccumulator, done bool) (AggregationResult, error) {
+	return aggregationResultWithTiming(accumulator, done, time.Time{})
+}
+
+func aggregationResultWithTiming(accumulator *ChatAccumulator, done bool, lastMeaningfulAt time.Time) (AggregationResult, error) {
 	state := accumulator.State()
 	jsonBody, err := RenderChatCompletion(state)
 	if err != nil {
 		return AggregationResult{}, err
 	}
 	return AggregationResult{
-		JSON:     jsonBody,
-		Usage:    state.Usage.Usage,
-		Observed: usageObservationKnown(state.Usage),
-		Done:     done,
+		JSON:             jsonBody,
+		Usage:            state.Usage.Usage,
+		Observed:         usageObservationKnown(state.Usage),
+		Done:             done,
+		LastMeaningfulAt: lastMeaningfulAt,
 	}, nil
 }
 

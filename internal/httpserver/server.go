@@ -685,6 +685,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
 			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding, selectedPricing)
 			responseObservation.completion = completion
+			if trace != nil {
+				responseObservation.checkpointAt = trace.monotonicNow
+			}
 			if responseMode == ResponseModeJSON {
 				response = responseObservation.wrap(response)
 			}
@@ -932,7 +935,16 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		if closeAggregationBody != nil {
 			defer closeAggregationBody()
 		}
-		aggregation, err := openai.AggregateSSEToJSONWithResult(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize)
+		var trace *RequestTraceState
+		if request != nil {
+			trace = TraceFromContext(request.Context())
+		}
+		aggregation, err := openai.AggregateSSEToJSONWithTiming(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize, func() time.Time {
+			if trace == nil {
+				return time.Time{}
+			}
+			return trace.monotonicNow()
+		})
 		if err != nil {
 			// Aggregation happens before any downstream headers or body bytes are
 			// committed. Deliberately expose no upstream body or parser detail.
@@ -955,7 +967,7 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 			}
 			observation.setCanonical(aggregation.Usage, cost)
 			if observation.completion != nil {
-				observation.completion.finish(aggregation.Usage, cost)
+				observation.completion.finishWithTiming(aggregation.Usage, cost, aggregation.LastMeaningfulAt, !aggregation.LastMeaningfulAt.IsZero())
 			}
 		}
 		// The compatibility decoder has already produced canonical usage. Settle
@@ -1227,6 +1239,7 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader, observatio
 			// ownership is copied at this point rather than handed to a worker.
 			if observation != nil {
 				observation.record(buffer[:read])
+				observation.checkpoint(read)
 			}
 		}
 

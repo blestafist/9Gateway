@@ -2,6 +2,7 @@ package openai
 
 import (
 	"io"
+	"time"
 
 	"github.com/pestit/9gateway/internal/streaming"
 )
@@ -10,9 +11,11 @@ import (
 // observation. Errors contains only errors returned by Observer.Observe;
 // errors from the generic reader are returned by ObserveStream instead.
 type ObservationResult struct {
-	State    ObserverState
-	Metadata ResponseMetadata
-	Errors   []error
+	State                ObserverState
+	Metadata             ResponseMetadata
+	Errors               []error
+	LastMeaningfulOffset int64
+	LastMeaningfulAt     time.Time
 }
 
 // ObserveStream pulls complete, bounded SSE events from input and passes each
@@ -27,6 +30,10 @@ type ObservationResult struct {
 // flushing them downstream. Observation may be dropped or disabled rather
 // than blocking delivery.
 func ObserveStream(input io.Reader, maxEventSize int, reportError func(error)) (ObservationResult, error) {
+	return ObserveStreamWithTiming(input, maxEventSize, reportError, nil)
+}
+
+func ObserveStreamWithTiming(input io.Reader, maxEventSize int, reportError func(error), meaningful func(int64) time.Time) (ObservationResult, error) {
 	observer := NewObserver()
 	result := ObservationResult{}
 
@@ -57,10 +64,19 @@ func ObserveStream(input io.Reader, maxEventSize int, reportError func(error)) (
 			}
 			continue
 		}
+		observed := false
 		if err := observer.Observe(event); err != nil {
 			result.Errors = append(result.Errors, err)
 			if reportError != nil {
 				reportError(err)
+			}
+		} else if event.Data != "[DONE]" {
+			observed = true
+		}
+		if observed {
+			result.LastMeaningfulOffset = reader.LastEventEndOffset()
+			if meaningful != nil {
+				result.LastMeaningfulAt = meaningful(result.LastMeaningfulOffset)
 			}
 		}
 	}
