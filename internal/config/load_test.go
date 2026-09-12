@@ -30,6 +30,12 @@ func TestLoadValidYAML(t *testing.T) {
 			FallbackUnknownInputTokens: 123,
 			FallbackMaxOutputTokens:    456,
 		},
+		Observability: ObservabilityConfig{
+			TelemetryQueueCapacity:  DefaultTelemetryQueueCapacity,
+			MaxCapturedBodyBytes:    DefaultMaxCapturedBodyBytes,
+			RequestRetentionSeconds: DefaultRequestRetentionSeconds,
+			BodyRetentionSeconds:    DefaultBodyRetentionSeconds,
+		},
 	}
 	if got != want {
 		t.Fatalf("Load() = %+v, want %+v", got, want)
@@ -46,6 +52,9 @@ func TestLoadAppliesOmittedTokenizerDefaults(t *testing.T) {
 	}
 	if got.Tokenizer != (TokenizerConfig{Mode: TokenizerModeEstimate, MaxInspectedRequestBytes: DefaultMaxInspectedRequestBytes, FallbackUnknownInputTokens: DefaultFallbackUnknownInputTokens, FallbackMaxOutputTokens: DefaultFallbackMaxOutputTokens}) {
 		t.Fatalf("tokenizer defaults = %+v", got.Tokenizer)
+	}
+	if got.Observability != (ObservabilityConfig{TelemetryQueueCapacity: DefaultTelemetryQueueCapacity, MaxCapturedBodyBytes: DefaultMaxCapturedBodyBytes, RequestRetentionSeconds: DefaultRequestRetentionSeconds, BodyRetentionSeconds: DefaultBodyRetentionSeconds}) {
+		t.Fatalf("observability defaults = %+v", got.Observability)
 	}
 }
 
@@ -91,6 +100,50 @@ func TestLoadRejectsUnknownTokenizerFields(t *testing.T) {
 	contents := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\ntokenizer:\n  unknown: value\n"
 	if _, err := Load(writeConfig(t, contents)); err == nil || !strings.Contains(err.Error(), "decode config YAML") {
 		t.Fatalf("Load() error = %v, want unknown tokenizer field error", err)
+	}
+}
+
+func TestLoadObservabilityStrictScalarsAndRetention(t *testing.T) {
+	t.Setenv("TEST_AUTH_PEPPER", "pepper")
+	t.Setenv("TEST_ADMIN_CREDENTIAL", "admin")
+	base := "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: secret\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\nobservability:\n"
+	tests := []struct {
+		name   string
+		suffix string
+		want   string
+	}{
+		{name: "valid and secrets coexist", suffix: "  telemetry_queue_capacity: 1\n  max_captured_body_bytes: 0\n  request_retention_seconds: 1\n  body_retention_seconds: 1\n"},
+		{name: "unknown field", suffix: "  unexpected: 1\n", want: "observability.unexpected"},
+		{name: "null queue", suffix: "  telemetry_queue_capacity: null\n", want: "telemetry_queue_capacity"},
+		{name: "wrong queue type", suffix: "  telemetry_queue_capacity: 1s\n", want: "telemetry_queue_capacity"},
+		{name: "null retention", suffix: "  request_retention_seconds: null\n", want: "request_retention_seconds"},
+		{name: "ambiguous duration", suffix: "  request_retention_seconds: 1m\n", want: "request_retention_seconds"},
+		{name: "integer overflow", suffix: "  request_retention_seconds: 9223372036854775808\n", want: "request_retention_seconds"},
+		{name: "explicit zero retention", suffix: "  body_retention_seconds: 0\n", want: "body_retention_seconds"},
+		{name: "negative retention", suffix: "  body_retention_seconds: -1\n", want: "body_retention_seconds"},
+		{name: "body retention ordering", suffix: "  request_retention_seconds: 10\n  body_retention_seconds: 11\n", want: "body_retention_seconds"},
+		{name: "null object", suffix: "observability: null\n", want: "observability"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			contents := base + tt.suffix
+			got, err := Load(writeConfig(t, contents))
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				if got.Observability.MaxCapturedBodyBytes != 0 {
+					t.Fatalf("body capture default = %d, want disabled", got.Observability.MaxCapturedBodyBytes)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load() error = %v, want field %q", err, tt.want)
+			}
+			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "pepper") || strings.Contains(err.Error(), "admin") {
+				t.Fatalf("Load() error exposes credential material: %v", err)
+			}
+		})
 	}
 }
 

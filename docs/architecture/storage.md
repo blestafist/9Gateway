@@ -36,3 +36,10 @@ snapshot. Batch low-value timestamps such as last-used updates.
 Critical accounting state updates synchronously in memory. Detailed telemetry
 uses a bounded asynchronous queue and may be dropped with a metric when full;
 budget-affecting usage may not be lost merely because telemetry is unavailable.
+
+The deployment caps detailed telemetry before persistence: a 128-entry queue
+(maximum 4096), a zero-default body capture limit (maximum 1 MiB), 30-day
+metadata retention (maximum 365 days), and 7-day body retention (maximum 365
+days and never longer than metadata). Cleanup is fixed rather than configurable:
+one startup pass and one after each 1024 processed jobs, deleting no more than
+1000 body rows and then 1000 metadata rows per pass.

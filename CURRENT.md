@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T129`.
+Done: `T001`-`T130`.
 
-Current: `T130` - validate observability configuration.
+Current: `T131` - add per-key body capture policy.
 
-Queued: `T130`-`T140` in dependency order from `TASKS.md`.
+Queued: `T131`-`T140` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

@@ -223,6 +223,61 @@ func TestTokenizerConfigErrorIncludesUnsupportedMode(t *testing.T) {
 	}
 }
 
+func TestObservabilityConfigDefaultsAndBounds(t *testing.T) {
+	config := minimalConfig(":memory:")
+	config.ApplyDefaults()
+	want := ObservabilityConfig{
+		TelemetryQueueCapacity:  DefaultTelemetryQueueCapacity,
+		MaxCapturedBodyBytes:    DefaultMaxCapturedBodyBytes,
+		RequestRetentionSeconds: DefaultRequestRetentionSeconds,
+		BodyRetentionSeconds:    DefaultBodyRetentionSeconds,
+	}
+	if config.Observability != want {
+		t.Fatalf("observability defaults = %+v, want %+v", config.Observability, want)
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("minimal configuration with defaults rejected: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*ObservabilityConfig)
+		want string
+	}{
+		{name: "body capture explicitly disabled", edit: func(c *ObservabilityConfig) { c.MaxCapturedBodyBytes = 0 }},
+		{name: "queue minimum", edit: func(c *ObservabilityConfig) { c.TelemetryQueueCapacity = 1 }},
+		{name: "queue maximum", edit: func(c *ObservabilityConfig) { c.TelemetryQueueCapacity = MaxTelemetryQueueCapacity }},
+		{name: "body maximum", edit: func(c *ObservabilityConfig) { c.MaxCapturedBodyBytes = MaxMaxCapturedBodyBytes }},
+		{name: "retention minimum", edit: func(c *ObservabilityConfig) { c.RequestRetentionSeconds = 1; c.BodyRetentionSeconds = 1 }},
+		{name: "retention maximum", edit: func(c *ObservabilityConfig) {
+			c.RequestRetentionSeconds = MaxRequestRetentionSeconds
+			c.BodyRetentionSeconds = MaxBodyRetentionSeconds
+		}},
+		{name: "negative queue", edit: func(c *ObservabilityConfig) { c.TelemetryQueueCapacity = -1 }, want: "telemetry_queue_capacity"},
+		{name: "negative body bytes", edit: func(c *ObservabilityConfig) { c.MaxCapturedBodyBytes = -1 }, want: "max_captured_body_bytes"},
+		{name: "excessive body bytes", edit: func(c *ObservabilityConfig) { c.MaxCapturedBodyBytes = MaxMaxCapturedBodyBytes + 1 }, want: "max_captured_body_bytes"},
+		{name: "excessive queue", edit: func(c *ObservabilityConfig) { c.TelemetryQueueCapacity = MaxTelemetryQueueCapacity + 1 }, want: "telemetry_queue_capacity"},
+		{name: "body after metadata", edit: func(c *ObservabilityConfig) { c.BodyRetentionSeconds = c.RequestRetentionSeconds + 1 }, want: "body_retention_seconds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := minimalConfig(":memory:")
+			config.ApplyDefaults()
+			tt.edit(&config.Observability)
+			err := config.Validate()
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want field %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateSQLitePath(t *testing.T) {
 	validFile := filepath.Join(t.TempDir(), "nested", "gateway.db")
 	if err := os.Mkdir(filepath.Dir(validFile), 0o755); err != nil {

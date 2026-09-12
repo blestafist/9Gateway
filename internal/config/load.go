@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -22,6 +23,9 @@ func Load(path string) (Config, error) {
 	}
 
 	var config Config
+	if err := validateRawObservability(data); err != nil {
+		return Config{}, fmt.Errorf("validate config: %w", err)
+	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&config); err != nil {
@@ -61,6 +65,66 @@ func Load(path string) (Config, error) {
 	}
 
 	return config, nil
+}
+
+// validateRawObservability checks the scalar representation before yaml.v3
+// decodes it into zero-valued Go fields. This is necessary to distinguish an
+// omitted field from null and from an explicitly supplied zero (only the body
+// byte limit permits zero), while keeping errors limited to field names.
+func validateRawObservability(data []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("decode config YAML: %w", err)
+	}
+	if len(document.Content) == 0 {
+		return nil
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil // The strict decoder reports the useful structural error.
+	}
+	for index := 0; index+1 < len(root.Content); index += 2 {
+		if root.Content[index].Value != "observability" {
+			continue
+		}
+		observability := root.Content[index+1]
+		if isYAMLNull(observability) {
+			return fmt.Errorf("observability must be a mapping, not null")
+		}
+		if observability.Kind != yaml.MappingNode {
+			return fmt.Errorf("observability must be a mapping")
+		}
+		for fieldIndex := 0; fieldIndex+1 < len(observability.Content); fieldIndex += 2 {
+			field := observability.Content[fieldIndex].Value
+			value := observability.Content[fieldIndex+1]
+			switch field {
+			case "telemetry_queue_capacity", "max_captured_body_bytes", "request_retention_seconds", "body_retention_seconds":
+				if isYAMLNull(value) {
+					return fmt.Errorf("observability.%s must not be null", field)
+				}
+				if value.Kind != yaml.ScalarNode || value.Tag != "!!int" {
+					return fmt.Errorf("observability.%s must be an integer number of seconds or bytes", field)
+				}
+				parsed, err := strconv.ParseInt(value.Value, 10, 64)
+				if err != nil {
+					return fmt.Errorf("observability.%s is outside the supported integer range", field)
+				}
+				if field != "max_captured_body_bytes" && parsed == 0 {
+					return fmt.Errorf("observability.%s must be positive", field)
+				}
+			case "":
+				return fmt.Errorf("observability field name must not be empty")
+			default:
+				return fmt.Errorf("observability.%s is unknown", field)
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func isYAMLNull(node *yaml.Node) bool {
+	return node.Kind == yaml.ScalarNode && node.Tag == "!!null"
 }
 
 // rejectExplicitTokenizerDefaults distinguishes an omitted scalar (which is

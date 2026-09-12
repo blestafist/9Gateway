@@ -7,6 +7,17 @@ timeouts, logging, tokenizer defaults, and pricing. Resolve secrets from the
 environment and validate before opening the listener. Prefer strict handling of
 unknown YAML fields. Hot reload is not MVP.
 
+Detailed telemetry is bounded by the deployment-only `observability` object:
+`telemetry_queue_capacity` defaults to `128` and is capped at `4096`,
+`max_captured_body_bytes` defaults to `0` (capture disabled) and is capped at
+`1048576`, and retention values are strict integer seconds. Request metadata
+retention defaults to `2592000` (30 days) and is capped at `31536000` (365
+days); body retention defaults to `604800` (7 days), is capped at 365 days,
+and may not exceed request retention. These settings contain no per-key policy
+or body content. Retention cleanup is fixed at startup and every 1024 processed
+telemetry jobs, with at most 1000 body rows followed by 1000 metadata rows per
+pass; it is not a deployment knob.
+
 ## Server Lifecycle
 
 Startup loads and validates configuration, opens SQLite, applies migrations,

@@ -27,6 +27,13 @@ and marking truncation. Client and upstream bodies remain distinguishable.
 Streaming capture cannot alter flush behavior, and arbitrary prompt redaction is
 not claimed to be reliable.
 
+Deployment bounds are configured under `observability`. Body capture is globally
+disabled when `max_captured_body_bytes` is zero, regardless of any future
+per-key opt-in. Retention uses strict integer seconds: metadata defaults to 30
+days and body data to 7 days, with body retention no longer than metadata
+retention. The one startup cleanup pass and each subsequent 1024-job pass are
+bounded to 1000 body deletions, then 1000 metadata deletions.
+
 ## Telemetry
 
 Create an immutable completion record and send it to a bounded writer queue.

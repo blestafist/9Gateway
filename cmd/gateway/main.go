@@ -201,7 +201,7 @@ func run() error {
 	}()
 
 	upstreamClient := transport.NewClient()
-	completionLogger := httpserver.NewCompletionLogger(slog.Default(), 0)
+	completionLogger := httpserver.NewCompletionLogger(slog.Default(), cfg.Observability.TelemetryQueueCapacity)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
