@@ -115,6 +115,27 @@ type RequestTraceState struct {
 	enrichmentCost   bool
 	enrichmentSnap   RequestTraceEnrichment
 	enrichmentFrozen bool
+	completion       *completionOwnership
+}
+
+func (state *RequestTraceState) setCompletionOwnership(ownership *completionOwnership) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	if state.completion == nil {
+		state.completion = ownership
+	}
+	state.mu.Unlock()
+}
+
+func (state *RequestTraceState) completionOwnership() *completionOwnership {
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.completion
 }
 
 // NewRequestTraceState creates a request-local trace. The request ID is

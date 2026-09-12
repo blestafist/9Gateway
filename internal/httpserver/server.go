@@ -400,6 +400,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var tokenAdmission bool
 	var budgetAdmission bool
 	var responseObservation *responseObservation
+	completion := completionOwnershipFromContext(request.Context())
 	var dispatchErr error
 	// client.Do owns the ambiguous boundary. Before it is called, cleanup can
 	// prove that no upstream work was possible and release the reservation at
@@ -436,7 +437,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				// Admission and request construction completed, but client.Do
 				// was never entered. No upstream work is possible.
 				lifecycleLease.ReleaseBeforeUpstream()
-			case (tokenAdmission || budgetAdmission) && responseObservation != nil:
+			case responseObservation != nil:
 				responseObservation.settle(lifecycleLease, handler.usageObservationWorker, budgetAdmission)
 			case tokenAdmission || budgetAdmission:
 				// No observation can be submitted for an opaque response or an
@@ -446,6 +447,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			default:
 				_ = lifecycleLease.CompleteConservative()
 			}
+		}
+		if lifecycleLease == nil && responseObservation != nil {
+			responseObservation.settle(nil, handler.usageObservationWorker)
 		}
 		if terminal.get().Outcome == TerminalOutcomeUnknown {
 			if upstreamStarted {
@@ -526,6 +530,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 	var budgetPlan *accounting.BudgetReservationPlan
 	var selectedPricing accounting.PricingResolution
+	if metadata != nil {
+		selectedPricing = handler.pricingResolver.Resolve(metadata.Model)
+	}
 	if authenticated {
 		if total, limited := principal.Policy.TotalBudget(); limited || func() bool { _, day := principal.Policy.DailyBudget(); return day }() || func() bool { _, month := principal.Policy.MonthlyBudget(); return month }() {
 			// Lifetime budget admission is intentionally restricted to known
@@ -674,9 +681,10 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		// byte delivery or response conversion.
 		trace.SetDeliveredMode(deliveredMode)
 	}
-	if (tokenAdmission || budgetAdmission) && (responseMode == ResponseModeJSON || responseMode == ResponseModeSSE) {
+	if (tokenAdmission || budgetAdmission || completion != nil) && (responseMode == ResponseModeJSON || responseMode == ResponseModeSSE) {
 		if coding, err := responseObservationCoding(upstreamResponse.Header); err == nil {
 			responseObservation = newResponseObservation(handler.tokenConfig.MaxObservedResponseBytes, coding, selectedPricing)
+			responseObservation.completion = completion
 			if responseMode == ResponseModeJSON {
 				response = responseObservation.wrap(response)
 			}
@@ -940,6 +948,16 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 			return err
 		}
 		body, done := aggregation.JSON, aggregation.Done
+		if observation != nil {
+			cost, costErr := accounting.CalculateActualCost(aggregation.Usage, pricing)
+			if costErr != nil {
+				cost = accounting.UnknownMoney()
+			}
+			observation.setCanonical(aggregation.Usage, cost)
+			if observation.completion != nil {
+				observation.completion.finish(aggregation.Usage, cost)
+			}
+		}
 		// The compatibility decoder has already produced canonical usage. Settle
 		// the in-memory lease now, before bounded trailer draining or downstream
 		// writes can fail; neither failure invalidates usage already observed.
@@ -1410,29 +1428,24 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 
 func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		startedAt := time.Now()
 		terminal := newTerminalMetadataState()
 		if existing := terminalMetadataFromContext(request.Context()); existing != nil {
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
+		if trace := TraceFromContext(request.Context()); trace != nil {
+			trace.setCompletionOwnership(newCompletionOwnership(trace, completionLogger))
+		}
 		writer, wrapped := completionWriter(response, TraceFromContext(request.Context()), terminal)
 		next.ServeHTTP(wrapped, request)
-
-		// Copy only safe scalar values into the record before handing it to the
-		// worker. No request object or headers are retained by the logger.
-		if completionLogger != nil {
-			if trace := TraceFromContext(request.Context()); trace != nil {
-				trace.SetTerminalMetadata(terminal.get())
-				if record, err := trace.Complete(); err == nil {
-					completionLogger.Enqueue(record)
-					return
-				}
-			}
+		if trace := TraceFromContext(request.Context()); trace != nil {
+			trace.SetTerminalMetadata(terminal.get())
+		} else if completionLogger != nil {
 			completionLogger.Enqueue(CompletionRecord{RequestID: requestIDFromContext(request.Context()), Method: request.Method,
 				Path: boundedEscapedPath(request), Route: ClassifyRoute(request.Method, request.URL.Path), Status: writer.statusCode(),
-				Duration: time.Since(startedAt), Terminal: terminal.get(), ErrorCode: ErrorCodeUnknown})
+				Terminal: terminal.get(), ErrorCode: ErrorCodeUnknown})
 		}
+		writer.complete()
 	})
 }
 
@@ -1570,6 +1583,11 @@ func (writer *completionResponseWriterFlushHijacker) Hijack() (net.Conn, *bufio.
 }
 
 func (writer *completionResponseWriter) complete() {
+	if writer.trace != nil {
+		if ownership := writer.trace.completionOwnership(); ownership != nil {
+			ownership.complete()
+		}
+	}
 	if writer.trace != nil {
 		_, _ = writer.trace.Complete()
 	}

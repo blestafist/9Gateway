@@ -85,6 +85,7 @@ type UsageObservationJob struct {
 	Ticket        *limiter.TokenAdjustmentTicket
 	BudgetTicket  *limiter.BudgetAdjustmentTicket
 	Pricing       accounting.PricingResolution
+	Completion    *completionOwnership
 }
 
 // NewUsageObservationJobWithCoding validates a wire Content-Encoding value
@@ -171,6 +172,7 @@ type UsageObservationWorker struct {
 
 	mu        sync.Mutex
 	accepting bool
+	active    *completionOwnership
 	stopOnce  sync.Once
 	phase     atomic.Uint32
 
@@ -251,8 +253,12 @@ func (worker *UsageObservationWorker) run() {
 			select {
 			case job = <-worker.queue:
 				worker.releaseSlot()
+				worker.active = job.Completion
 				worker.mu.Unlock()
 				worker.process(job)
+				worker.mu.Lock()
+				worker.active = nil
+				worker.mu.Unlock()
 				continue
 			default:
 				worker.mu.Unlock()
@@ -265,7 +271,7 @@ func (worker *UsageObservationWorker) run() {
 
 func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	worker.processed.Add(1)
-	if job.Ticket == nil && job.BudgetTicket == nil {
+	if job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil {
 		worker.failed.Add(1)
 		return
 	}
@@ -273,7 +279,7 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	var actual int64
 	var usage accounting.Usage
 	var err error
-	canonical := job.BudgetTicket != nil || job.Pricing.Known()
+	canonical := job.Completion != nil || job.BudgetTicket != nil || job.Pricing.Known()
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -332,11 +338,18 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 			settleErr = errors.Join(settleErr, err)
 		}
 	}
+	if job.Completion != nil {
+		cost := accounting.UnknownMoney()
+		if costValue, costErr := accounting.CalculateActualCost(usage, job.Pricing); costErr == nil {
+			cost = costValue
+		}
+		job.Completion.finish(usage, cost)
+	}
 	if settleErr != nil {
 		worker.failed.Add(1)
 		return
 	}
-	if job.Ticket == nil && job.BudgetTicket == nil {
+	if job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil {
 		worker.failed.Add(1)
 		return
 	}
@@ -370,7 +383,7 @@ func (worker *UsageObservationWorker) Submit(job UsageObservationJob) bool {
 		invalidateObservationJob(job)
 		return false
 	}
-	if (job.Ticket == nil && job.BudgetTicket == nil) || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
+	if (job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil) || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
 		worker.dropped.Add(1)
 		invalidateObservationJob(job)
 		return false
@@ -431,6 +444,10 @@ func (worker *UsageObservationWorker) Enqueue(job UsageObservationJob) bool {
 // A nil worker still settles and invalidates the ticket, preserving the
 // conservative charge without leaking request resources.
 func (worker *UsageObservationWorker) CompleteAndSubmit(lease *limiter.ResourceLease, captured []byte, coding ContentCoding) bool {
+	return worker.completeAndSubmit(lease, captured, coding, nil, accounting.UnknownPricingResolution())
+}
+
+func (worker *UsageObservationWorker) completeAndSubmit(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, completion *completionOwnership, pricing accounting.PricingResolution) bool {
 	if lease == nil {
 		return false
 	}
@@ -438,13 +455,43 @@ func (worker *UsageObservationWorker) CompleteAndSubmit(lease *limiter.ResourceL
 	if ticket == nil {
 		return false
 	}
-	return worker.Submit(NewUsageObservationJob(captured, coding, ticket))
+	if completion != nil && !completion.transfer() {
+		ticket.Invalidate()
+		return false
+	}
+	job := NewUsageObservationJob(captured, coding, ticket)
+	job.Completion, job.Pricing = completion, pricing
+	return worker.Submit(job)
+}
+
+// SubmitForCompletion hands an already-settled response observation to the
+// worker. Unrestricted requests have no accounting ticket, but their traces
+// still use the same bounded canonical parser.
+func (worker *UsageObservationWorker) SubmitForCompletion(completion *completionOwnership, captured []byte, coding ContentCoding) bool {
+	if completion == nil || !completion.transfer() {
+		return false
+	}
+	if worker == nil {
+		completion.finish(accounting.Usage{}, accounting.UnknownMoney())
+		return false
+	}
+	return worker.Submit(NewUsageObservationJobForCompletion(captured, coding, completion))
+}
+
+func NewUsageObservationJobForCompletion(captured []byte, coding ContentCoding, completion *completionOwnership) UsageObservationJob {
+	job := NewUsageObservationJob(captured, coding, nil)
+	job.Completion = completion
+	return job
 }
 
 // CompleteAndSubmitWithPricing releases the composite lease before making a
 // nonblocking handoff, retaining independent token and budget ownership in the
 // bounded job. The lease itself is never retained by the worker.
 func (worker *UsageObservationWorker) CompleteAndSubmitWithPricing(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution) bool {
+	return worker.completeAndSubmitWithPricing(lease, captured, coding, pricing, nil)
+}
+
+func (worker *UsageObservationWorker) completeAndSubmitWithPricing(lease *limiter.ResourceLease, captured []byte, coding ContentCoding, pricing accounting.PricingResolution, completion *completionOwnership) bool {
 	if lease == nil {
 		return false
 	}
@@ -452,7 +499,13 @@ func (worker *UsageObservationWorker) CompleteAndSubmitWithPricing(lease *limite
 	if tickets.Token == nil && tickets.Budget == nil {
 		return false
 	}
-	return worker.Submit(NewUsageObservationJobWithPricing(captured, coding, tickets, pricing))
+	if completion != nil && !completion.transfer() {
+		invalidateObservationJob(UsageObservationJob{Ticket: tickets.Token, BudgetTicket: tickets.Budget})
+		return false
+	}
+	job := NewUsageObservationJobWithPricing(captured, coding, tickets, pricing)
+	job.Completion = completion
+	return worker.Submit(job)
 }
 
 // CompleteAndSubmitTokenDeferredBudgetConservative keeps token observation
@@ -498,11 +551,15 @@ func (worker *UsageObservationWorker) Shutdown(ctx context.Context) error {
 	}
 	worker.mu.Lock()
 	worker.accepting = false
+	active := worker.active
 	// Drain synchronously at the shutdown boundary. The worker may be blocked
 	// parsing an already-claimed job, but queued tickets must not remain valid
 	// until that parse returns.
 	worker.discardQueuedLocked()
 	worker.mu.Unlock()
+	if active != nil {
+		active.finish(accounting.Usage{}, accounting.UnknownMoney())
+	}
 	worker.stopOnce.Do(func() { close(worker.stop) })
 	select {
 	case <-worker.done:
@@ -553,7 +610,7 @@ func parseUsageObservation(data []byte, coding ContentCoding, maxBytes int64) (i
 	}
 	if trimmed[0] == '{' {
 		result, err := openai.ParseJSONUsage(trimmed)
-		if err != nil || !result.Observed || !result.Usage.Total().Known() {
+		if err != nil || !result.Observed {
 			return 0, errUsageObservationMalformed
 		}
 		return result.Usage.Total().Int64(), nil
@@ -585,10 +642,14 @@ func parseCanonicalUsageObservation(data []byte, coding ContentCoding, maxBytes 
 		return result.Usage, nil
 	}
 	result, err := openai.ObserveStream(bytes.NewReader(decoded), 64*1024, nil)
-	if err != nil || len(result.Errors) != 0 || !result.State.Usage.Total().Known() {
+	if err != nil || len(result.Errors) != 0 || !canonicalUsageKnown(result.State.Usage) {
 		return accounting.Usage{}, errUsageObservationMalformed
 	}
 	return result.State.Usage.Usage, nil
+}
+
+func canonicalUsageKnown(usage openai.UsageObservation) bool {
+	return usage.Input().Known() || usage.Output().Known() || usage.Total().Known() || usage.CachedInput().Known() || usage.ReasoningOutput().Known()
 }
 
 func invalidateObservationJob(job UsageObservationJob) {
@@ -597,6 +658,9 @@ func invalidateObservationJob(job UsageObservationJob) {
 	}
 	if job.BudgetTicket != nil {
 		job.BudgetTicket.Invalidate()
+	}
+	if job.Completion != nil {
+		job.Completion.finish(accounting.Usage{}, accounting.UnknownMoney())
 	}
 }
 

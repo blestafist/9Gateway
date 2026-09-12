@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T126`.
+Done: `T001`-`T127`.
 
-Current: `T127` - attach usage and actual cost to traces.
+Current: `T128` - measure SSE stream-close delay safely.
 
-Queued: `T127`-`T140` in dependency order from `TASKS.md`.
+Queued: `T128`-`T140` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

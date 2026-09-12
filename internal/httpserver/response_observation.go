@@ -15,10 +15,20 @@ type responseObservation struct {
 	maxBytes int64
 	coding   ContentCoding
 
-	bytes    []byte
-	overflow bool
-	eligible bool
-	pricing  accounting.PricingResolution
+	bytes          []byte
+	overflow       bool
+	eligible       bool
+	pricing        accounting.PricingResolution
+	completion     *completionOwnership
+	canonical      accounting.Usage
+	canonicalKnown bool
+	canonicalCost  accounting.Money
+}
+
+func (observation *responseObservation) setCanonical(usage accounting.Usage, cost accounting.Money) {
+	if observation != nil {
+		observation.canonical, observation.canonicalKnown, observation.canonicalCost = usage, true, cost
+	}
 }
 
 func newResponseObservation(maxBytes int64, coding ContentCoding, pricing ...accounting.PricingResolution) *responseObservation {
@@ -72,10 +82,26 @@ func (observation *responseObservation) finish(err error) {
 }
 
 func (observation *responseObservation) settle(lease *limiter.ResourceLease, worker *UsageObservationWorker, budgetConservative ...bool) {
-	if observation == nil || lease == nil {
+	if observation == nil {
 		return
 	}
 	if observation.eligible {
+		if observation.completion != nil && observation.canonicalKnown {
+			observation.completion.finish(observation.canonical, observation.canonicalCost)
+			// Conversion has already reconciled its lease synchronously. For a
+			// transparent path this branch is reached only after the parser has
+			// supplied the same canonical result.
+			return
+		}
+		if lease == nil && observation.completion != nil {
+			if worker == nil || !worker.SubmitForCompletion(observation.completion, observation.bytes, observation.coding) {
+				observation.completion.finish(accounting.Usage{}, accounting.UnknownMoney())
+			}
+			return
+		}
+		if lease == nil {
+			return
+		}
 		budgetSettled := len(budgetConservative) != 0 && budgetConservative[0]
 		if worker == nil {
 			// The convenience constructors do not own an observation worker. Both
@@ -95,7 +121,12 @@ func (observation *responseObservation) settle(lease *limiter.ResourceLease, wor
 		}
 		return
 	}
-	_ = lease.CompleteConservative()
+	if lease != nil {
+		_ = lease.CompleteConservative()
+	}
+	if observation.completion != nil {
+		observation.completion.finish(accounting.Usage{}, accounting.UnknownMoney())
+	}
 }
 
 type observedResponseWriter struct {

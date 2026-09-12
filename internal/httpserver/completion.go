@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+
+	"github.com/pestit/9gateway/internal/accounting"
 )
 
 // TerminalOutcome is a bounded, non-sensitive description of the request's
@@ -134,7 +136,7 @@ func (completionLogger *CompletionLogger) drain() {
 }
 
 func (completionLogger *CompletionLogger) write(record CompletionRecord) {
-	completionLogger.logger.Info("request completed",
+	args := []any{
 		"request_id", record.RequestID,
 		"method", record.Method,
 		"path", record.Path,
@@ -143,7 +145,29 @@ func (completionLogger *CompletionLogger) write(record CompletionRecord) {
 		"terminal_outcome", record.Terminal.Outcome,
 		"upstream_started", record.Terminal.UpstreamStarted,
 		"error_code", record.ErrorCode.String(),
-	)
+	}
+	if record.Usage.Input().Known() || record.Usage.Output().Known() || record.Usage.Total().Known() || record.Usage.CachedInput().Known() || record.Usage.ReasoningOutput().Known() {
+		args = append(args, "usage_input", traceCount(record.Usage.Input()), "usage_output", traceCount(record.Usage.Output()), "usage_total", traceCount(record.Usage.Total()))
+	}
+	if record.Cost.Known() {
+		args = append(args, "cost", traceMoney(record.Cost))
+	}
+	completionLogger.logger.Info("request completed", args...)
+}
+
+func traceCount[T interface{ Value() (int64, bool) }](count T) any {
+	value, known := count.Value()
+	if !known {
+		return nil
+	}
+	return value
+}
+
+func traceMoney(cost accounting.Money) any {
+	if !cost.Known() {
+		return nil
+	}
+	return cost.String()
 }
 
 // Enqueue hands off one completion record without waiting. It returns false
