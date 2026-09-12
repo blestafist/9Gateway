@@ -1,12 +1,13 @@
 # Current Work
 
-Current milestone: complete (`T101`-`T120`).
+Current milestone: persistent request observability and bounded body inspection
+(`T121`-`T140`).
 
 Done: `T001`-`T120`.
 
-Current: unset.
+Current: `T121` - define the canonical request trace record.
 
-Queued: unset.
+Queued: `T122`-`T140` in dependency order from `TASKS.md`.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
@@ -46,8 +47,13 @@ T119 replacement admission scopes active reservations to their captured
 total/day/month identities, so replacement cannot import unrelated active
 capacity while finalization remains on the admitting buckets;
 the optional Bifrost review and Apache-2.0/no-copy provenance are recorded in
-the budget implementation comments. Request-history/body persistence, metrics, `/ready`, CLI, tool-call
-execution/validation, and Web UI remain out of scope.
+the budget implementation comments. T121-T140 add one canonical request trace,
+safe structured completion fields, optional per-key bounded
+client/upstream/response body capture, SQLite request history, independent body
+retention, and a bounded best-effort history writer. Detailed telemetry may be
+dropped and must never control transport or accounting. `/metrics`, `/ready`, CLI,
+request-history admin APIs, tool-call execution/validation, and Web UI remain out
+of scope.
 Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
 completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion.
 

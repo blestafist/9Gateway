@@ -10,813 +10,780 @@ Every implementation task must finish with `go fmt ./...`, `go test ./...`, and
 `go build ./...`. Add behavioral tests in the same task as changed HTTP or
 streaming behavior. Update `CURRENT.md` and commit after completing one task.
 
-For accounting, limiter, pricing, budget, and observability tasks, first inspect
-the equivalent implementation in the optional local `.references/bifrost`
-checkout when it is available. Record the inspected Bifrost commit and source
-paths in the task commit message or an adjacent source comment/notice. Prefer a
-maintained permissive dependency, then a small isolated adaptation, then a clean
-minimal implementation. Do not import Bifrost architecture or make the ignored
-checkout a build/runtime dependency. Before adapting code or data, verify its
-file-level provenance and dependency license chain, preserve required notices,
-and mark adapted files.
+For observability, accounting, limiter, pricing, budget, and body-inspection
+tasks, first inspect the equivalent implementation in the optional local
+`.references/bifrost` checkout when it is available. Record the inspected
+Bifrost commit and source paths in the task commit message or an adjacent source
+comment/notice. Prefer a maintained permissive dependency, then a small isolated
+adaptation, then a clean minimal implementation. Do not import Bifrost
+architecture or make the ignored checkout a build/runtime dependency. Before
+adapting code or data, verify file-level provenance and the dependency license
+chain, preserve required notices, and mark adapted files.
 
-## Pricing Foundation
+## Request Trace Foundation
 
-### T101 - Define exact money values
+### T121 - Define the canonical request trace record
 
-Goal: introduce one protocol-independent money representation that cannot lose
-precision or overflow when pricing and budgets are added.
-
-Scope:
-
-- Add an immutable `accounting.Money` value measured in integer USD micros,
-  where `1 USD = 1_000_000 micros`; never represent money with `float32` or
-  `float64` in domain, policy, persistence, or HTTP code.
-- Preserve known zero separately from unknown cost. Unknown is a first-class
-  state, not an alias for zero, and must propagate through arithmetic unless an
-  operation has all required known operands.
-- Accept only non-negative known values and provide checked add, subtract, and
-  comparison operations suitable for `spent + reserved + candidate` admission.
-- Define safe conversion helpers only for integer micros and canonical decimal
-  display. Decimal parsing must reject signs, exponent notation, excess precision
-  beyond six fractional USD digits, ambiguous separators, and overflow.
-- Keep the type independent of pricing rules, models, HTTP, policy, limiter,
-  SQLite, configuration, and token protocol parsing.
-
-Acceptance and tests:
-
-- Table tests cover unknown, explicit zero, one micro, whole/fractional USD,
-  canonical formatting, maximum representable value, negative input, malformed
-  decimal input, excess precision, checked underflow, and checked overflow.
-- No successful parse rounds a monetary value, and formatting followed by parsing
-  preserves every representable known value.
-- Public APIs do not expose mutable internal state or an unchecked raw arithmetic
-  path that later budget code could misuse.
-
-Reference: `docs/architecture/accounting.md#pricing`,
-`docs/architecture/repository.md#dependencies`.
-
-Dependencies and out of scope: depends on T100. Do not add pricing configuration,
-model matching, cost calculation, policy fields, limiter state, or persistence.
-
-### T102 - Validate pricing configuration
-
-Goal: define the strict deployment-level pricing table used to estimate and
-reconcile costs without making pricing a runtime database setting.
+Goal: define one immutable, storage-independent completion record that every
+later logging and request-history path can consume without reconstructing HTTP
+lifecycle semantics.
 
 Scope:
 
-- Add a `pricing.rules` YAML list. Each rule contains `model`,
-  `input_per_million_micros`, and `output_per_million_micros`; prices are
-  non-negative integer USD micros per one million tokens.
-- Treat an exact model string and a model glob as the only supported selectors.
-  Reuse or extract the existing slash-aware glob semantics rather than creating
-  regex support or subtly different matching rules.
-- Preserve declaration order because T103 uses it as deterministic precedence
-  among matching glob rules. Reject duplicate exact selectors and duplicate glob
-  selectors after compilation; reject empty/invalid UTF-8 patterns, invalid glob
-  syntax, null fields, negative prices, values outside T101's safe range, and
-  unknown YAML fields.
-- Allow an empty table so deployments without budget enforcement remain valid.
-  Pricing contains no secret and receives no environment-substitution syntax.
-- Compile and validate once during configuration loading, before the listener
-  starts; no request may parse YAML or compile a glob.
+- Replace or extend the narrow `CompletionRecord` with typed fields for request
+  ID, stable key ID/name when authenticated, method, bounded route class, model,
+  requested mode, actual upstream mode, delivered mode, statuses, terminal
+  outcome, safe error code, byte counts, canonical usage, exact cost, and timing.
+- Preserve unknown separately from known zero for stream mode, status, token
+  counts, money, timestamps, and durations. Use closed enums for route/modes and
+  existing `accounting.Usage`, `accounting.Money`, and `TerminalMetadata` values
+  rather than parallel numeric representations.
+- Define byte and time units explicitly. Persistable durations must be checked,
+  non-negative integer microseconds; wall timestamps use canonical UTC Unix
+  microseconds while in-process elapsed time may retain monotonic clock behavior.
+- Construction and accessors must defensively copy mutable input. The record may
+  not retain `*http.Request`, contexts, headers, bodies, principals, policies,
+  pricing rules, leases, tickets, loggers, repositories, or arbitrary errors.
 
 Acceptance and tests:
 
-- Strict config tests cover an omitted/empty table, exact and glob entries, zero
-  prices, ordered rules, duplicate and malformed patterns, missing/null fields,
-  negative/overflowing values, and unknown fields at every new level.
-- Existing minimal configuration remains valid and receives an empty pricing
-  table without invented wildcard prices.
-- Configuration errors contain field/rule positions but never upstream/admin
-  credentials or complete configuration dumps.
+- Table tests cover complete, rejected, pre-upstream, cancelled, JSON, opaque,
+  transparent SSE, and converted SSE records plus every known/unknown-zero case.
+- Validation rejects invalid enum values, negative/overflowing counts or times,
+  finish-before-start, impossible mode combinations, and malformed request IDs.
+- Tests prove caller-owned values cannot mutate a built record and formatting or
+  validation never exposes credentials, body fragments, pricing rates/rules, or
+  SQL details; a known final cost remains an allowed typed accounting value.
 
-Reference: `docs/architecture/accounting.md#pricing`,
-`docs/architecture/operations.md#configuration`,
-`docs/architecture/policy.md#effective-policy`.
+Reference: `docs/architecture/observability.md#request-trace`,
+`docs/architecture/storage.md#requests-and-bodies`.
 
-Dependencies and out of scope: depends on T101. Do not put pricing in SQLite,
-add hot reload, aliases, provider routing, cached-token discounts, budgets, or
-request-path lookup.
+Dependencies and out of scope: depends on T120. Do not instrument HTTP, add SQL,
+body capture, configuration, metrics, retention, or admin endpoints.
 
-### T103 - Resolve model pricing deterministically
+### T122 - Add request-local trace state
 
-Goal: select one immutable pricing rule for a model with explicit, testable
-precedence and an honest unknown result.
+Goal: collect T121 fields through one request lifecycle and freeze them exactly
+once without introducing shared mutable telemetry state.
 
 Scope:
 
-- Add a pricing resolver in `internal/accounting` (or the smallest adjacent
-  package consistent with current boundaries) built from T102's validated rules.
-- An exact selector always wins over every glob regardless of declaration order.
-  If no exact rule matches, the first matching glob in configuration order wins.
-  If nothing matches, return an explicit unknown result rather than a zero-price
-  synthetic rule.
-- Match the complete model string with the existing slash-aware glob behavior;
-  do not strip provider prefixes, lowercase, normalize, alias, or infer models.
-- Make the resolver immutable and safe for concurrent lookups. Return copied
-  values so request code cannot mutate the process-owned table.
-- Keep lookup local and bounded: no SQL, network calls, filesystem reads, locks
-  on each request, or provider discovery.
+- Add a request-local trace state at the existing request-ID middleware boundary.
+  Provide narrow one-shot setters for authentication, request metadata, upstream
+  start/headers, response mode, first downstream byte, usage/cost, error, terminal
+  outcome, and completion; later duplicate writes must not corrupt earlier facts.
+- Use an injectable clock exposing wall and monotonic time so latency tests use no
+  sleeps. Define unset behavior for milestones never reached and clamp/fail safely
+  if a test clock moves backwards.
+- Keep trace mutation concurrency-safe for cancellation, transport, observation,
+  and deferred completion races. Freezing is idempotent and returns independent
+  immutable snapshots; no setter may block on logging, parsing, SQL, or a queue.
+- Freeze a base completion at handler end. Fields available only from deferred
+  response observation are represented by a separate one-shot immutable
+  enrichment merged into one final T121 record off the response path; neither the
+  base snapshot nor final record may be mutated after construction.
+- Preserve the existing request ID response header and terminal metadata contract.
+  Do not move the `client.Do` boundary or change lease finalization ordering.
 
 Acceptance and tests:
 
-- Tests cover exact-over-glob, first-glob precedence, overlapping wildcards,
-  slash boundaries, escaped metacharacters, Unicode model names, explicit
-  zero-price rules, unknown models, and concurrent lookup under `go test -race`.
-- Unknown and a matched all-zero rule remain distinguishable.
-- Resolver construction cannot accept rules that bypass T102 validation.
+- Deterministic tests cover every setter order, duplicate/concurrent setters,
+  freeze versus cancellation, missing milestones, backwards clocks, and overflow.
+- `go test -race` proves one trace cannot affect another and concurrent finalizers
+  cannot produce partial records, data races, deadlocks, or post-freeze mutation.
+- Trace state retains no request body, header map, raw key, policy, lease, ticket,
+  response writer, or unbounded model/error string.
 
-Reference: `docs/architecture/accounting.md#pricing`,
-`docs/architecture/repository.md#dependencies`.
-
-Dependencies and out of scope: depends on T102. Do not calculate request cost,
-read request bodies, query `/v1/models`, add model aliases, or enforce budget.
-
-### T104 - Calculate usage and reservation cost
-
-Goal: calculate exact bounded cost from separate input/output token counts and a
-resolved pricing rule.
-
-Scope:
-
-- Implement `ceil((input_tokens * input_rate + output_tokens * output_rate) /
-  1_000_000)` in integer arithmetic, using checked multiplication/addition and no
-  floating point. Ceiling is required so enforcement never understates a
-  fractional micro; round only once after summing both components.
-- Calculate actual cost only when both canonical input and output counts are
-  known. A known total without both components is insufficient because rates can
-  differ; cached/reasoning subset counts are not added again.
-- Calculate reservation cost from T086's explicit estimated input and potential
-  output components, not from only its combined total.
-- Return unknown when pricing is unresolved or required usage components are
-  absent. Invalid/overflowing arithmetic returns a safe typed error and never a
-  wrapped or zero cost.
-- Keep this pure calculation independent of limiter state, HTTP behavior,
-  persistence, response mode, and policy decisions.
-
-Acceptance and tests:
-
-- Table tests cover exact-million rates, fractional-micro ceiling, combined
-  rounding versus per-component rounding, zero tokens/rates, maximum safe values,
-  multiplication/addition overflow, missing input/output, total-only usage,
-  cached/reasoning subsets, and unknown pricing.
-- Equivalent JSON and SSE canonical usage produce the same known actual cost.
-- Errors and formatted values contain no model request body or credential data.
-
-Reference: `docs/architecture/accounting.md#usage-and-estimation`,
-`docs/architecture/accounting.md#pricing`.
-
-Dependencies and out of scope: depends on T081-T086 and T101-T103. Do not add
-upstream monetary metadata parsing, policy, reservations, SQLite, or telemetry.
-
-## Total Budget Enforcement
-
-### T105 - Add total budget policy
-
-Goal: add a strict per-key lifetime budget contract while preserving every
-existing key policy and admin full-replacement behavior.
-
-Scope:
-
-- Add `budget_limits` to stored policy JSON as a list whose first supported entry
-  is `{ "amount_micros": N, "period": "total" }`. The list form is intentional
-  preparation for T117-T118; in this task reject `day` and `month` rather than
-  silently accepting unenforced values.
-- Require positive integer micros, exactly one entry per period, valid non-null
-  fields, and strict rejection of duplicates, unknown fields, decimals, strings,
-  and overflow. Empty/absent limits mean budget-unrestricted.
-- Compile budget values into immutable `auth.EffectivePolicy`; expose copied
-  storage-independent values and preserve absence separately from zero.
-- Extend admin full-policy replacement and responses so a valid total budget is
-  validated, persisted, published atomically with the other policy, and survives
-  reopen. Invalid replacement leaves SQLite and the auth snapshot unchanged.
-- Pricing remains deployment configuration. Never serialize rates or a pricing
-  rule into per-key policy.
-
-Acceptance and tests:
-
-- Policy and real admin HTTP tests cover valid combined policy, absent/empty
-  budget, exact integer boundaries, duplicate total entries, zero/negative/null,
-  unsupported periods, unknown fields, idempotent replacement, immediate snapshot
-  visibility, and persistence after reopen.
-- Existing model, request, token, concurrency, authentication, and token-policy
-  replacement semantics remain unchanged.
-- Admin output and errors contain no raw key, digest, pepper, pricing table, or
-  credential.
-
-Reference: `docs/architecture/policy.md#effective-policy`,
-`docs/architecture/accounting.md#budget`,
-`docs/architecture/storage.md#api-keys`.
-
-Dependencies and out of scope: depends on T104 and existing policy/admin flow.
-Do not add counters, admission, day/month support, persistence aggregates, a new
-budget-specific admin route, or pricing overrides per key.
-
-### T106 - Build conservative cost plans
-
-Goal: turn an admitted token reservation plan and resolved model price into one
-safe budget reservation amount before upstream work.
-
-Scope:
-
-- Add a pure budget planner that resolves pricing for the request model and uses
-  T104 to price T086's input/output reservation components.
-- A key with no budget skips this planner. A key with any budget must fail closed
-  when model metadata is missing/malformed/oversized, pricing is unknown, the
-  price calculation overflows, or no positive cost can safely represent the
-  request; never forward budget-governed work as an implicit zero-cost request.
-- A deliberately configured all-zero matched pricing rule produces known zero
-  cost and is admissible without inventing a one-micro reservation. Preserve its
-  distinction from unknown pricing.
-- Return the selected rule identity, known reservation cost, and source metadata
-  needed by later traces, without retaining request bytes or a mutable rule.
-- Keep HTTP status selection and limiter state outside the planner.
-
-Acceptance and tests:
-
-- Tests cover exact/glob/zero-price rules, unknown/empty/malformed models,
-  estimate and fallback token plans, absent output limits, calculation overflow,
-  and model strings at configured bounds.
-- Every nonzero-priced successful plan has positive known reserved micros; every
-  unknown case fails closed only when budget policy requires a plan.
-- Input plans/rules are not mutated and errors contain no body fragments.
-
-Reference: `docs/architecture/accounting.md#pricing`,
-`docs/architecture/accounting.md#budget`,
+Reference: `docs/architecture/observability.md#request-trace`,
 `docs/architecture/repository.md#request-orchestration`.
 
-Dependencies and out of scope: depends on T103-T105 and T086. Do not reserve
-state, return HTTP errors, observe actual usage, persist spend, or support an
-upstream-reported cost.
+Dependencies and out of scope: depends on T121. Do not yet populate HTTP fields,
+change completion logging, parse usage, persist records, or capture bodies.
 
-### T107 - Reserve lifetime budget atomically
+### T123 - Record safe gateway error codes
 
-Goal: atomically prevent concurrent requests for one key from collectively
-exceeding its total budget.
-
-Scope:
-
-- Add an in-memory budget limiter keyed only by stable key ID. Track lifetime
-  spent separately from active reservations using T101 money values.
-- Admit when `spent + active reservations + candidate <= total limit`; reject
-  atomically otherwise. Empty policy remains unlimited. A known zero candidate
-  is a valid no-op reservation.
-- Return an immutable reservation carrying the exact admitted amount and budget
-  identity. Do not expose raw mutable counters.
-- Use checked arithmetic throughout. Corrupt/overflowing state fails closed and
-  cannot partially reserve capacity.
-- Inspect Bifrost budget/concurrency algorithms before implementation, but retain
-  this gateway's single-process reservation semantics and document whether any
-  isolated logic was adapted.
-
-Acceptance and tests:
-
-- Unit tests cover exact capacity, one-micro rejection, zero cost, separate keys,
-  unlimited keys, already-spent capacity, overflow, and deterministic cleanup.
-- Barrier-based concurrent attempts cannot collectively reserve above the total
-  under `go test -race`; rejected admission changes neither spent nor reserved.
-- Limiter operations perform no SQL, parsing, logging, network, or HTTP work.
-
-Reference: `docs/architecture/accounting.md#budget`,
-`docs/architecture/policy.md#lease`,
-`docs/architecture/testing.md#limit-tests`.
-
-Dependencies and out of scope: depends on T101 and T105-T106. Do not reconcile
-actual cost, compose token/concurrency leases, persist spent, or add periods.
-
-### T108 - Reconcile budget reservations once
-
-Goal: settle each admitted budget reservation exactly once without leaking,
-double-spending, or incorrectly refunding ambiguous upstream work.
+Goal: attach a stable, secret-safe error classification to every gateway-owned
+rejection or failure without storing arbitrary error text.
 
 Scope:
 
-- Add idempotent known-cost commit, conservative completion, and proven
-  pre-upstream release. Known commit replaces the reservation with actual cost,
-  whether lower or higher; over-budget actual cost becomes recorded debt that
-  blocks later admission rather than being truncated.
-- Conservative completion commits the full reserved cost when upstream may have
-  started and actual cost is unknown. Pre-upstream release commits zero.
-- Add deferred settlement equivalent to token adjustment tickets: atomically
-  commit the conservative reservation and return a one-shot ticket that may later
-  replace it with known actual cost. Dropped/invalidated tickets retain the safe
-  conservative charge.
-- Ensure repeated/concurrent terminal operations return the first result and
-  never underflow reserved/spent values. Invalid actual cost settles
-  conservatively and returns a typed safe error.
-- Emit a narrow committed-spend delta only after in-memory state changes. Its sink
-  contract must be nonblocking and must not be required for limiter correctness.
+- Define a closed error-code type covering current authentication, disabled or
+  expired key, malformed request, model, request-window, concurrency, token,
+  budget, upstream connection/timeout, response transport, conversion,
+  cancellation, unsupported response, and internal failure paths.
+- Make `writeGatewayError*`, authentication middleware, policy admission, proxy
+  dispatch, and cancellation set the trace code chosen for the client-visible
+  response. Preserve transparent upstream 4xx/5xx bodies and classify them without
+  replacing them with gateway errors.
+- Keep `TerminalOutcome`, HTTP status, and safe error code separate. Upstream
+  status alone is not an internal error string, and cancellation must not be
+  reported as success merely because headers were already written.
+- Never retain or log `error.Error()`, URLs with credentials, parser excerpts,
+  Authorization values, SQL errors, request payloads, or response payloads.
 
 Acceptance and tests:
 
-- Tests cover refund, exact match, actual-over-reservation debt, zero-cost actual,
-  conservative completion, pre-start release, deferred lower/higher adjustment,
-  invalidation, double/concurrent finalization, sink ordering, sink re-entry, and
-  arithmetic faults.
-- Active reservations always reach zero exactly once; failed adjustment leaves
-  the conservative charge intact.
-- Finalization and sink notification do not parse usage, send HTTP, or perform
-  SQLite work.
+- Real handler tests map every existing rejection and lifecycle failure to one
+  stable code, status, terminal outcome, and upstream-start value.
+- Upstream error passthrough remains byte/header/status identical; successful and
+  ordinary upstream 4xx/5xx records do not invent a gateway error body.
+- Secret canary tests cover raw keys, admin/upstream credentials, pepper, digest,
+  malformed payload fragments, database errors, and escaped upstream URLs.
 
-Reference: `docs/architecture/accounting.md#budget`,
-`docs/architecture/policy.md#lease`,
-`docs/architecture/storage.md#boundaries`.
+Reference: `docs/architecture/observability.md#logging`,
+`docs/architecture/transport.md#generic-passthrough`,
+`docs/architecture/transport.md#cancellation`.
 
-Dependencies and out of scope: depends on T107. Do not integrate request
-transport, calculate prices inside the limiter, persist deltas, or add periods.
+Dependencies and out of scope: depends on T122. Do not persist free-form errors,
+rewrite upstream errors, add retries, metrics, SQL, or new public error responses.
 
-### T109 - Compose budget into request lease
+### T124 - Trace downstream status bytes and TTFT
 
-Goal: make concurrency, token, and budget reservations one idempotent ownership
-unit so partial admission and every cleanup path settle all resources together.
+Goal: measure committed response status, successfully delivered bytes, first-byte
+latency, and handler completion without changing `ResponseWriter` behavior.
 
 Scope:
 
-- Extend the existing `ResourceLeaseCoordinator` and `ResourceLease` rather than
-  introducing a parallel HTTP lifecycle abstraction. Acquire in documented order:
-  concurrency, tokens, then budget.
-- Roll back only newly acquired refundable resources if a later stage rejects:
-  token rejection releases concurrency; budget rejection releases token
-  reservation before upstream and concurrency. Request-count consumption remains
-  outside the lease and is not refunded.
-- Add budget to known, conservative, pre-upstream, and deferred outcomes. Known
-  completion accepts canonical usage/cost information sufficient to settle both
-  token and budget reservations without one succeeding twice if the other errors.
-- Deferred transport completion must release concurrency immediately, commit both
-  conservative reservations, and return independent one-shot adjustment ownership
-  suitable for the bounded usage worker; it must not retain the composite lease.
-- Preserve provisional concurrency during bounded request inspection and all
-  concurrency/token-only callers.
+- Extend the existing `completionResponseWriter`; do not add a second competing
+  outer wrapper. Record explicit or implicit status, bytes reported successfully
+  written, first successful non-empty body write, and completion in T122 state.
+- Preserve `Unwrap` and `http.ResponseController` behavior, including `FlushError`,
+  implicit 200 on successful flush, unsupported-operation errors, short writes,
+  and the rule that the first committed status wins.
+- Define TTFT as request start to first successfully written non-empty downstream
+  body byte. Header-only and empty responses retain unknown TTFT rather than zero.
+- Count only bytes accepted by downstream. Failed or short writes must never be
+  reported as complete delivery, and instrumentation must not add flushes.
 
 Acceptance and tests:
 
-- Tests cover every unlimited/configured combination, each rejection stage,
-  rollback ordering, known/conservative/pre-start/deferred outcomes, zero-price
-  budgets, repeated concurrent cleanup, and immediate capacity reuse.
-- No failure can retain only one of concurrency, token, or budget while returning
-  rejection; no active counter underflows.
-- Existing token lifecycle tests remain behaviorally valid after the focused
-  extension.
+- Tests cover implicit/explicit status, repeated `WriteHeader`, empty writes,
+  short writes, write errors, header-only responses, flush-before-write, hijack or
+  unsupported controller behavior, cancellation, and concurrent finalization.
+- Existing SSE first-flush and EOF timing regressions pass unchanged; wrapping
+  does not remove supported interfaces or alter response bytes and headers.
+- Byte/timing bookkeeping performs no parsing, allocation proportional to body
+  size, logging, queue operation, SQL, or goroutine creation per write.
 
-Reference: `docs/architecture/policy.md#lease`,
-`docs/architecture/repository.md#request-orchestration`,
-`docs/architecture/testing.md#limit-tests`.
+Reference: `docs/architecture/observability.md#request-trace`,
+`docs/architecture/observability.md#logging`.
 
-Dependencies and out of scope: depends on T090 and T108. Do not add HTTP
-admission, usage parsing, persistence, daily/monthly periods, or telemetry.
+Dependencies and out of scope: depends on T122-T123. Do not capture body content,
+measure meaningful SSE events, parse usage, or persist telemetry.
 
-### T110 - Enforce budget preflight admission
+### T125 - Trace identity route and request metadata
 
-Goal: resolve pricing and reserve budget after request/model checks but before
-`client.Do` can start upstream work.
+Goal: populate safe request identity and metadata from facts already available to
+authentication and policy inspection without broadening synchronous inspection.
 
 Scope:
 
-- Wire the immutable pricing resolver, T106 plan, budget limiter, and T109 lease
-  into authenticated `/v1/*` orchestration. Budget-governed generation requests
-  require bounded model/token metadata and known pricing; unrestricted requests
-  retain the current minimal transparent path.
-- Reuse the existing inspected byte-for-byte replay for known JSON chat/Responses
-  requests. Unknown endpoints and uninspectable requests under a budget fail
-  closed before upstream because a model price cannot safely be selected; do not
-  deserialize/rewrite bodies or accept a client-supplied price.
-- Keep known non-generating `GET /v1/models` budget-free, matching token behavior.
-- Return OpenAI-style HTTP 429 `budget_exceeded` for insufficient available
-  budget. Return a safe controlled gateway error for unknown pricing/metadata;
-  neither rejection reaches upstream. Do not provide `Retry-After` for lifetime
-  budget because no time reset exists.
-- Preserve request-window no-refund semantics and the established
-  `client.Do` boundary between zero release and conservative finalization.
+- Record stable key ID and bounded key-name snapshot only after authentication.
+  Invalid, disabled, expired, health, and admin requests keep nullable key identity
+  and must never expose raw key, prefix-as-authenticator, digest, or policy JSON.
+- Define bounded route classes for health, admin, known generation, models, and
+  generic `/v1/*`; preserve method and escaped path separately where T121 allows.
+- Feed model and requested stream mode from existing `RequestMetadata` results.
+  Preserve absent, false, true, malformed, oversized, and not-inspected states.
+- Do not force unrestricted or generic bodies through `InspectRequestBody` merely
+  to improve telemetry. Existing policy-driven inspection and byte-for-byte replay
+  remain the only synchronous metadata source in this task.
 
 Acceptance and tests:
 
-- Real HTTP tests cover exact/glob/zero prices, exact capacity, budget rejection,
-  token-before-budget rejection, separate keys, concurrent reservations, unknown
-  model/price, malformed/oversized body, `/v1/models`, and zero upstream calls for
-  every rejected request.
-- Admitted request method/path/query/headers/body and cancellation remain
-  unchanged; no pricing or budget headers are added downstream.
-- No-budget keys show no budget lookup/reservation allocation on the hot path.
+- Tests cover authenticated/unauthenticated/admin/health traffic, known and
+  generic routes, malformed and oversized JSON, absent/boolean stream, Unicode
+  bounded models, and multiple keys without identity crossover.
+- Unrestricted generic chunked uploads begin upstream without full pre-read and
+  preserve method, escaped path, query, headers, content length, and body bytes.
+- Trace output contains no raw key, Authorization, policy JSON, prompt fragment,
+  query credential, or unbounded path/model/name value.
 
-Reference: `docs/architecture/repository.md#request-orchestration`,
-`docs/architecture/accounting.md#budget`,
+Reference: `docs/architecture/observability.md#request-trace`,
 `docs/architecture/transport.md#request-body`,
-`docs/architecture/testing.md#limit-tests`.
+`docs/architecture/repository.md#request-orchestration`.
 
-Dependencies and out of scope: depends on T091-T096 and T103-T109. Do not
-reconcile actual cost yet, persist spend, support generic unknown endpoint
-pricing, add retries, or interrupt streams.
+Dependencies and out of scope: depends on T122-T124. Do not add optional body
+logging, new body parsing, endpoint rejection, storage, or admin history APIs.
 
-## Actual Cost Reconciliation
+### T126 - Trace upstream and response modes
 
-### T111 - Reconcile transparent JSON cost
-
-Goal: replace conservative budget charges with actual JSON response cost without
-changing response bytes, status, headers, or completion timing.
+Goal: measure the exact upstream boundary and distinguish requested, actual
+upstream, and delivered response modes without changing dispatch decisions.
 
 Scope:
 
-- Extend the bounded usage-observation job/ticket contract to carry immutable
-  selected pricing and both token/budget adjustment ownership, never a lease,
-  request headers, raw key, model body, or unbounded bytes.
-- Reuse T082 canonical JSON usage off the response path, calculate T104 actual
-  cost only when input/output and pricing are known, then adjust token total and
-  budget cost independently exactly once.
-- Missing/partial/invalid usage, total-only usage, unsupported coding, overflow,
-  capture truncation, downstream failure, parser failure, queue saturation, and
-  shutdown retain the conservative budget charge.
-- Preserve identity/gzip wire and decoded bounds. Client delivery and concurrency
-  release occur before nonblocking worker submission exactly as in T093.
-- Keep upstream 4xx/5xx byte-transparent and use the same known/unknown accounting
-  rule rather than assuming errors cost zero.
+- Record immediately before `client.Do`, immediately after headers return, and at
+  dispatch selection. Upstream-header latency starts at the `client.Do` boundary,
+  not at request arrival or after response classification.
+- Record upstream status independently from downstream status. Classify actual
+  response with existing `Content-Type` logic as opaque, JSON, or SSE; record
+  delivered mode separately when SSE is converted to JSON.
+- Preserve unknown mode for connection failures or malformed/ambiguous content
+  types exactly as current transport does. Do not sniff bodies for telemetry.
+- Keep cancellation-before-cleanup and all token/budget lease semantics unchanged.
+  Instrumentation remains local and cannot delay `client.Do`, headers, dispatch,
+  first byte, or concurrency release.
 
 Acceptance and tests:
 
-- Real HTTP tests cover actual below/equal/above reserve, zero cost, missing one
-  token component, total-only usage, absent/invalid usage, gzip, overflow,
-  over-bound body, upstream errors, blocked worker, queue drop, and shutdown.
-- Known actual usage/cost adjusts each limiter once; every unknown case leaves no
-  active reservation or concurrency slot and retains both conservative charges.
-- A blocked pricing calculation/worker cannot delay body bytes or EOF, and
-  responses remain byte/header/status identical.
+- Fake-clock and real HTTP tests cover connection failure, JSON, opaque, SSE,
+  malformed/repeated content type, upstream errors, conversion, cancellation
+  before/after headers, and differing upstream/downstream statuses.
+- Actual format always comes from response headers, never requested stream mode;
+  converted SSE records requested false, upstream SSE, and delivered JSON.
+- Proxy method/path/query/headers/body/status/response headers/bytes and existing
+  lifecycle accounting tests remain unchanged.
 
-Reference: `docs/architecture/accounting.md#pricing`,
-`docs/architecture/observability.md#telemetry`,
-`docs/architecture/transport.md#generic-passthrough`.
+Reference: `docs/architecture/transport.md#response-classification`,
+`docs/architecture/observability.md#request-trace`.
 
-Dependencies and out of scope: depends on T092-T093, T104, and T110. Do not
-persist request history, rewrite JSON, parse upstream monetary metadata, or add
-period budgets.
+Dependencies and out of scope: depends on T124-T125. Do not sniff response bodies,
+change conversion support, add retries/timeouts, parse SSE, or persist records.
 
-### T112 - Reconcile converted SSE cost
+### T127 - Attach usage and actual cost to traces
 
-Goal: calculate and commit actual cost from canonical usage already produced by
-the explicit SSE-to-JSON compatibility path.
+Goal: report canonical usage and exact actual cost without making detailed
+telemetry part of token or budget enforcement correctness.
 
 Scope:
 
-- Carry the immutable selected pricing/budget settlement data beside the existing
-  conversion lease without reparsing rendered JSON or changing aggregation output.
-- After aggregation has valid canonical input and output usage, calculate actual
-  cost and synchronously finalize token and budget reservations through T109's
-  bounded in-memory known outcome. If cost cannot be known, settle budget
-  conservatively while still allowing known token-total reconciliation.
-- Preserve already-observed valid cost when later bounded drain or downstream
-  write fails. Conversion failure before sufficient usage remains conservative
-  after upstream start.
-- Keep exact `[DONE]`, EOF-without-DONE, gzip trailer validation, compressed-wire
-  bounds, tool-call aggregation, header sanitation, and cancellation unchanged.
-- No queue, SQL, logging, or additional parsing may be introduced before the
-  generated response write.
+- Carry canonical usage from converted SSE directly into trace state. Extend the
+  bounded transparent JSON/SSE observation result so the same parsed canonical
+  usage can reach telemetry after accounting tickets settle, without reparsing.
+- Add one-shot completion ownership beside, but independent from, accounting
+  tickets: handler completion freezes the T122 base; immediate paths finalize it
+  directly, while observed transparent responses transfer it to the existing
+  bounded worker, which merges one immutable usage/cost enrichment and emits one
+  final record. Submission drop, invalidation, parse failure, or shutdown must
+  emit the final record promptly with those fields unknown rather than lose it or
+  wait on parsing.
+- Calculate reportable actual cost from immutable pricing and differentiated
+  input/output usage using existing checked integer-micros calculation. Resolve
+  pricing for telemetry even when a key has no budget, using the startup-built
+  local resolver only; unknown model/price remains unknown, not zero.
+- Keep known token total independent from differentiated cost. Explicit zero-price
+  and zero-token results are known zero; total-only, partial, malformed, overflow,
+  unsupported coding, truncation, or dropped observation leaves cost unknown.
+- Accounting reconciliation must happen with existing guarantees regardless of
+  whether trace enrichment succeeds. A telemetry drop may never lose, delay,
+  refund, or duplicate token/budget settlement.
 
 Acceptance and tests:
 
-- Real HTTP tests cover usage before/after finish reason, exact `[DONE]`, clean
-  EOF, actual lower/higher, missing input/output, zero-price rule, malformed SSE,
-  valid/corrupt gzip, bounded-drain failure, downstream failure, and cancellation.
-- Token and budget reservations settle once on every path; known token total may
-  reconcile even when differentiated cost remains unknown.
-- Existing Bifrost mismatch, fragmented tool-call, and blocked-after-DONE
-  regressions remain valid with unchanged generated JSON.
+- Tests cover JSON/SSE/conversion parity, priced no-budget requests, exact/glob
+  and zero prices, unknown pricing, partial/total-only usage, gzip, malformed and
+  over-bound bodies, arithmetic overflow, upstream errors, and queue shutdown.
+- Completion ownership tests cover immediate finalize, worker enrichment,
+  submission drop, parser failure, invalidation, concurrent duplicate completion,
+  and shutdown; every request emits exactly one final record without waiting.
+- Known actual accounting and telemetry values agree; each adjustment ticket is
+  consumed once and no lease/ticket is retained solely for request history.
+- Blocked or failed telemetry enrichment cannot delay response bytes, flush, EOF,
+  cancellation, concurrency reuse, or critical persistence.
 
-Reference: `docs/architecture/streaming.md#sse-to-json`,
+Reference: `docs/architecture/accounting.md#usage-and-estimation`,
 `docs/architecture/accounting.md#pricing`,
-`docs/architecture/accounting.md#budget`.
+`docs/architecture/observability.md#telemetry`.
 
-Dependencies and out of scope: depends on T094, T104, and T109-T111. Do not alter
-transparent SSE, synthesize missing usage, persist spend, or parse tool arguments.
+Dependencies and out of scope: depends on T121-T126 and T111-T113. Do not parse
+upstream monetary metadata, store pricing rules, change limits, or add SQL.
 
-### T113 - Reconcile transparent SSE cost
+### T128 - Measure SSE stream-close delay safely
 
-Goal: adjust budget from actual SSE usage while preserving the direct
-`read -> write -> flush -> EOF` transport contract.
+Goal: measure last meaningful upstream event and downstream stream-close delay
+without parsing before delivery or allowing protocol metadata to control EOF.
 
 Scope:
 
-- Extend T095's request-local bounded side capture and T092 worker job with
-  immutable pricing and budget adjustment ownership. Copy bytes only after a
-  successful downstream write and flush; never wait for event framing first.
-- At physical upstream EOF, release concurrency and conservatively commit token
-  and budget through the deferred lease outcome, then submit one nonblocking job.
-- Worker-side T083 observation calculates cost only from known canonical input and
-  output. `[DONE]`, finish reason, and usage events remain metadata and never
-  control transparent transport lifetime.
-- Capture overflow, malformed/incomplete SSE, missing differentiated usage,
-  unsupported coding, downstream failure, queue saturation, and cancellation keep
-  the conservative budget charge.
-- Requests without token or budget observation needs retain the allocation-minimal
-  streaming path and create no parser job or per-chunk goroutine.
+- For transparent SSE, append bounded checkpoints of successfully flushed wire
+  offsets and monotonic times, then let off-path observation map the last
+  meaningful event end offset to a checkpoint. Bound both bytes and checkpoint
+  count; overflow makes semantic timing unknown.
+- Carry the resulting timing in T127's same one-shot immutable enrichment before
+  its final record is emitted. A dropped/failed observation finalizes promptly
+  with stream-close delay unknown; never mutate an already emitted record and
+  never wait at downstream EOF for enrichment.
+- Reuse the existing SSE parser's definition of meaningful content/terminal
+  events and ignore comments/heartbeats for the last-meaningful timestamp. `[DONE]`
+  and `finish_reason` remain metadata and never terminate transparent transport.
+- For mandatory SSE-to-JSON aggregation, add the smallest event callback/result
+  timing needed to capture the last meaningful event during existing parsing;
+  do not add a second parse of rendered JSON or upstream SSE.
+- Stream-close delay is downstream completion minus last meaningful event and is
+  recorded only when both are known and ordered. Malformed, truncated, compressed
+  data without safe offset mapping, and clock anomalies remain unknown.
 
 Acceptance and tests:
 
-- Real HTTP timing tests cover usage with/without `[DONE]`, usage-only terminal
-  events, split/coalesced reads, immediate EOF, lower/higher actual cost, missing
-  components, gzip, blocked worker, overflow, malformed events, and cancellation.
-- Client bytes, first flush, per-fragment delivery, EOF close, and unrestricted
-  parallelism remain within existing regression thresholds.
-- No worker or pricing operation backpressures transport; completion leaves no
-  active lease, token reservation, or budget reservation.
+- Tests cover split/coalesced events, one-byte reads, comments after content,
+  usage-only terminal events, `[DONE]`, no `[DONE]`, clean EOF, malformed tails,
+  gzip, checkpoint/capture overflow, downstream failure, and cancellation.
+- Timing tests prove each transparent fragment is written and flushed before
+  checkpoint work and physical upstream EOF closes downstream immediately.
+- No per-chunk goroutine, unbounded allocation, idle wait, timer-based normal
+  termination, synchronous telemetry parser, or artificial final flush is added.
 
 Reference: `docs/architecture/streaming.md#transparent-sse`,
 `docs/architecture/streaming.md#termination`,
-`docs/architecture/observability.md#telemetry`,
-`docs/architecture/testing.md#regressions`.
+`docs/architecture/observability.md#request-trace`.
 
-Dependencies and out of scope: depends on T095, T104, and T109-T111. Do not
-buffer before delivery, stop on protocol terminal metadata, add timers, persist
-body content, or enforce approximate cost mid-stream.
+Dependencies and out of scope: depends on T126-T127. Do not hard-stop streams,
+insert SSE errors/heartbeats, infer missing events, or add metrics/storage.
 
-### T114 - Finalize every budget lifecycle path
+### T129 - Emit canonical structured completion logs
 
-Goal: prove deterministic budget cleanup at the exact upstream-start boundary for
-all success, error, cancellation, and internal exit paths.
+Goal: make current bounded completion logging a secret-safe projection of the
+canonical trace rather than a separate narrow lifecycle model.
 
 Scope:
 
-- Apply the existing rule uniformly: only exits before `client.Do` release budget
-  at zero; every post-start ambiguity conservatively commits reserved cost unless
-  valid actual differentiated usage was already observed.
-- Audit upstream construction/connection/upload/header/read errors, transparent
-  JSON/SSE writes and flushes, aggregation/decoding/draining, client cancellation,
-  unsupported responses, custom dispatch hooks used by tests, and internal early
-  returns.
-- Ensure cancellation reaches upstream before lifecycle cleanup finishes.
-  Reconciliation handoff must never delay downstream EOF or retain concurrency.
-- Make token and budget partial knowledge independent: known total can settle
-  token accounting while unknown input/output leaves budget conservative.
-- Expose only safe typed terminal metadata to current completion logs; never emit
-  reservation amounts, prices, or usage in response headers.
+- Keep the existing process-owned bounded `CompletionLogger` and nonblocking
+  handoff. Emit safe scalar fields for route/modes, statuses, terminal/error code,
+  byte counts, known usage/cost, and known latency values from the frozen record.
+- Consume only T127's final records. Immediate paths log after base finalization;
+  deferred paths log when the observation worker emits its enriched-or-unknown
+  final record. Logging never waits in the HTTP handler and never emits a second
+  correction event for one request.
+- Omit unknown optional fields rather than encoding misleading zero. Log known
+  zero explicitly where operationally meaningful. Use integer micros for money
+  and duration; do not emit floating-point costs or duration strings.
+- Bound model/key-name/path values before they reach `slog`. Never log bodies,
+  headers, raw keys, prefixes as credentials, digest, pepper, policy JSON, pricing
+  rates/rules, reservations, SQL errors, or per-token/per-event data.
+- Preserve queue capacity, drop counter, concurrent shutdown safety, and bounded
+  shutdown. Logging remains best effort and cannot influence response status.
 
 Acceptance and tests:
 
-- Real HTTP tests prove immediate budget reuse after pre-start failure and
-  conservative charging after every ambiguous post-start failure.
-- Repeated/concurrent cleanup cannot leak, double-finalize, underflow, or make one
-  key affect another; focused lifecycle tests pass under `go test -race`.
-- Request-window behavior, response transparency, SSE timing, and token accounting
-  remain unchanged.
+- Attribute tests cover complete and every rejection/failure class, known zero
+  versus unknown, JSON/SSE/conversion, cancellation, and malformed bounded text.
+- Saturated and blocked sinks cannot delay JSON completion, first SSE flush, EOF,
+  cancellation, accounting finalization, or concurrency reuse under race tests.
+- Canary scans prove all forbidden credentials, payloads, prices, reservations,
+  headers, and database details are absent from captured structured logs.
 
-Reference: `docs/architecture/policy.md#lease`,
-`docs/architecture/accounting.md#budget`,
-`docs/architecture/repository.md#request-orchestration`,
-`docs/architecture/testing.md#limit-tests`.
-
-Dependencies and out of scope: depends on T110-T113. Do not retry, add hard
-mid-stream termination, persist spend, add periods, or create request history.
-
-## Persistent And Periodic Budgets
-
-### T115 - Add persistent budget schema
-
-Goal: persist committed budget spend for restart-safe enforcement without putting
-active reservations or transport work in SQLite.
-
-Scope:
-
-- Add the next embedded migration for `budget_buckets`, keyed by stable API key,
-  period kind, and canonical period start. Store committed `spent_micros` and
-  timestamps as checked signed integers; active reservations remain memory-only.
-- Define durable identities for `total`, UTC calendar `day`, and UTC calendar
-  `month` now because their boundary representation is a schema concern. Use one
-  canonical sentinel start for total and explicit epoch-second starts for day and
-  month; do not implement day/month runtime admission in this task.
-- Add foreign keys, uniqueness, checks, and indexes needed to restore current
-  spend by key/period and clean expired calendar rows without scanning request
-  history.
-- Never store raw keys, pricing rules, prompts, responses, model payloads, token
-  estimates, active lease IDs, or per-SSE-event data.
-- Preserve transactional/idempotent migration behavior, WAL/foreign keys, schema
-  version advancement, upgrade from current databases, and future-version
-  rejection.
-
-Acceptance and tests:
-
-- Fresh and upgraded databases expose the exact table, checks, foreign key,
-  unique identity, and indexes; reopen is idempotent and failed migration rolls
-  back completely.
-- Constraints reject negative spend, unknown periods, invalid/noncanonical period
-  starts, orphan keys, duplicate identities, and overflowing timestamp shapes.
-- Schema inspection proves credentials and body content are absent.
-
-Reference: `docs/architecture/storage.md#aggregates-and-caches`,
-`docs/architecture/storage.md#boundaries`,
-`docs/architecture/accounting.md#budget`.
-
-Dependencies and out of scope: depends on T114 and current migration runner. Do
-not add repositories/workers, restore runtime state, persist active reservations,
-or implement daily/monthly admission.
-
-### T116 - Persist and restore total spend
-
-Goal: make lifetime budget enforcement survive graceful restart while SQLite
-latency remains outside admission and response transport.
-
-Scope:
-
-- Add a narrow budget repository that atomically applies positive/negative spent
-  deltas, loads total buckets deterministically, and rejects underflow,
-  corruption, unknown keys, or unrepresentable values.
-- Connect T108 committed deltas and deferred adjustments to a process-owned
-  coalescing accumulator modeled on proven T099 boundaries: in-memory state changes
-  synchronously; a nonblocking wakeup lets one worker batch pending deltas.
-- Coalesce by exact bucket identity so a full signal channel cannot lose critical
-  spend. Writer failure retains pending state and retries without blocking
-  transport or limiter admission.
-- Before the listener starts, load lifetime spend, validate it against current
-  policies without forgiving over-budget debt, and initialize the budget limiter.
-  Restore no active reservation.
-- On graceful shutdown, stop new requests, finish accounting observation, then
-  flush budget deltas within a bound before SQLite closes. Define ordering with
-  the existing token accumulator and usage worker so late adjustments are not
-  submitted after their persistence sink stops.
-
-Acceptance and tests:
-
-- Integration tests cover atomic delta application, negative adjustment,
-  batching/coalescing, writer failure/recovery, multiple keys, reopen/startup
-  restore, already-over-budget state, and bounded shutdown.
-- A blocked SQLite writer cannot delay admission, JSON response, SSE flush, SSE
-  EOF, cancellation, or concurrency reuse; in-memory enforcement remains correct.
-- Graceful restart preserves spent amount exactly and restores no stale active
-  resource. Logs/errors reveal no key, credential, pricing table, or SQLite data.
-
-Reference: `docs/architecture/storage.md#aggregates-and-caches`,
-`docs/architecture/operations.md#server-lifecycle`,
+Reference: `docs/architecture/observability.md#logging`,
 `docs/architecture/observability.md#telemetry`.
 
-Dependencies and out of scope: depends on T108 and T115. Do not make SQLite the
-live limiter source of truth, promise crash-proof distributed accounting, add
-request history, or implement daily/monthly admission.
+Dependencies and out of scope: depends on T121-T128. Do not write SQLite, log body
+content, add metrics exporters, request-ID labels, or change public responses.
 
-### T117 - Enforce UTC daily budgets
+## Bounded Body Inspection
 
-Goal: add restart-safe per-key calendar-day budgets without treating a day as a
-rolling duration or weakening total-budget enforcement.
+### T130 - Validate observability configuration
 
-Scope:
-
-- Accept one `{ "period": "day", "amount_micros": N }` policy entry alongside
-  optional total. Define a day as `[00:00:00, next 00:00:00)` in UTC; it is not a
-  sliding 24-hour window and does not depend on host local timezone.
-- Extend the budget limiter/reservation identity so one request atomically passes
-  and reserves every configured total/day limit or none. A reservation keeps the
-  exact day bucket that admitted it even if completion crosses midnight.
-- On rejection return the daily reset as positive rounded-up `Retry-After`; when
-  total also rejects, omit reset if no time alone can make admission possible.
-- Persist and restore current daily spent through T115-T116 plumbing. Expired day
-  rows can be lazily/runtime and asynchronously/storage cleaned only after active
-  reservations no longer reference them.
-- Use the existing injectable clock. Clamp or fail safely on backwards clock
-  movement so it cannot reopen an earlier budget bucket and grant extra spend.
-
-Acceptance and tests:
-
-- Tests cover UTC boundary, leap day, exact reset, crossing-midnight reservation,
-  total+day atomic rejection, separate keys, restart before/after reset, cleanup,
-  backwards time, and concurrent admission under `go test -race` without sleeps.
-- Policy/admin tests prove invalid or duplicate day entries do not alter stored or
-  published policy.
-- No rejected request reaches upstream and no completed request is charged to a
-  newer day than the one that admitted it.
-
-Reference: `docs/architecture/accounting.md#budget`,
-`docs/architecture/testing.md#limit-tests`,
-`docs/architecture/storage.md#aggregates-and-caches`.
-
-Dependencies and out of scope: depends on T105-T116. Do not add rolling-day,
-hourly, timezone-selectable, or calendar-month budgets.
-
-### T118 - Enforce UTC calendar-month budgets
-
-Goal: add restart-safe monthly budgets using real UTC calendar boundaries rather
-than a fixed 30-day duration.
+Goal: define strict deployment bounds for detailed telemetry and sensitive body
+retention before any capture or persistence is enabled.
 
 Scope:
 
-- Accept one `{ "period": "month", "amount_micros": N }` entry alongside
-  optional total/day limits. Define a month from UTC first-of-month midnight to
-  the next UTC first-of-month midnight.
-- Extend atomic multi-limit reservation/reconciliation and persistence identities
-  to the exact calendar month captured at admission. Completion in a later month
-  still settles the admission month.
-- Compute `Retry-After` from the actual next month boundary with checked duration
-  conversion and positive rounding. If total budget is also exhausted, do not
-  advertise a misleading monthly reset.
-- Restore only current calendar buckets before serving, preserve over-budget debt,
-  and clean expired month rows without blocking transport or deleting active
-  admission identities.
-- Keep UTC fixed for MVP; do not add tenant timezones, billing anchors, proration,
-  cron syntax, or a 30-day approximation.
+- Add an `observability` YAML object with bounded telemetry queue capacity,
+  `max_captured_body_bytes`, request-metadata retention, and independently shorter
+  body retention. Choose conservative documented defaults; zero body bytes
+  disables capture globally even if a key opts in.
+- Define retention execution constants rather than more deployment knobs: one
+  pass at worker startup and after each 1024 processed jobs, deleting at most 1000
+  body rows and then 1000 metadata rows per pass. Tests may inject these constants
+  or an equivalent internal policy, but production defaults remain fixed.
+- Parse retention as the repository's existing strict duration representation or
+  introduce one narrow checked representation. Reject negatives, overflow, nulls,
+  unknown fields, ambiguous units, body retention longer than metadata retention,
+  and values above explicit memory/storage safety caps.
+- Keep this limit independent from request policy inspection bounds and the usage
+  observation bound. Configuration is validated once before listener startup.
+- Configuration contains no per-key policy and no body content. Error messages
+  include field names but never dump credentials or complete configuration.
 
 Acceptance and tests:
 
-- Fake-clock tests cover 28/29/30/31-day months, December-to-January, leap year,
-  exact boundary, cross-month completion, total+day+month atomic admission,
-  backwards time, restart, cleanup, and concurrency under `go test -race`.
-- Real HTTP tests verify monthly rejection, accurate `Retry-After`, zero upstream
-  calls, and unaffected transparent JSON/SSE behavior.
-- Invalid/duplicate month policy leaves persistent and published policy unchanged.
+- Strict config tests cover omitted object/defaults, explicit disablement, minimum
+  and maximum values, unknown/null/wrong-type fields, malformed durations,
+  overflow, invalid retention ordering, and environment-secret coexistence.
+- Existing minimal configurations remain valid and body capture stays disabled by
+  default; no invented retention task runs when detailed telemetry is disabled.
+- Tests prove changing body capture limits cannot alter tokenizer, request
+  inspection, accounting observation, pricing, or transport timeout limits.
 
-Reference: `docs/architecture/accounting.md#budget`,
-`docs/architecture/testing.md#limit-tests`,
-`docs/architecture/operations.md#server-lifecycle`.
+Reference: `docs/architecture/operations.md#configuration`,
+`docs/architecture/observability.md#body-capture`,
+`docs/architecture/storage.md#boundaries`.
 
-Dependencies and out of scope: depends on T117. Do not add arbitrary duration,
-rolling month, local timezone, organization/global budgets, or usage reporting API.
+Dependencies and out of scope: depends on T129. Do not add hot reload, key policy,
+capture wrappers, SQL, Prometheus, `/ready`, or arbitrary redaction.
 
-### T119 - Make budget policy replacement safe
+### T131 - Add per-key body capture policy
 
-Goal: serialize admin budget-policy changes against admission without erasing
-spent money or allowing stale snapshots to bypass a newly committed limit.
+Goal: make sensitive request and response body capture an explicit per-key opt-in
+within the existing full-replacement policy transaction.
 
 Scope:
 
-- Add a budget-limiter policy replacement transaction analogous to the hardened
-  token replacement boundary, but preserve spend by key and period identity rather
-  than treating the configured amount as spent-state identity.
-- Hold old-policy admissions out while validating, durably replacing policy, and
-  publishing the new auth snapshot. A request holding an older principal snapshot
-  after commit must fail admission rather than use removed/increased limits.
-- Changing an amount preserves current period spend. Lowering below spent is
-  allowed and blocks new priced requests until reset (or forever for total);
-  increasing makes only the difference available. Removing a limit stops
-  enforcement but does not delete historical spend, so re-adding it cannot reset
-  accounting.
-- Active reservations continue settling against their captured bucket even when
-  the policy changes. Do not strand reservations or move charges into the new
-  period/limit.
-- Repository failure leaves limiter generation, auth snapshot, and policy JSON
-  unchanged. Snapshot publication failure must not expose a durable/runtime split.
+- Add strict boolean `log_request_body` and `log_response_body` policy fields.
+  Absence means false; reject null, strings/numbers, duplicates, and unknown
+  nested policy shapes under existing strict JSON decoding.
+- Compile copied values into immutable `auth.EffectivePolicy`. Request capture
+  enables distinct client and upstream request bodies; response capture enables
+  only bytes delivered downstream. T130's global maximum always caps both.
+- Extend admin create/replacement responses, SQLite `policy_json`, reopen loading,
+  and atomic auth snapshot publication. Invalid replacement changes neither
+  durable policy nor runtime snapshots/limiter generations.
+- Logging policy changes affect only newly authenticated requests. An active
+  request keeps its captured immutable policy and is not retroactively enabled.
 
 Acceptance and tests:
 
-- Race tests cover replacement versus admission/finalization, lower/increase,
-  remove/re-add, total/day/month combinations, stale principals, active
-  reservations crossing replacement, and persistence/restart.
-- No request can be admitted under stale budget after successful replacement; no
-  spend or reservation is reset, duplicated, or moved.
-- Existing token-policy replacement, admin authentication, and secret-redaction
-  tests remain valid.
+- Policy and real admin HTTP tests cover absent/false/true combinations, null and
+  wrong types, unknown fields, idempotent replacement, concurrent replacement,
+  immediate visibility, active-request snapshot isolation, and reopen.
+- Ordinary gateway keys cannot change policy; raw keys, bodies, pepper, digest,
+  upstream/admin credentials, and full policy JSON never enter errors or logs.
+- Existing model/request/token/concurrency/budget replacement and stale-principal
+  tests remain behaviorally unchanged.
 
 Reference: `docs/architecture/policy.md#effective-policy`,
-`docs/architecture/policy.md#lease`,
+`docs/architecture/observability.md#body-capture`,
 `docs/architecture/storage.md#api-keys`.
 
-Dependencies and out of scope: depends on T105-T118 and existing admin policy
-replacement. Do not add PATCH semantics, a budget reset endpoint, deletion of
-spend, pricing hot reload, or request history.
+Dependencies and out of scope: depends on T130. Do not add per-key byte limits,
+header capture, content redaction claims, retention overrides, or history routes.
 
-## Milestone Gate
+### T132 - Implement bounded binary body recording
 
-### T120 - Complete the budget milestone
-
-Goal: validate pricing and total/daily/monthly budget enforcement end to end
-without regressing transparent transport, token accounting, persistence, or
-administration.
+Goal: provide one protocol-independent recorder that retains a fixed prefix while
+counting the complete observed byte length.
 
 Scope:
 
-- Add one real-HTTP lifecycle scenario with at least two persistent keys and
-  overlapping request/token/concurrency/total/day/month policies across process
-  restart. Cover pricing exact/glob selection, conservative reservation,
-  concurrent contention, actual reconciliation, restored spend, period reset,
-  over-budget debt, and policy replacement.
-- Exercise ordinary JSON, transparent SSE, SSE-to-JSON, zero-priced models,
-  unknown price, missing/partial/invalid usage, actual below/above reservation,
-  upstream error, client cancellation, malformed/oversized requests, and all
-  existing rejection types.
-- Assert every policy rejection makes zero upstream calls and that raw keys,
-  admin/upstream credentials, pepper, prompt/response fragments, digests, pricing
-  internals, reservation values, and SQLite details do not appear in gateway
-  responses or captured structured logs.
-- Deliberately block usage observation and SQLite token/budget writers to prove
-  they cannot delay first byte, per-fragment flush, downstream EOF, cancellation,
-  or concurrency reuse. Critical in-memory accounting must remain correct.
-- Run the full race suite and fix confirmed races, deadlocks, worker leaks,
-  reservation leaks, persistence loss on graceful shutdown, and timing regressions
-  in this task. Update immediate architecture wording only where implementation
-  made it stale.
+- Record at most the configured number of bytes, checked original byte count,
+  truncation state, and a strict body-kind identity. Preserve arbitrary binary,
+  NUL, invalid UTF-8, compressed, and empty content without text conversion.
+- A zero bound performs no allocation and retains no content. Truncation is true
+  whenever observed size exceeds retained size; known empty capture remains
+  distinguishable from no capture.
+- Snapshot returns independent immutable bytes and cannot expose recorder capacity
+  for mutation. After snapshot/finalization, later writes fail safely or are
+  ignored according to one documented deterministic contract.
+- Keep the recorder independent of HTTP, OpenAI/SSE parsing, gzip decoding,
+  policy, trace state, accounting, SQLite, logging, and goroutines.
 
 Acceptance and tests:
 
-- Concurrent requests cannot oversubscribe any request/token/budget/concurrency
-  policy; every completion/error/cancel path eventually releases active capacity
-  while preserving the documented conservative charges.
-- Restart preserves token usage and budget spend but no active lease; UTC day and
-  real calendar-month reset semantics are deterministic with fake clocks.
-- Transparent traffic preserves method, escaped path, query, safe headers, body,
-  status, response headers/bytes, first flush, and EOF timing except for the
-  existing explicit SSE-to-JSON conversion.
+- Table tests cover disabled, empty, under/exact/over bound, fragmented writes,
+  large write, binary/NUL/invalid UTF-8, short accepted counts, overflow, repeated
+  snapshot/finalize, and caller mutation attempts.
+- Property/fuzz tests prove retained bytes are exactly the observed prefix,
+  original size never wraps, and memory remains O(configured bound).
+- Recorder errors and debug formatting contain no captured payload bytes.
+
+Reference: `docs/architecture/observability.md#body-capture`,
+`docs/architecture/storage.md#requests-and-bodies`.
+
+Dependencies and out of scope: depends on T130-T131. Do not wrap HTTP bodies,
+parse/redact payloads, compress content, persist snapshots, or add retention.
+
+### T133 - Capture client and upstream request bodies
+
+Goal: separately observe bytes consumed from the client and bytes read by the
+upstream transport without pre-buffering generic uploads.
+
+Scope:
+
+- When the captured effective policy enables request logging and the global bound
+  is nonzero, wrap the incoming body at authentication success to record bytes
+  actually consumed as `client_request`; never drain rejected/abandoned bodies.
+- Wrap the final replayed/original body passed to `client.Do` separately as
+  `upstream_request`. Compose with `InspectRequestBody` and `replayedRequestBody`
+  so policy inspection occurs once and replay remains byte-for-byte.
+- Preserve `ContentLength`, `GetBody` behavior where currently supported, chunked
+  streaming, close/error propagation, upload cancellation, nil/`NoBody`, and the
+  exact upstream-start accounting boundary.
+- Finalize immutable snapshots on every success, rejection, read/close error,
+  cancellation, and internal exit. Client/upstream sizes may legitimately differ
+  after partial reads and must not be synthesized from headers.
+
+Acceptance and tests:
+
+- Real HTTP tests cover inspected and unrestricted known routes, generic chunked
+  uploads, empty/nil bodies, exact/over bound, partial upstream upload failure,
+  client read error, cancellation, auth/policy rejection, and concurrent keys.
+- Admitted upstream receives identical method/path/query/headers/content length
+  and body; generic traffic starts upstream before client EOF and is not buffered.
+- Disabled capture adds no body-sized allocation; no body bytes appear in trace,
+  logs, errors, accounting jobs, or credentials.
+
+Reference: `docs/architecture/transport.md#request-body`,
+`docs/architecture/observability.md#body-capture`,
+`docs/architecture/repository.md#request-orchestration`.
+
+Dependencies and out of scope: depends on T125 and T131-T132. Do not capture
+headers, modify bodies, add content filtering, SQL, retries, or request history.
+
+### T134 - Capture JSON and opaque responses
+
+Goal: retain a bounded copy of only bytes successfully accepted downstream for
+transparent JSON and opaque responses.
+
+Scope:
+
+- Integrate T132 at the downstream writer boundary only when response logging is
+  enabled. Capture exactly the returned successful write count, including partial
+  writes; never capture unread upstream bytes or infer size from `Content-Length`.
+- Keep response body capture separate from accounting response observation: each
+  has its own enablement and bound, and dropping detailed telemetry cannot affect
+  token/budget reconciliation.
+- Preserve current `io.Copy` behavior, status, safe headers, content encoding,
+  byte identity, implicit status, cancellation, and immediate EOF completion.
+- Finalize known empty bodies and partial/error snapshots correctly. Do not decode
+  gzip, parse JSON, redact arbitrary content, or place body bytes in T121 fields.
+
+Acceptance and tests:
+
+- Real HTTP tests cover identity/gzip/binary/invalid UTF-8, empty, exact/over
+  bound, upstream 4xx/5xx, short downstream writes, upstream read failure,
+  cancellation, enabled/disabled keys, and response-policy replacement races.
+- Captured bytes equal the delivered prefix and original size equals successfully
+  delivered bytes; response output remains byte/header/status identical.
+- A blocked/failed recorder path cannot delay completion or alter critical usage
+  observation, lease settlement, and concurrency reuse.
+
+Reference: `docs/architecture/observability.md#body-capture`,
+`docs/architecture/transport.md#generic-passthrough`.
+
+Dependencies and out of scope: depends on T124 and T131-T133. Do not handle SSE
+or conversion yet, persist bodies, inspect MIME content, or capture headers.
+
+### T135 - Capture SSE and converted responses
+
+Goal: capture the downstream representation of streaming and converted responses
+without changing flush order or conversion semantics.
+
+Scope:
+
+- For transparent SSE, record only after each downstream write and successful
+  flush, matching accounting observation semantics. Capture bookkeeping for a
+  fragment completes only after flush and must not wait for event framing.
+- For `stream:false` plus upstream SSE, capture generated JSON bytes actually
+  accepted downstream, not discarded upstream SSE. Reuse the same writer-level
+  mechanism as T134 rather than reparsing rendered JSON.
+- Preserve exact `[DONE]`, EOF-without-DONE, fragmented/coalesced events, gzip
+  bounds/trailer validation, tool-call aggregation, header sanitation,
+  cancellation, and known usage retained before later drain/write failure.
+- Bound capture independently from T128 checkpoints, accounting observation, and
+  aggregation limits. Overflow only truncates detailed capture.
+
+Acceptance and tests:
+
+- Timing tests cover first flush, every fragment, EOF, blocked recorder consumer,
+  exact/over bound, `[DONE]` followed by delayed EOF, no `[DONE]`, malformed SSE,
+  gzip, downstream failure, cancellation, and parallel unrestricted streams.
+- Transparent captured bytes exactly equal successfully written/flushed wire
+  bytes; converted captured bytes exactly equal accepted generated JSON bytes.
+- No parser, queue, SQL, per-chunk goroutine, heartbeat, idle wait, or extra flush
+  enters transparent transport.
+
+Reference: `docs/architecture/streaming.md#transparent-sse`,
+`docs/architecture/streaming.md#sse-to-json`,
+`docs/architecture/observability.md#body-capture`.
+
+Dependencies and out of scope: depends on T128 and T131-T134. Do not persist yet,
+store upstream conversion input, alter aggregation, or terminate on metadata.
+
+## Persistent Request History
+
+### T136 - Add persistent request history schema
+
+Goal: store canonical request metadata with strict integrity while preserving
+unknown values and keeping sensitive body bytes outside the main table.
+
+Scope:
+
+- Add the next embedded migration for `requests`, keyed by collision-safe request
+  ID, with nullable stable API key foreign key and bounded historical key name,
+  route/method/path/model/modes, statuses, terminal/error codes, byte/token/cost
+  values, timestamps, and latency fields required by T121.
+- Use `NULL` for unknown and integer zero for known zero. Add checks for enums,
+  non-negative counts/micros/durations, valid status ranges, timestamp ordering,
+  mode combinations, and bounded text lengths.
+- Define intentional key deletion behavior without storing raw keys or digests.
+  Add indexes for recent history and per-key/time lookup; do not add speculative
+  indexes for future UI filters without a demonstrated query.
+- Preserve transactional/idempotent migration, WAL/foreign keys, upgrade from
+  schema 6, fresh creation, failed-migration rollback, and future-version reject.
+
+Acceptance and tests:
+
+- Fresh/upgrade/reopen schema tests inspect columns, nullability, checks, foreign
+  keys, indexes, version, and rollback; constraints reject every invalid enum,
+  negative/overflowing value, impossible time, duplicate ID, and orphan key.
+- Round-trip fixtures preserve known zero versus unknown for usage, cost, status,
+  and latency and support unauthenticated requests with no key ID.
+- Schema contains no body BLOB, raw key, Authorization/header data, digest,
+  pepper, policy JSON, pricing rule, reservation, or arbitrary error text.
+
+Reference: `docs/architecture/storage.md#requests-and-bodies`,
+`docs/architecture/storage.md#boundaries`,
+`docs/architecture/observability.md#request-trace`.
+
+Dependencies and out of scope: depends on T121-T129. Do not add repository code,
+body tables, retention, admin queries, full-text search, metrics, or request replay.
+
+### T137 - Add sensitive request body schema
+
+Goal: store optional bounded bodies separately so they can have shorter retention
+and cannot accidentally enter ordinary metadata queries.
+
+Scope:
+
+- Add `request_bodies` in the same next migration or the immediately following
+  embedded migration, keyed by `(request_id, body_kind)` with strict kinds
+  `client_request`, `upstream_request`, and `response`.
+- Store body as SQLite BLOB, checked original byte size, and strict truncation
+  flag. Enforce captured length at or below configured schema safety maximum,
+  captured length at or below original size, and consistent truncation semantics.
+- Foreign-key bodies to requests with cascading metadata deletion. Known empty
+  capture is a zero-length row; capture not requested is absence of a row.
+- Keep media parsing, headers, encodings, body hashes, deduplication, compression,
+  encryption/key management, and searchable text out of this schema.
+
+Acceptance and tests:
+
+- Fresh/upgrade/reopen tests cover all body kinds, binary/NUL/invalid UTF-8,
+  empty/exact/truncated bodies, duplicate kinds, orphans, cascade, rollback, and
+  every malformed size/truncation combination.
+- Queries of the main `requests` table never load body content, and body deletion
+  can occur independently while retaining request metadata.
+- Schema and constraint errors never include body bytes or credentials.
+
+Reference: `docs/architecture/storage.md#requests-and-bodies`,
+`docs/architecture/observability.md#body-capture`.
+
+Dependencies and out of scope: depends on T132 and T136. Do not add persistence
+workers, encryption, redaction, admin body access, export, or retention scheduling.
+
+### T138 - Persist telemetry transactionally
+
+Goal: insert one validated completion record and its optional body snapshots
+atomically through a narrow storage repository.
+
+Scope:
+
+- Add a repository API that maps T121 records and up to one snapshot per T137
+  body kind into SQLite in one transaction. Validate before SQL and use explicit
+  column lists; no HTTP, policy, parser, logger, or limiter types enter storage.
+- Duplicate request ID, invalid key identity, malformed record/body, cancellation,
+  and any statement failure roll back every row. Return typed bounded errors that
+  omit SQL text, body bytes, model/path payload fragments, and credentials.
+- Add bounded deletion operations for body and metadata cutoffs separately, each
+  accepting a positive maximum-row count. Body retention runs first; metadata
+  deletion cascades remaining bodies. Cutoffs use completion timestamps and
+  deterministic inclusive/exclusive semantics.
+- Keep write and retention calls synchronous at repository level for testability;
+  T139 owns all asynchronous scheduling and retry/drop policy.
+
+Acceptance and tests:
+
+- Integration tests cover full/minimal/unauthenticated records, every unknown and
+  known-zero field, all body kinds, binary data, transaction rollback, duplicate
+  IDs, key deletion behavior, context cancellation, reopen, and corruption.
+- Retention tests use a fake clock/cutoffs and cover exact boundary, independent
+  body removal, metadata cascade, empty batches, idempotence, and multiple keys.
+- Repository never logs, exposes mutable SQL rows, returns body content in errors,
+  or updates token/budget aggregates and runtime limiter state.
+
+Reference: `docs/architecture/storage.md#requests-and-bodies`,
+`docs/architecture/storage.md#boundaries`.
+
+Dependencies and out of scope: depends on T136-T137. Do not add HTTP list/get
+routes, pagination, telemetry queues, background goroutines, or request replay.
+
+### T139 - Add bounded history persistence worker
+
+Goal: persist detailed request history best-effort through one bounded worker so
+SQLite latency and failures never stall transport or accounting.
+
+Scope:
+
+- Add a process-owned worker accepting one immutable job containing T127's final
+  T121 record and optional immutable T132 snapshots. Submission is nonblocking and
+  reports accepted/dropped without retaining request/context/header/policy/lease.
+- Bound queue capacity from T130. Track accepted, processed, persisted, failed,
+  and dropped counts with atomics; queue saturation drops only detailed telemetry
+  and never invokes synchronous SQL fallback.
+- Run T138 writes and deterministic bounded retention off transport: one pass at
+  worker startup and after every 1024 processed jobs, at most 1000 body rows then
+  1000 metadata rows per pass, using the injectable worker clock. A failed pass is
+  counted and retried only at the next scheduled trigger; shutdown starts no new
+  pass. Write retry cannot reorder duplicate IDs indefinitely or grow memory;
+  safe failure may drop history but must be counted.
+- Shutdown stops admission, drains within the caller's deadline, then drops the
+  remainder deterministically. It must not close SQLite itself or outlive storage;
+  concurrent submit/shutdown must be race-free and panic-free.
+
+Acceptance and tests:
+
+- Tests cover FIFO insert, bodies, saturation, blocked/failing/recovering SQLite,
+  duplicate records, retention trigger, concurrent producers, shutdown drain,
+  deadline expiry, post-shutdown submit, and exact counters under `go test -race`.
+- Blocked persistence cannot delay headers, JSON body, first/per-fragment SSE
+  flush, EOF, cancellation, concurrency release, usage adjustment, or critical
+  token/budget accumulator writes.
+- Dropped jobs release all captured memory and reveal no body/key/credential in
+  logs or returned errors.
+
+Reference: `docs/architecture/observability.md#telemetry`,
+`docs/architecture/storage.md#boundaries`,
+`docs/architecture/operations.md#server-lifecycle`.
+
+Dependencies and out of scope: depends on T130 and T138. Do not make history
+durable for enforcement, add an unbounded retry spool, metrics endpoint, or SQL
+on request/response goroutines.
+
+### T140 - Complete the observability milestone
+
+Goal: wire request tracing, structured logs, optional bounded body capture,
+asynchronous history persistence, retention, and lifecycle shutdown end to end
+without regressing the policy proxy.
+
+Scope:
+
+- Construct trace/worker dependencies at startup, attach trace state at the outer
+  request boundary, freeze one base after lifecycle cleanup, and use T127 one-shot
+  ownership to emit exactly one immediate or asynchronously enriched final record
+  to logs/history without blocking HTTP. Ensure health/admin and pre-auth failures
+  receive safe records without body capture or fabricated key identity.
+- Order graceful shutdown: stop new HTTP work, finish/cancel handlers, finish
+  accounting observation and critical accumulators, stop telemetry submissions,
+  bounded-drain completion logs/history, then close SQLite. No worker may submit
+  after its sink closes.
+- Add one real-HTTP lifecycle scenario across restart with multiple keys and body
+  policies. Cover JSON, opaque, transparent SSE, conversion, gzip, upstream 4xx/5xx,
+  malformed/oversized traffic, all policy rejections, failures, and cancellation.
+- Audit memory/secret boundaries and immediate architecture wording. Detailed
+  telemetry remains droppable; token and budget enforcement/persistence remains
+  correct when logging/history/capture is disabled, saturated, blocked, or failed.
+
+Acceptance and tests:
+
+- End-to-end records contain correct identity, modes, statuses, terminal/error
+  code, delivered bytes, usage/cost-known state, TTFT/header/close timing, and only
+  policy-enabled bounded bodies with independent retention after restart.
+- Transparent traffic preserves method, escaped path, query, headers, body,
+  status, response headers/bytes, first flush, every fragment, physical-EOF close,
+  cancellation, and unrestricted concurrency. Every rejection makes zero upstream
+  calls and consumes no body solely for telemetry.
+- Saturated queues and blocked/failed SQLite/log sinks cannot delay transport or
+  leak resources. Canary scans find no raw/admin/upstream keys, pepper, digest,
+  Authorization, policy JSON, pricing/reservations, SQL detail, or payload content
+  when capture is disabled.
 - `go test -race ./...`, `go fmt ./...`, `go test ./...`, and `go build ./...`
-  pass. `CURRENT.md` marks T101-T120 done and leaves the next milestone unset.
+  pass. `CURRENT.md` marks T121-T140 done and leaves the next milestone unset.
 
 Reference: `docs/architecture/testing.md#transport-integration`,
-`docs/architecture/testing.md#limit-tests`,
 `docs/architecture/testing.md#security-and-performance`,
-`docs/architecture/accounting.md#budget`.
+`docs/architecture/observability.md#telemetry`,
+`docs/architecture/operations.md#server-lifecycle`.
 
-Dependencies and out of scope: depends on T101-T119. Do not add request-history
-or body persistence, Prometheus, `/ready`, CLI, Web UI, provider routing,
-protocol translation, Redis, PostgreSQL, or retries.
+Dependencies and out of scope: depends on T121-T139. Do not add `/metrics`,
+`/ready`, CLI, request-history admin APIs, Web UI, tool-call validation/execution,
+provider routing/translation, retries, Redis, PostgreSQL, or distributed telemetry.
