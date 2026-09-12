@@ -57,6 +57,10 @@ of scope.
 Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
 completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion.
 
+Review fix after T125: optional response-writer capabilities remain conditional,
+bounded text uses Unicode code points with control rejection, and trace record
+round trips retain escaped paths; canonical completion logging remains deferred.
+
 The focused T091-T100 review fixes independently bound compressed wire bytes
 during gzip SSE-to-JSON conversion, prevent legacy token checkpoint promotion
 from double-counting after restart, serialize token-policy replacement against

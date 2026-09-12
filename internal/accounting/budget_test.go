@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -89,17 +90,17 @@ func TestPlanBudgetReservationFallbackAndModelBounds(t *testing.T) {
 			}
 		})
 	}
-	// The configured bound is a byte bound: a three-byte UTF-8 model is
-	// accepted at three bytes and rejected at two.
+	// The configured model bound counts Unicode code points rather than UTF-8
+	// encoding bytes.
 	unicodeResolver := budgetResolver(t, "  - model: '模型'\n    input_per_million_micros: 1\n    output_per_million_micros: 1\n")
 	model := "模型"
-	if len(model) != 6 {
-		t.Fatalf("test model unexpectedly uses %d bytes", len(model))
+	if utf8.RuneCountInString(model) != 2 {
+		t.Fatalf("test model unexpectedly uses %d code points", utf8.RuneCountInString(model))
 	}
-	if _, err := PlanBudgetReservation(BudgetReservationOptions{Required: true, Model: model, MaxModelBytes: int64(len(model)), Reservation: plan, Resolver: unicodeResolver}); err != nil {
+	if _, err := PlanBudgetReservation(BudgetReservationOptions{Required: true, Model: model, MaxModelBytes: 2, Reservation: plan, Resolver: unicodeResolver}); err != nil {
 		t.Fatalf("unicode exact boundary error = %v", err)
 	}
-	if _, err := PlanBudgetReservation(BudgetReservationOptions{Required: true, Model: model, MaxModelBytes: 5, Reservation: plan, Resolver: unicodeResolver}); !errors.Is(err, ErrBudgetModelOversized) {
+	if _, err := PlanBudgetReservation(BudgetReservationOptions{Required: true, Model: model, MaxModelBytes: 1, Reservation: plan, Resolver: unicodeResolver}); !errors.Is(err, ErrBudgetModelOversized) {
 		t.Fatalf("unicode boundary error = %v", err)
 	}
 }

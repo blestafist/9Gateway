@@ -35,12 +35,48 @@ func validCompletionInput(t *testing.T) CompletionRecordInput {
 	}
 	return CompletionRecordInput{
 		RequestID: "0123456789abcdef0123456789abcdef", KeyID: "key-id", KeyName: "friendly",
-		Method: "POST", Route: RouteClassChatCompletions, Model: "model",
+		Method: "POST", Path: "/v1/chat/completions", Route: RouteClassChatCompletions, Model: "model",
 		RequestedMode: RequestModeJSON, UpstreamMode: ResponseModeJSON, DeliveredMode: ResponseModeJSON,
 		DownstreamStatus: status, UpstreamStatus: status,
 		Terminal:    TerminalMetadata{Outcome: TerminalOutcomeComplete, UpstreamStarted: true},
 		ClientBytes: bytes, UpstreamBytes: bytes, DeliveredBytes: bytes, Usage: usage, Cost: cost,
 		Timing: CompletionTiming{StartedAt: started, FinishedAt: finished, Total: duration, TimeToFirstByte: duration},
+	}
+}
+
+func TestCompletionRecordSnapshotAndEnrichmentPreservePath(t *testing.T) {
+	record, err := NewCompletionRecord(validCompletionInput(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := record.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Path != record.Path {
+		t.Fatalf("snapshot path = %q, want %q", snapshot.Path, record.Path)
+	}
+	state, _ := traceTestState(t)
+	state.SetRouteMetadata(record.Method, record.Path, record.Route)
+	base, err := state.FreezeBase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := MergeRequestTraceEnrichment(base, RequestTraceEnrichment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Path != record.Path {
+		t.Fatalf("enriched path = %q, want %q", final.Path, record.Path)
+	}
+}
+
+func TestBoundedTextUsesUnicodeCodePointsAndRejectsControls(t *testing.T) {
+	if !validBoundedText("模型", 2) || validBoundedText("模型a", 2) {
+		t.Fatal("bounded text did not use code-point count")
+	}
+	if validBoundedText("ok\u0000", 3) || validBoundedText(string([]byte{0xff}), 1) {
+		t.Fatal("unsafe bounded text was accepted")
 	}
 }
 

@@ -1,7 +1,9 @@
 package httpserver
 
 import (
+	"bufio"
 	"errors"
+	"net"
 	"net/http"
 	"testing"
 )
@@ -98,6 +100,39 @@ func TestT124FlushAndUnsupportedControllerPreserveTraceSemantics(t *testing.T) {
 	}
 	if unsupportedRecord.DownstreamStatus.Known() {
 		t.Fatal("unsupported flush committed a status")
+	}
+}
+
+type t124HijackResponseWriter struct{ t124ResponseWriter }
+
+func (writer *t124HijackResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, nil
+}
+
+func TestT124OptionalCapabilitiesAreConditionallyPreserved(t *testing.T) {
+	state, _ := traceTestState(t)
+	underlying := &t124HijackResponseWriter{t124ResponseWriter{header: make(http.Header)}}
+	_, wrapped := completionWriter(underlying, state, nil)
+	if _, ok := wrapped.(http.Flusher); !ok {
+		t.Fatal("supported flusher capability was removed")
+	}
+	if _, ok := wrapped.(http.Hijacker); !ok {
+		t.Fatal("supported hijacker capability was removed")
+	}
+	if _, _, err := http.NewResponseController(wrapped).Hijack(); err != nil {
+		t.Fatalf("supported controller hijack = %v", err)
+	}
+
+	unsupportedState, _ := traceTestState(t)
+	_, unsupported := completionWriter(&t124BasicResponseWriter{header: make(http.Header)}, unsupportedState, nil)
+	if _, ok := unsupported.(http.Flusher); ok {
+		t.Fatal("unsupported writer falsely advertises flusher")
+	}
+	if _, ok := unsupported.(http.Hijacker); ok {
+		t.Fatal("unsupported writer falsely advertises hijacker")
+	}
+	if _, _, err := http.NewResponseController(unsupported).Hijack(); !errors.Is(err, http.ErrNotSupported) {
+		t.Fatalf("unsupported controller hijack = %v, want %v", err, http.ErrNotSupported)
 	}
 }
 

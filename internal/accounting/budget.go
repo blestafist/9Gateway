@@ -38,8 +38,9 @@ var (
 )
 
 // BudgetReservationOptions is the pure input to PlanBudgetReservation.
-// MaxModelBytes is a byte bound, not a rune bound, and must be the same bound
-// used by the caller's configured request inspector. The planner does not read
+// MaxModelBytes is retained as the public compatibility name for the bounded
+// model text limit. Its unit is Unicode code points and must be the same bound
+// used by the caller's model policy. The planner does not read
 // request bodies or derive a model from them.
 //
 // Required is deliberately explicit so an unrestricted key can skip model
@@ -99,7 +100,7 @@ func PlanBudgetReservation(options BudgetReservationOptions) (BudgetReservationP
 	if options.MaxModelBytes <= 0 {
 		return BudgetReservationPlan{}, ErrBudgetModelInvalid
 	}
-	if int64(len(options.Model)) > options.MaxModelBytes {
+	if int64(utf8.RuneCountInString(options.Model)) > options.MaxModelBytes {
 		return BudgetReservationPlan{}, ErrBudgetModelOversized
 	}
 	if !utf8.ValidString(options.Model) || strings.TrimSpace(options.Model) == "" {

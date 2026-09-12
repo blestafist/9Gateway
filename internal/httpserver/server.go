@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
@@ -9,11 +10,13 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pestit/9gateway/internal/accounting"
 	"github.com/pestit/9gateway/internal/auth"
@@ -1348,8 +1351,8 @@ func withRequestID(next http.Handler) http.Handler {
 		// EscapedPath deliberately excludes RawQuery, so credentials in queries
 		// can never enter the trace.
 		trace.SetRouteMetadata(request.Method, boundedEscapedPath(request), ClassifyRoute(request.Method, request.URL.Path))
-		writer := &completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}
-		next.ServeHTTP(writer, request)
+		writer, wrapped := completionWriter(response, trace, terminal)
+		next.ServeHTTP(wrapped, request)
 		// The request-ID boundary owns the final trace handoff. This is outside
 		// the transport path and remains idempotent when the completion wrapper
 		// also completes the trace.
@@ -1371,8 +1374,8 @@ func withCompletionLog(logger *slog.Logger, next http.Handler) http.Handler {
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
-		writer := completionWriter(response, TraceFromContext(request.Context()), terminal)
-		next.ServeHTTP(writer, request)
+		writer, wrapped := completionWriter(response, TraceFromContext(request.Context()), terminal)
+		next.ServeHTTP(wrapped, request)
 		if trace := TraceFromContext(request.Context()); trace != nil {
 			trace.SetTerminalMetadata(terminal.get())
 			record, err := trace.Complete()
@@ -1400,8 +1403,8 @@ func withCompletionLogger(completionLogger *CompletionLogger, next http.Handler)
 			terminal = existing
 		}
 		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
-		writer := completionWriter(response, TraceFromContext(request.Context()), terminal)
-		next.ServeHTTP(writer, request)
+		writer, wrapped := completionWriter(response, TraceFromContext(request.Context()), terminal)
+		next.ServeHTTP(wrapped, request)
 
 		// Copy only safe scalar values into the record before handing it to the
 		// worker. No request object or headers are retained by the logger.
@@ -1425,7 +1428,7 @@ func boundedEscapedPath(request *http.Request) string {
 		return ""
 	}
 	path := request.URL.EscapedPath()
-	if len(path) > 2048 {
+	if !utf8.ValidString(path) || utf8.RuneCountInString(path) > 2048 {
 		return ""
 	}
 	return path
@@ -1435,11 +1438,33 @@ func boundedEscapedPath(request *http.Request) string {
 // layered inside the request-ID boundary. A response must have one owner for
 // transport bookkeeping: nesting two completionResponseWriters would count
 // every downstream write twice while still exposing the same controller.
-func completionWriter(response http.ResponseWriter, trace *RequestTraceState, terminal *terminalMetadataState) *completionResponseWriter {
+func completionWriter(response http.ResponseWriter, trace *RequestTraceState, terminal *terminalMetadataState) (*completionResponseWriter, http.ResponseWriter) {
 	if writer, ok := response.(*completionResponseWriter); ok {
-		return writer
+		return writer, decorateCompletionWriter(writer)
 	}
-	return &completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}
+	if existing, ok := response.(interface {
+		completionWriter() *completionResponseWriter
+	}); ok {
+		writer := existing.completionWriter()
+		return writer, response
+	}
+	writer := &completionResponseWriter{ResponseWriter: response, trace: trace, terminal: terminal}
+	return writer, decorateCompletionWriter(writer)
+}
+
+func decorateCompletionWriter(writer *completionResponseWriter) http.ResponseWriter {
+	var wrapped http.ResponseWriter = writer
+	_, flushable := writer.ResponseWriter.(http.Flusher)
+	_, hijackable := writer.ResponseWriter.(http.Hijacker)
+	switch {
+	case flushable && hijackable:
+		wrapped = &completionResponseWriterFlushHijacker{ResponseWriter: wrapped, core: writer}
+	case flushable:
+		wrapped = &completionResponseWriterFlusher{ResponseWriter: wrapped, core: writer}
+	case hijackable:
+		wrapped = &completionResponseWriterHijacker{ResponseWriter: wrapped, core: writer}
+	}
+	return wrapped
 }
 
 func requestIDFromContext(ctx context.Context) string {
@@ -1461,6 +1486,74 @@ type completionResponseWriter struct {
 
 func (writer *completionResponseWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
+}
+
+// Optional response-writer interfaces are exposed only by these conditional
+// decorators. The core wrapper remains honest for underlying writers that do
+// not support the operation, while Unwrap keeps ResponseController traversal.
+type completionResponseWriterFlusher struct {
+	http.ResponseWriter
+	core *completionResponseWriter
+}
+
+func (writer *completionResponseWriterFlusher) completionWriter() *completionResponseWriter {
+	return writer.core
+}
+func (writer *completionResponseWriterFlusher) setGatewayErrorCode(code SafeErrorCode) {
+	writer.core.setGatewayErrorCode(code)
+}
+func (writer *completionResponseWriterFlusher) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+func (writer *completionResponseWriterFlusher) Flush()            { _ = writer.core.FlushError() }
+func (writer *completionResponseWriterFlusher) FlushError() error { return writer.core.FlushError() }
+
+type completionResponseWriterHijacker struct {
+	http.ResponseWriter
+	core *completionResponseWriter
+}
+
+func (writer *completionResponseWriterHijacker) completionWriter() *completionResponseWriter {
+	return writer.core
+}
+func (writer *completionResponseWriterHijacker) setGatewayErrorCode(code SafeErrorCode) {
+	writer.core.setGatewayErrorCode(code)
+}
+func (writer *completionResponseWriterHijacker) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+func (writer *completionResponseWriterHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := writer.core.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hijacker.Hijack()
+}
+
+type completionResponseWriterFlushHijacker struct {
+	http.ResponseWriter
+	core *completionResponseWriter
+}
+
+func (writer *completionResponseWriterFlushHijacker) completionWriter() *completionResponseWriter {
+	return writer.core
+}
+func (writer *completionResponseWriterFlushHijacker) setGatewayErrorCode(code SafeErrorCode) {
+	writer.core.setGatewayErrorCode(code)
+}
+func (writer *completionResponseWriterFlushHijacker) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+func (writer *completionResponseWriterFlushHijacker) Flush() { _ = writer.core.FlushError() }
+func (writer *completionResponseWriterFlushHijacker) FlushError() error {
+	return writer.core.FlushError()
+}
+func (writer *completionResponseWriterFlushHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := writer.core.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hijacker.Hijack()
 }
 
 func (writer *completionResponseWriter) complete() {

@@ -8,6 +8,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pestit/9gateway/internal/accounting"
 )
@@ -552,7 +553,7 @@ func (mode RequestMode) String() string {
 func (record CompletionRecord) input() CompletionRecordInput {
 	return CompletionRecordInput{
 		RequestID: record.RequestID, KeyID: record.KeyID, KeyName: record.KeyName,
-		Method: record.Method, Route: record.Route, RouteClass: record.RouteClass, Model: record.Model,
+		Method: record.Method, Path: record.Path, Route: record.Route, RouteClass: record.RouteClass, Model: record.Model,
 		RequestedMode: record.RequestedMode, UpstreamMode: record.UpstreamMode,
 		ActualUpstreamMode: record.ActualUpstreamMode,
 		DeliveredMode:      record.DeliveredMode, DownstreamStatus: record.DownstreamStatus,
@@ -653,7 +654,7 @@ func safeRequestID(id RequestID) string {
 }
 
 func validBoundedText(value string, max int) bool {
-	if len(value) > max {
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > max {
 		return false
 	}
 	for _, r := range value {

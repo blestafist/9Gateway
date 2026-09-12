@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -300,6 +301,20 @@ func TestRequestTraceRejectsUnsafeAndOverflowingInputs(t *testing.T) {
 	}
 	if _, err := NewDurationMicros(-time.Microsecond); err == nil {
 		t.Fatal("negative duration was accepted")
+	}
+}
+
+func TestRequestTraceTextBoundsCountUnicodeCodePoints(t *testing.T) {
+	state, _ := traceTestState(t)
+	if !state.SetAuthentication(strings.Repeat("界", 256), "名") {
+		t.Fatal("Unicode key identity at the boundary was rejected")
+	}
+	if state.SetRequestMetadata("POST", RouteChatCompletions, strings.Repeat("界", 513), RequestModeJSON) {
+		t.Fatal("Unicode model beyond the code-point boundary was accepted")
+	}
+	path := "/" + strings.Repeat("界", 2047)
+	if !state.SetRouteMetadata("GET", path, RouteGeneric) {
+		t.Fatal("Unicode path at the code-point boundary was rejected")
 	}
 }
 

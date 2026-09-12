@@ -34,7 +34,7 @@ func TestT125RouteMetadataKeepsEscapedPathSeparateAndBounded(t *testing.T) {
 	}
 }
 
-func TestT125AuthenticatedCompletionCarriesOnlyStableIdentity(t *testing.T) {
+func TestT125AuthenticatedCompletionLogRemainsLegacySafeProjection(t *testing.T) {
 	pepper := []byte("t125-pepper")
 	keyA, err := auth.GenerateGatewayKey(pepper)
 	if err != nil {
@@ -80,19 +80,18 @@ func TestT125AuthenticatedCompletionCarriesOnlyStableIdentity(t *testing.T) {
 	}
 	shutdownCompletionLogger(t, logger)
 
-	want := map[string]string{"key-a": "alpha", "key-b": "beta"}
-	for range want {
+	for range []string{"key-a", "key-b"} {
 		select {
 		case record := <-records:
 			values := make(map[string]any)
 			record.Attrs(func(attribute slog.Attr) bool { values[attribute.Key] = attribute.Value.Any(); return true })
-			id, _ := values["key_id"].(string)
-			name, _ := values["key_name"].(string)
-			if want[id] != name || values["route"] != "models" || values["path"] != "/v1/models" {
-				t.Fatalf("completion identity/route = %#v", values)
+			if values["path"] != "/v1/models" {
+				t.Fatalf("completion path = %#v", values)
 			}
-			if _, ok := want[id]; !ok {
-				t.Fatalf("identity crossover or unknown key: %#v", values)
+			for _, forbidden := range []string{"key_id", "key_name", "route", "model", "requested_mode"} {
+				if _, ok := values[forbidden]; ok {
+					t.Fatalf("premature completion projection included %q: %#v", forbidden, values)
+				}
 			}
 		case <-time.After(time.Second):
 			t.Fatal("completion record was not written")
