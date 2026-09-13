@@ -517,6 +517,36 @@ func (state *RequestTraceState) ResponseBodySnapshot() (observability.BodySnapsh
 	return copyBodySnapshot(state.responseBody), true
 }
 
+// requestBodyRecordersForHandoff returns finalized recorder ownership for
+// asynchronous snapshot materialization. This avoids copying body-sized buffers
+// on the request goroutine.
+func (state *RequestTraceState) requestBodyRecordersForHandoff() (*observability.BodyRecorder, *observability.BodyRecorder) {
+	if state == nil {
+		return nil, nil
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if !state.bodySnapshotsSet {
+		return nil, nil
+	}
+	return state.clientBodyRecorder, state.upstreamBodyRecorder
+}
+
+// responseBodyRecorderForHandoff returns finalized recorder ownership for
+// asynchronous snapshot materialization. This avoids copying body-sized buffers
+// on the request goroutine.
+func (state *RequestTraceState) responseBodyRecorderForHandoff() *observability.BodyRecorder {
+	if state == nil {
+		return nil
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if !state.responseBodySet {
+		return nil
+	}
+	return state.responseBodyRecorder
+}
+
 func (state *RequestTraceState) SetUpstreamBytes(count ByteCount) bool {
 	if state == nil {
 		return false

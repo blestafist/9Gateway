@@ -706,20 +706,20 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		upstreamBody = upstreamBodyCapture.wrap(requestBody)
 		upstreamRequest.Body = upstreamBody
 	}
-	if request.GetBody != nil && (telemetryBody != nil || upstreamBodyCapture != nil) {
+	if request.GetBody != nil && telemetryBody != nil {
+		// Provide GetBody for redirects/replays, but do not wrap replay bodies
+		// with upstreamBodyCapture. Only the first logical upstream request body
+		// is captured; replays must not increment OriginalSize or affect truncation.
 		upstreamRequest.GetBody = func() (io.ReadCloser, error) {
 			body, err := request.GetBody()
 			if err != nil {
 				return nil, err
 			}
-			if telemetryBody != nil {
-				body = newTelemetryRequestBody(body, request.ContentLength, handler.tokenConfig.MaxInspectedRequestBytes)
-			}
-			if upstreamBodyCapture != nil {
-				return upstreamBodyCapture.wrap(body), nil
-			}
-			return body, nil
+			return newTelemetryRequestBody(body, request.ContentLength, handler.tokenConfig.MaxInspectedRequestBytes), nil
 		}
+	} else if request.GetBody != nil && upstreamBodyCapture == nil {
+		// Preserve GetBody when no capture is active.
+		upstreamRequest.GetBody = request.GetBody
 	}
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)

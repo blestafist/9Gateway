@@ -17,11 +17,13 @@ const defaultHistoryQueueCapacity = config.DefaultTelemetryQueueCapacity
 // are immutable, singly-owned buffers: the creator transfers ownership to
 // Submit, and must not inspect or mutate them after that call. Submit either
 // queues that exact job or clears its bodies on rejection; the worker clears
-// them after processing. The value contains no request, context, headers,
-// policy, or limiter ownership.
+// them after processing. Recorders are finalized recorder ownership transfers;
+// the worker materializes snapshots asynchronously off the HTTP path. The value
+// contains no request, context, headers, policy, or limiter ownership.
 type HistoryPersistenceJob struct {
-	Record CompletionRecord
-	Bodies []observability.BodySnapshot
+	Record    CompletionRecord
+	Bodies    []observability.BodySnapshot
+	Recorders []*observability.BodyRecorder
 }
 
 // NewHistoryPersistenceJob packages a final record and transfers ownership of
@@ -56,11 +58,12 @@ type HistoryPersistenceWorkerOptions struct {
 
 // HistoryPersistenceStats contains bounded scalar worker counters.
 type HistoryPersistenceStats struct {
-	Accepted  uint64
-	Processed uint64
-	Persisted uint64
-	Failed    uint64
-	Dropped   uint64
+	Accepted        uint64
+	Processed       uint64
+	Persisted       uint64
+	PersistFailed   uint64
+	RetentionFailed uint64
+	Dropped         uint64
 }
 
 // HistoryPersistenceWorker persists detailed history best-effort. It owns one
@@ -86,11 +89,12 @@ type HistoryPersistenceWorker struct {
 	stopOnce  sync.Once
 	abort     atomic.Bool
 
-	accepted  atomic.Uint64
-	processed atomic.Uint64
-	persisted atomic.Uint64
-	failed    atomic.Uint64
-	dropped   atomic.Uint64
+	accepted        atomic.Uint64
+	processed       atomic.Uint64
+	persisted       atomic.Uint64
+	persistFailed   atomic.Uint64
+	retentionFailed atomic.Uint64
+	dropped         atomic.Uint64
 }
 
 // NewHistoryPersistenceWorker starts one bounded history writer.
@@ -177,17 +181,40 @@ func (worker *HistoryPersistenceWorker) drain() {
 }
 
 func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			worker.processed.Add(1)
+			worker.persistFailed.Add(1)
+			clearHistoryJob(&job)
+		}
+	}()
+	defer clearHistoryJob(&job)
+
 	worker.processed.Add(1)
+
+	// Materialize snapshots from recorders asynchronously, off the HTTP path.
+	var bodies []observability.BodySnapshot
+	if len(job.Recorders) > 0 {
+		bodies = make([]observability.BodySnapshot, 0, len(job.Recorders))
+		for _, recorder := range job.Recorders {
+			if recorder != nil {
+				bodies = append(bodies, recorder.Snapshot())
+			}
+		}
+	} else {
+		bodies = job.Bodies
+	}
+
 	err := storage.ErrHistoryRepositoryUnavailable
 	if worker.repository != nil {
-		err = worker.repository.Persist(worker.workerContext, historyRecord(job.Record), job.Bodies)
+		err = worker.repository.Persist(worker.workerContext, historyRecord(job.Record), bodies)
 	}
 	if err != nil {
-		worker.failed.Add(1)
+		worker.persistFailed.Add(1)
 	} else {
 		worker.persisted.Add(1)
 	}
-	clearHistoryJob(&job)
+
 	if worker.processed.Load()%worker.every == 0 {
 		worker.mu.Lock()
 		accepting := worker.accepting
@@ -204,7 +231,7 @@ func (worker *HistoryPersistenceWorker) retentionPass() {
 	worker.mu.Unlock()
 	if !accepting || worker.abort.Load() || worker.repository == nil {
 		if worker.repository == nil && accepting {
-			worker.failed.Add(1)
+			worker.retentionFailed.Add(1)
 		}
 		return
 	}
@@ -214,7 +241,7 @@ func (worker *HistoryPersistenceWorker) retentionPass() {
 	_, bodyErr = worker.repository.DeleteBodiesBefore(worker.workerContext, now.Add(-worker.bodyRetention), worker.bodyLimit)
 	_, metadataErr = worker.repository.DeleteMetadataBefore(worker.workerContext, now.Add(-worker.requestRetention), worker.metadataLimit)
 	if bodyErr != nil || metadataErr != nil {
-		worker.failed.Add(1)
+		worker.retentionFailed.Add(1)
 	}
 }
 
@@ -263,7 +290,8 @@ func (worker *HistoryPersistenceWorker) Stats() HistoryPersistenceStats {
 	}
 	return HistoryPersistenceStats{
 		Accepted: worker.accepted.Load(), Processed: worker.processed.Load(),
-		Persisted: worker.persisted.Load(), Failed: worker.failed.Load(), Dropped: worker.dropped.Load(),
+		Persisted: worker.persisted.Load(), PersistFailed: worker.persistFailed.Load(),
+		RetentionFailed: worker.retentionFailed.Load(), Dropped: worker.dropped.Load(),
 	}
 }
 
@@ -279,8 +307,12 @@ func (worker *HistoryPersistenceWorker) Persisted() uint64 {
 	return worker.Stats().Persisted
 }
 
-func (worker *HistoryPersistenceWorker) Failed() uint64 {
-	return worker.Stats().Failed
+func (worker *HistoryPersistenceWorker) PersistFailed() uint64 {
+	return worker.Stats().PersistFailed
+}
+
+func (worker *HistoryPersistenceWorker) RetentionFailed() uint64 {
+	return worker.Stats().RetentionFailed
 }
 
 func (worker *HistoryPersistenceWorker) Dropped() uint64 {
@@ -292,8 +324,11 @@ func (worker *HistoryPersistenceWorker) Dropped() uint64 {
 // returns only after the worker goroutine has exited. On deadline it cancels
 // the worker context before dropping queued jobs; repositories must honor
 // context cancellation so an in-progress SQL call does not make shutdown
-// unbounded. This completion barrier is what permits the process owner to
-// close SQLite immediately after Shutdown returns.
+// unbounded. After deadline expiry and context cancellation, Shutdown waits
+// unconditionally for the worker goroutine to exit; this wait is bounded only
+// by repository compliance with context cancellation. This completion barrier
+// is what permits the process owner to close SQLite immediately after Shutdown
+// returns.
 func (worker *HistoryPersistenceWorker) Shutdown(ctx context.Context) error {
 	if worker == nil {
 		return nil
@@ -334,6 +369,7 @@ func clearHistoryJob(job *HistoryPersistenceJob) {
 		job.Bodies[index].Bytes = nil
 	}
 	job.Bodies = nil
+	job.Recorders = nil
 }
 
 func historyRecord(record CompletionRecord) storage.HistoryRecord {

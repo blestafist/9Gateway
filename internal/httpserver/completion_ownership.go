@@ -112,27 +112,31 @@ func (ownership *completionOwnership) emit(trace *RequestTraceState, logger *Com
 	if err != nil {
 		return
 	}
+	// Completion logger and history persistence are independent best-effort sinks.
+	// Each admission is bounded and nonblocking; one sink may accept while the
+	// other drops due to queue saturation or shutdown. This is intentional: the
+	// canonical final record is emitted exactly once, but delivery to each sink
+	// is best-effort only.
 	if logger != nil {
 		logger.Enqueue(record)
 	}
 	if ownership.history != nil {
-		// Finalized recorder snapshots are copied exactly once here. The resulting
-		// buffers are immutable and transferred to the history job; NewHistory...
-		// and Submit intentionally do not clone them. Completion logging only sees
-		// the scalar record, so both sinks safely share this finalization boundary.
-		bodies := make([]observability.BodySnapshot, 0, 3)
-		if client, upstream, ok := trace.RequestBodySnapshots(); ok {
-			if client.Captured {
-				bodies = append(bodies, client)
+		// Transfer finalized recorder ownership without copying body prefixes.
+		// The history worker materializes snapshots asynchronously off the HTTP path.
+		recorders := make([]*observability.BodyRecorder, 0, 3)
+		if client, upstream := trace.requestBodyRecordersForHandoff(); client != nil || upstream != nil {
+			if client != nil {
+				recorders = append(recorders, client)
 			}
-			if upstream.Captured {
-				bodies = append(bodies, upstream)
+			if upstream != nil {
+				recorders = append(recorders, upstream)
 			}
 		}
-		if response, ok := trace.ResponseBodySnapshot(); ok && response.Captured {
-			bodies = append(bodies, response)
+		if response := trace.responseBodyRecorderForHandoff(); response != nil {
+			recorders = append(recorders, response)
 		}
-		ownership.history.SubmitRecord(record, bodies...)
+		job := HistoryPersistenceJob{Record: record, Recorders: recorders}
+		ownership.history.Submit(job)
 	}
 }
 
