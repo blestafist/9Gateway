@@ -103,24 +103,12 @@ type RequestHistoryRepository struct {
 	beginner txBeginner
 }
 
-// RequestRepository is the short name used by history-worker callers.
-type RequestRepository = RequestHistoryRepository
-
 func NewRequestHistoryRepository(database dbQueries) *RequestHistoryRepository {
 	repository := &RequestHistoryRepository{database: database}
 	if beginner, ok := database.(txBeginner); ok {
 		repository.beginner = beginner
 	}
 	return repository
-}
-
-// NewHistoryRepository is the concise constructor spelling.
-func NewHistoryRepository(database dbQueries) *RequestHistoryRepository {
-	return NewRequestHistoryRepository(database)
-}
-
-func NewRequestRepository(database dbQueries) *RequestRepository {
-	return NewRequestHistoryRepository(database)
 }
 
 // Persist inserts one record and its optional body captures atomically. At
@@ -211,17 +199,6 @@ func (repository *RequestHistoryRepository) Persist(ctx context.Context, record 
 	}
 	committed = true
 	return nil
-}
-
-// Insert is the repository's conventional method spelling.
-func (repository *RequestHistoryRepository) Insert(ctx context.Context, record HistoryRecord, bodies []observability.BodySnapshot) error {
-	return repository.Persist(ctx, record, bodies)
-}
-
-// PersistSnapshots is a convenience for callers that already have individual
-// immutable snapshots while the primary API remains slice-based.
-func (repository *RequestHistoryRepository) PersistSnapshots(ctx context.Context, record HistoryRecord, bodies ...observability.BodySnapshot) error {
-	return repository.Persist(ctx, record, bodies)
 }
 
 // DeleteBodiesBefore removes at most maxRows body rows whose owning request's

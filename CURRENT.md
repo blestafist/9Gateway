@@ -3,11 +3,19 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T138`.
+Done: `T001`-`T139`.
 
-Current: `T139` - add bounded history persistence worker.
+Current: `T140` - complete the observability milestone.
 
-Queued: `T139`-`T140` in dependency order from `TASKS.md`.
+Queued: none.
+
+T139 adds `HistoryPersistenceWorker`: nonblocking immutable record/body
+handoff, accepted/processed/persisted/failed/dropped counters, startup and
+every-1024-job bounded retention passes, and deadline-bounded shutdown that
+drains or deterministically drops without closing SQLite. T140 must construct
+it with the request-history repository and observability retention settings,
+submit each T127 final record plus finalized T132 snapshots, and shut it down
+before storage closes.
 
 T138 adds synchronous `RequestHistoryRepository.Persist`/`Insert` for one
 validated scalar history record plus optional immutable body snapshots, and
