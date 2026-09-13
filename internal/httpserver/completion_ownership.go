@@ -116,6 +116,10 @@ func (ownership *completionOwnership) emit(trace *RequestTraceState, logger *Com
 		logger.Enqueue(record)
 	}
 	if ownership.history != nil {
+		// Finalized recorder snapshots are copied exactly once here. The resulting
+		// buffers are immutable and transferred to the history job; NewHistory...
+		// and Submit intentionally do not clone them. Completion logging only sees
+		// the scalar record, so both sinks safely share this finalization boundary.
 		bodies := make([]observability.BodySnapshot, 0, 3)
 		if client, upstream, ok := trace.RequestBodySnapshots(); ok {
 			if client.Captured {

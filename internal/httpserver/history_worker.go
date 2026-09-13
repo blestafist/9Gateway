@@ -13,27 +13,37 @@ import (
 
 const defaultHistoryQueueCapacity = config.DefaultTelemetryQueueCapacity
 
-// HistoryPersistenceJob is the bounded handoff to the history writer. The
-// worker copies body bytes at submission, so the value queued by the worker is
-// immutable and contains no request, context, headers, policy, or limiter
-// ownership.
+// HistoryPersistenceJob is the bounded handoff to the history writer. Bodies
+// are immutable, singly-owned buffers: the creator transfers ownership to
+// Submit, and must not inspect or mutate them after that call. Submit either
+// queues that exact job or clears its bodies on rejection; the worker clears
+// them after processing. The value contains no request, context, headers,
+// policy, or limiter ownership.
 type HistoryPersistenceJob struct {
 	Record CompletionRecord
 	Bodies []observability.BodySnapshot
 }
 
-// NewHistoryPersistenceJob makes a defensive copy of the optional body
-// snapshots. It is also useful to callers that already have a final record and
-// want the ownership boundary to be explicit.
+// NewHistoryPersistenceJob packages a final record and transfers ownership of
+// the supplied immutable snapshots. Callers must not reuse the snapshot byte
+// buffers after passing the resulting job to Submit.
 func NewHistoryPersistenceJob(record CompletionRecord, bodies ...observability.BodySnapshot) HistoryPersistenceJob {
-	return cloneHistoryJob(HistoryPersistenceJob{Record: record, Bodies: bodies})
+	return HistoryPersistenceJob{Record: record, Bodies: bodies}
+}
+
+const productionHistoryRowsPerPass = 1000
+
+type historyRepository interface {
+	Persist(context.Context, storage.HistoryRecord, []observability.BodySnapshot) error
+	DeleteBodiesBefore(context.Context, time.Time, int) (int64, error)
+	DeleteMetadataBefore(context.Context, time.Time, int) (int64, error)
 }
 
 // HistoryPersistenceWorkerOptions configures one process-owned history writer.
 // Retention pass settings are injectable for tests; zero values select the
 // fixed production bounds.
 type HistoryPersistenceWorkerOptions struct {
-	Repository             *storage.RequestHistoryRepository
+	Repository             historyRepository
 	Capacity               int
 	RequestRetention       time.Duration
 	BodyRetention          time.Duration
@@ -57,10 +67,11 @@ type HistoryPersistenceStats struct {
 // bounded queue and one worker goroutine; it never performs synchronous SQL in
 // Submit.
 type HistoryPersistenceWorker struct {
-	repository       *storage.RequestHistoryRepository
+	repository       historyRepository
 	queue            chan HistoryPersistenceJob
 	stop             chan struct{}
 	done             chan struct{}
+	startupDone      chan struct{}
 	workerContext    context.Context
 	workerCancel     context.CancelFunc
 	requestRetention time.Duration
@@ -99,8 +110,14 @@ func NewHistoryPersistenceWorker(options HistoryPersistenceWorkerOptions) *Histo
 	if options.MaxBodyRowsPerPass <= 0 {
 		options.MaxBodyRowsPerPass = config.RetentionMaxBodyRowsPerPass
 	}
+	if options.MaxBodyRowsPerPass > productionHistoryRowsPerPass {
+		options.MaxBodyRowsPerPass = productionHistoryRowsPerPass
+	}
 	if options.MaxMetadataRowsPerPass <= 0 {
 		options.MaxMetadataRowsPerPass = config.RetentionMaxMetadataRowsPerPass
+	}
+	if options.MaxMetadataRowsPerPass > productionHistoryRowsPerPass {
+		options.MaxMetadataRowsPerPass = productionHistoryRowsPerPass
 	}
 	if options.Clock == nil {
 		options.Clock = options.Now
@@ -114,6 +131,7 @@ func NewHistoryPersistenceWorker(options HistoryPersistenceWorkerOptions) *Histo
 		queue:            make(chan HistoryPersistenceJob, options.Capacity),
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
+		startupDone:      make(chan struct{}),
 		workerContext:    ctx,
 		workerCancel:     cancel,
 		requestRetention: options.RequestRetention,
@@ -131,6 +149,7 @@ func NewHistoryPersistenceWorker(options HistoryPersistenceWorkerOptions) *Histo
 func (worker *HistoryPersistenceWorker) run() {
 	defer close(worker.done)
 	worker.retentionPass()
+	close(worker.startupDone)
 	for {
 		select {
 		case job := <-worker.queue:
@@ -199,14 +218,13 @@ func (worker *HistoryPersistenceWorker) retentionPass() {
 	}
 }
 
-// Submit hands off one immutable job without waiting. A false result means
-// the bounded detailed telemetry was dropped; it never falls back to SQL.
+// Submit takes ownership of one immutable job without waiting. A false result
+// means the bounded detailed telemetry was dropped; it never falls back to SQL.
 func (worker *HistoryPersistenceWorker) Submit(job HistoryPersistenceJob) bool {
 	if worker == nil {
 		clearHistoryJob(&job)
 		return false
 	}
-	job = cloneHistoryJob(job)
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 	if !worker.accepting {
@@ -270,7 +288,12 @@ func (worker *HistoryPersistenceWorker) Dropped() uint64 {
 }
 
 // Shutdown stops admission, drains queued jobs while the caller's context
-// permits, and drops any remainder at deadline. It never closes SQLite.
+// permits, and drops any remainder at deadline. It never closes SQLite and
+// returns only after the worker goroutine has exited. On deadline it cancels
+// the worker context before dropping queued jobs; repositories must honor
+// context cancellation so an in-progress SQL call does not make shutdown
+// unbounded. This completion barrier is what permits the process owner to
+// close SQLite immediately after Shutdown returns.
 func (worker *HistoryPersistenceWorker) Shutdown(ctx context.Context) error {
 	if worker == nil {
 		return nil
@@ -296,18 +319,11 @@ func (worker *HistoryPersistenceWorker) Shutdown(ctx context.Context) error {
 				worker.drop(job)
 			default:
 				worker.mu.Unlock()
+				<-worker.done
 				return ctx.Err()
 			}
 		}
 	}
-}
-
-func cloneHistoryJob(job HistoryPersistenceJob) HistoryPersistenceJob {
-	job.Bodies = append([]observability.BodySnapshot(nil), job.Bodies...)
-	for index := range job.Bodies {
-		job.Bodies[index].Bytes = append([]byte(nil), job.Bodies[index].Bytes...)
-	}
-	return job
 }
 
 func clearHistoryJob(job *HistoryPersistenceJob) {

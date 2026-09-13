@@ -199,7 +199,9 @@ func run() error {
 	defer func() {
 		// Accounting observation may own deferred token/budget adjustments, so it
 		// must finish before the critical accumulator sinks are stopped. Only then
-		// do detailed log/history submissions stop and drain.
+		// do detailed log/history submissions stop and drain. This cleanup defer
+		// runs before the database.Close defer above; history Shutdown is also a
+		// completion barrier and returns only after its goroutine has exited.
 		shutdownWorker := func(name string, shutdown func(context.Context) error) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()

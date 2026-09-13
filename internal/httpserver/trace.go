@@ -420,8 +420,8 @@ func (state *RequestTraceState) SetRequestBodySnapshots(client, upstream observa
 }
 
 // SetRequestBodyRecorders transfers ownership of finalized recorders without
-// copying their bounded prefixes. The prefix is copied only when a consumer
-// asks for RequestBodySnapshots.
+// copying their bounded prefixes. The prefix is copied once when a consumer
+// asks for RequestBodySnapshots; the returned snapshot owns that copy.
 func (state *RequestTraceState) SetRequestBodyRecorders(client, upstream *observability.BodyRecorder) bool {
 	if state == nil {
 		return false
@@ -436,9 +436,9 @@ func (state *RequestTraceState) SetRequestBodyRecorders(client, upstream *observ
 	return true
 }
 
-// RequestBodySnapshots returns independent copies of the terminal client and
-// upstream request captures. It is intentionally not part of CompletionRecord
-// or completion logging.
+// RequestBodySnapshots returns independent, immutable terminal client and
+// upstream request captures. Each returned prefix is one ownership transfer;
+// callers handing it to HistoryPersistenceJob must not mutate or reuse it.
 func (state *RequestTraceState) RequestBodySnapshots() (observability.BodySnapshot, observability.BodySnapshot, bool) {
 	if state == nil {
 		return observability.BodySnapshot{}, observability.BodySnapshot{}, false
@@ -499,9 +499,9 @@ func (state *RequestTraceState) SetResponseBodyRecorder(recorder *observability.
 	return true
 }
 
-// ResponseBodySnapshot returns an independent copy of the terminal downstream
-// response capture. It is intentionally not part of CompletionRecord or
-// completion logging.
+// ResponseBodySnapshot returns an immutable terminal downstream response
+// capture. The returned prefix is one ownership transfer; callers handing it
+// to HistoryPersistenceJob must not mutate or reuse it.
 func (state *RequestTraceState) ResponseBodySnapshot() (observability.BodySnapshot, bool) {
 	if state == nil {
 		return observability.BodySnapshot{}, false
