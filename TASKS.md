@@ -1,789 +1,769 @@
-# Active Tasks
+# Active Tasks (T141-T160)
 
-This file contains the next twenty atomic tasks. An implementation agent reads
-only `AGENTS.md`, `CURRENT.md`, its assigned task, and the architecture documents
-linked by that task. Tasks are ordered by dependency and must not be implemented
-out of order. Do not load `PLAN.md`, `docs/tasks/backlog-full.md`, or
-`docs/archive/ARCHITECTURE-full.md` during routine implementation.
+This file contains the next twenty atomic tasks for the admin read API, CLI, 
+readiness/metrics, and packaging milestone. An implementation agent reads only 
+`AGENTS.md`, `CURRENT.md`, its assigned task, and the architecture documents 
+linked by that task. Tasks are ordered by dependency and must not be implemented 
+out of order.
 
-Every implementation task must finish with `go fmt ./...`, `go test ./...`, and
-`go build ./...`. Add behavioral tests in the same task as changed HTTP or
+Every implementation task must finish with `go fmt ./...`, `go test ./...`, and 
+`go build ./...`. Add behavioral tests in the same task as changed HTTP or 
 streaming behavior. Update `CURRENT.md` and commit after completing one task.
 
-For observability, accounting, limiter, pricing, budget, and body-inspection
-tasks, first inspect the equivalent implementation in the optional local
-`.references/bifrost` checkout when it is available. Record the inspected
-Bifrost commit and source paths in the task commit message or an adjacent source
-comment/notice. Prefer a maintained permissive dependency, then a small isolated
-adaptation, then a clean minimal implementation. Do not import Bifrost
-architecture or make the ignored checkout a build/runtime dependency. Before
-adapting code or data, verify file-level provenance and the dependency license
-chain, preserve required notices, and mark adapted files.
+## Admin Read API
 
-## Request Trace Foundation
+### T141 - Add admin GET /keys endpoint with pagination
 
-### T121 - Define the canonical request trace record
-
-Goal: define one immutable, storage-independent completion record that every
-later logging and request-history path can consume without reconstructing HTTP
-lifecycle semantics.
+Goal: implement paginated API key listing through a read-only admin endpoint that 
+exposes safe key metadata without raw keys or full policy JSON.
 
 Scope:
 
-- Replace or extend the narrow `CompletionRecord` with typed fields for request
-  ID, stable key ID/name when authenticated, method, bounded route class, model,
-  requested mode, actual upstream mode, delivered mode, statuses, terminal
-  outcome, safe error code, byte counts, canonical usage, exact cost, and timing.
-- Preserve unknown separately from known zero for stream mode, status, token
-  counts, money, timestamps, and durations. Use closed enums for route/modes and
-  existing `accounting.Usage`, `accounting.Money`, and `TerminalMetadata` values
-  rather than parallel numeric representations.
-- Define byte and time units explicitly. Persistable durations must be checked,
-  non-negative integer microseconds; wall timestamps use canonical UTC Unix
-  microseconds while in-process elapsed time may retain monotonic clock behavior.
-- Construction and accessors must defensively copy mutable input. The record may
-  not retain `*http.Request`, contexts, headers, bodies, principals, policies,
-  pricing rules, leases, tickets, loggers, repositories, or arbitrary errors.
+- Add `GET /admin/v1/keys` accepting optional `?limit=N&cursor=CURSOR` query 
+  parameters. Default limit 50, maximum 500. Return JSON with `keys` array and 
+  optional `next_cursor` string for pagination.
+- Each key object contains: `id`, `name`, `display_prefix`, `enabled`, `created_at`, 
+  `updated_at`, `expires_at` (nullable), and `policy_summary` with only 
+  `allow_models`, `deny_models`, `log_request_body`, `log_response_body` booleans.
+- Use storage layer cursor-based pagination ordered by creation time descending 
+  (newest first). Cursor must be opaque, URL-safe, tamper-evident, and not expose 
+  internal database offsets or IDs directly.
+- Require admin credential authentication. Invalid/missing auth returns 401. 
+  Malformed limit/cursor returns 400 with structured error.
+- Repository method `ListAPIKeys(ctx, limit, cursor) ([]KeyListRecord, nextCursor, error)` 
+  reads from `api_keys` table without loading full `policy_json` or digest into memory.
 
 Acceptance and tests:
 
-- Table tests cover complete, rejected, pre-upstream, cancelled, JSON, opaque,
-  transparent SSE, and converted SSE records plus every known/unknown-zero case.
-- Validation rejects invalid enum values, negative/overflowing counts or times,
-  finish-before-start, impossible mode combinations, and malformed request IDs.
-- Tests prove caller-owned values cannot mutate a built record and formatting or
-  validation never exposes credentials, body fragments, pricing rates/rules, or
-  SQL details; a known final cost remains an allowed typed accounting value.
+- Real HTTP tests cover: no keys, single page, multiple pages, exact limit boundary, 
+  invalid cursor, oversized limit, missing/wrong admin auth, concurrent key creation 
+  during pagination.
+- Cursor values are opaque and URL-safe. Page 2 starts exactly after page 1's last 
+  item. Empty result returns empty array with no `next_cursor`.
+- Response contains no raw key, digest, pepper, full policy JSON, or SQL details. 
+  Keys with null `expires_at` serialize it as `null`, not omitted or zero timestamp.
+- `go test -race ./...`, `go fmt ./...`, `go test ./...`, `go build ./...` pass.
 
-Reference: `docs/architecture/observability.md#request-trace`,
-`docs/architecture/storage.md#requests-and-bodies`.
+Reference: `docs/architecture/storage.md#api-keys`, 
+`docs/architecture/operations.md#admin-api`.
 
-Dependencies and out of scope: depends on T120. Do not instrument HTTP, add SQL,
-body capture, configuration, metrics, retention, or admin endpoints.
+Dependencies and out of scope: first task in T141-T160 milestone. Do not add key 
+deletion, policy update GET, usage stats in list view, or full-text search yet.
 
-### T122 - Add request-local trace state
+### T142 - Add admin GET /keys/:id endpoint
 
-Goal: collect T121 fields through one request lifecycle and freeze them exactly
-once without introducing shared mutable telemetry state.
+Goal: retrieve complete details for one API key including full effective policy 
+without exposing security-sensitive digest or pepper values.
 
 Scope:
 
-- Add a request-local trace state at the existing request-ID middleware boundary.
-  Provide narrow one-shot setters for authentication, request metadata, upstream
-  start/headers, response mode, first downstream byte, usage/cost, error, terminal
-  outcome, and completion; later duplicate writes must not corrupt earlier facts.
-- Use an injectable clock exposing wall and monotonic time so latency tests use no
-  sleeps. Define unset behavior for milestones never reached and clamp/fail safely
-  if a test clock moves backwards.
-- Keep trace mutation concurrency-safe for cancellation, transport, observation,
-  and deferred completion races. Freezing is idempotent and returns independent
-  immutable snapshots; no setter may block on logging, parsing, SQL, or a queue.
-- Freeze a base completion at handler end. Fields available only from deferred
-  response observation are represented by a separate one-shot immutable
-  enrichment merged into one final T121 record off the response path; neither the
-  base snapshot nor final record may be mutated after construction.
-- Preserve the existing request ID response header and terminal metadata contract.
-  Do not move the `client.Do` boundary or change lease finalization ordering.
+- Add `GET /admin/v1/keys/:id` where `:id` is the stable string key ID. Return 
+  404 if key not found, 400 if ID format invalid, 401 without admin auth.
+- Response JSON contains: `id`, `name`, `display_prefix`, `enabled`, `created_at`, 
+  `updated_at`, `expires_at`, and complete `policy` object with all fields from 
+  `auth.EffectivePolicy`: request limits (count, window), concurrency, token limits, 
+  budgets (total/daily/monthly), `allow_models`, `deny_models`, `log_request_body`, 
+  `log_response_body`.
+- Repository method `GetAPIKeyByID(ctx, id) (*KeyDetailRecord, error)` loads from 
+  SQLite, parses `policy_json`, and returns typed policy struct. Invalid stored 
+  policy JSON returns internal error, not 404.
+- Use existing policy JSON parsing logic. Do not duplicate policy schema validation.
+- Timestamps serialize as RFC3339. Money values use integer micro-dollars. Durations 
+  use integer seconds (convert from stored microseconds).
 
 Acceptance and tests:
 
-- Deterministic tests cover every setter order, duplicate/concurrent setters,
-  freeze versus cancellation, missing milestones, backwards clocks, and overflow.
-- `go test -race` proves one trace cannot affect another and concurrent finalizers
-  cannot produce partial records, data races, deadlocks, or post-freeze mutation.
-- Trace state retains no request body, header map, raw key, policy, lease, ticket,
-  response writer, or unbounded model/error string.
-
-Reference: `docs/architecture/observability.md#request-trace`,
-`docs/architecture/repository.md#request-orchestration`.
-
-Dependencies and out of scope: depends on T121. Do not yet populate HTTP fields,
-change completion logging, parse usage, persist records, or capture bodies.
-
-### T123 - Record safe gateway error codes
-
-Goal: attach a stable, secret-safe error classification to every gateway-owned
-rejection or failure without storing arbitrary error text.
-
-Scope:
-
-- Define a closed error-code type covering current authentication, disabled or
-  expired key, malformed request, model, request-window, concurrency, token,
-  budget, upstream connection/timeout, response transport, conversion,
-  cancellation, unsupported response, and internal failure paths.
-- Make `writeGatewayError*`, authentication middleware, policy admission, proxy
-  dispatch, and cancellation set the trace code chosen for the client-visible
-  response. Preserve transparent upstream 4xx/5xx bodies and classify them without
-  replacing them with gateway errors.
-- Keep `TerminalOutcome`, HTTP status, and safe error code separate. Upstream
-  status alone is not an internal error string, and cancellation must not be
-  reported as success merely because headers were already written.
-- Never retain or log `error.Error()`, URLs with credentials, parser excerpts,
-  Authorization values, SQL errors, request payloads, or response payloads.
-
-Acceptance and tests:
-
-- Real handler tests map every existing rejection and lifecycle failure to one
-  stable code, status, terminal outcome, and upstream-start value.
-- Upstream error passthrough remains byte/header/status identical; successful and
-  ordinary upstream 4xx/5xx records do not invent a gateway error body.
-- Secret canary tests cover raw keys, admin/upstream credentials, pepper, digest,
-  malformed payload fragments, database errors, and escaped upstream URLs.
-
-Reference: `docs/architecture/observability.md#logging`,
-`docs/architecture/transport.md#generic-passthrough`,
-`docs/architecture/transport.md#cancellation`.
-
-Dependencies and out of scope: depends on T122. Do not persist free-form errors,
-rewrite upstream errors, add retries, metrics, SQL, or new public error responses.
-
-### T124 - Trace downstream status bytes and TTFT
-
-Goal: measure committed response status, successfully delivered bytes, first-byte
-latency, and handler completion without changing `ResponseWriter` behavior.
-
-Scope:
-
-- Extend the existing `completionResponseWriter`; do not add a second competing
-  outer wrapper. Record explicit or implicit status, bytes reported successfully
-  written, first successful non-empty body write, and completion in T122 state.
-- Preserve `Unwrap` and `http.ResponseController` behavior, including `FlushError`,
-  implicit 200 on successful flush, unsupported-operation errors, short writes,
-  and the rule that the first committed status wins.
-- Define TTFT as request start to first successfully written non-empty downstream
-  body byte. Header-only and empty responses retain unknown TTFT rather than zero.
-- Count only bytes accepted by downstream. Failed or short writes must never be
-  reported as complete delivery, and instrumentation must not add flushes.
-
-Acceptance and tests:
-
-- Tests cover implicit/explicit status, repeated `WriteHeader`, empty writes,
-  short writes, write errors, header-only responses, flush-before-write, hijack or
-  unsupported controller behavior, cancellation, and concurrent finalization.
-- Existing SSE first-flush and EOF timing regressions pass unchanged; wrapping
-  does not remove supported interfaces or alter response bytes and headers.
-- Byte/timing bookkeeping performs no parsing, allocation proportional to body
-  size, logging, queue operation, SQL, or goroutine creation per write.
-
-Reference: `docs/architecture/observability.md#request-trace`,
-`docs/architecture/observability.md#logging`.
-
-Dependencies and out of scope: depends on T122-T123. Do not capture body content,
-measure meaningful SSE events, parse usage, or persist telemetry.
-
-### T125 - Trace identity route and request metadata
-
-Goal: populate safe request identity and metadata from facts already available to
-authentication and policy inspection without broadening synchronous inspection.
-
-Scope:
-
-- Record stable key ID and bounded key-name snapshot only after authentication.
-  Invalid, disabled, expired, health, and admin requests keep nullable key identity
-  and must never expose raw key, prefix-as-authenticator, digest, or policy JSON.
-- Define bounded route classes for health, admin, known generation, models, and
-  generic `/v1/*`; preserve method and escaped path separately where T121 allows.
-- Feed model and requested stream mode from existing `RequestMetadata` results.
-  Preserve absent, false, true, malformed, oversized, and not-inspected states.
-- Do not force unrestricted or generic bodies through `InspectRequestBody` merely
-  to improve telemetry. Existing policy-driven inspection and byte-for-byte replay
-  remain the only synchronous metadata source in this task.
-
-Acceptance and tests:
-
-- Tests cover authenticated/unauthenticated/admin/health traffic, known and
-  generic routes, malformed and oversized JSON, absent/boolean stream, Unicode
-  bounded models, and multiple keys without identity crossover.
-- Unrestricted generic chunked uploads begin upstream without full pre-read and
-  preserve method, escaped path, query, headers, content length, and body bytes.
-- Trace output contains no raw key, Authorization, policy JSON, prompt fragment,
-  query credential, or unbounded path/model/name value.
-
-Reference: `docs/architecture/observability.md#request-trace`,
-`docs/architecture/transport.md#request-body`,
-`docs/architecture/repository.md#request-orchestration`.
-
-Dependencies and out of scope: depends on T122-T124. Do not add optional body
-logging, new body parsing, endpoint rejection, storage, or admin history APIs.
-
-### T126 - Trace upstream and response modes
-
-Goal: measure the exact upstream boundary and distinguish requested, actual
-upstream, and delivered response modes without changing dispatch decisions.
-
-Scope:
-
-- Record immediately before `client.Do`, immediately after headers return, and at
-  dispatch selection. Upstream-header latency starts at the `client.Do` boundary,
-  not at request arrival or after response classification.
-- Record upstream status independently from downstream status. Classify actual
-  response with existing `Content-Type` logic as opaque, JSON, or SSE; record
-  delivered mode separately when SSE is converted to JSON.
-- Preserve unknown mode for connection failures or malformed/ambiguous content
-  types exactly as current transport does. Do not sniff bodies for telemetry.
-- Keep cancellation-before-cleanup and all token/budget lease semantics unchanged.
-  Instrumentation remains local and cannot delay `client.Do`, headers, dispatch,
-  first byte, or concurrency release.
-
-Acceptance and tests:
-
-- Fake-clock and real HTTP tests cover connection failure, JSON, opaque, SSE,
-  malformed/repeated content type, upstream errors, conversion, cancellation
-  before/after headers, and differing upstream/downstream statuses.
-- Actual format always comes from response headers, never requested stream mode;
-  converted SSE records requested false, upstream SSE, and delivered JSON.
-- Proxy method/path/query/headers/body/status/response headers/bytes and existing
-  lifecycle accounting tests remain unchanged.
-
-Reference: `docs/architecture/transport.md#response-classification`,
-`docs/architecture/observability.md#request-trace`.
-
-Dependencies and out of scope: depends on T124-T125. Do not sniff response bodies,
-change conversion support, add retries/timeouts, parse SSE, or persist records.
-
-### T127 - Attach usage and actual cost to traces
-
-Goal: report canonical usage and exact actual cost without making detailed
-telemetry part of token or budget enforcement correctness.
-
-Scope:
-
-- Carry canonical usage from converted SSE directly into trace state. Extend the
-  bounded transparent JSON/SSE observation result so the same parsed canonical
-  usage can reach telemetry after accounting tickets settle, without reparsing.
-- Add one-shot completion ownership beside, but independent from, accounting
-  tickets: handler completion freezes the T122 base; immediate paths finalize it
-  directly, while observed transparent responses transfer it to the existing
-  bounded worker, which merges one immutable usage/cost enrichment and emits one
-  final record. Submission drop, invalidation, parse failure, or shutdown must
-  emit the final record promptly with those fields unknown rather than lose it or
-  wait on parsing.
-- Calculate reportable actual cost from immutable pricing and differentiated
-  input/output usage using existing checked integer-micros calculation. Resolve
-  pricing for telemetry even when a key has no budget, using the startup-built
-  local resolver only; unknown model/price remains unknown, not zero.
-- Keep known token total independent from differentiated cost. Explicit zero-price
-  and zero-token results are known zero; total-only, partial, malformed, overflow,
-  unsupported coding, truncation, or dropped observation leaves cost unknown.
-- Accounting reconciliation must happen with existing guarantees regardless of
-  whether trace enrichment succeeds. A telemetry drop may never lose, delay,
-  refund, or duplicate token/budget settlement.
-
-Acceptance and tests:
-
-- Tests cover JSON/SSE/conversion parity, priced no-budget requests, exact/glob
-  and zero prices, unknown pricing, partial/total-only usage, gzip, malformed and
-  over-bound bodies, arithmetic overflow, upstream errors, and queue shutdown.
-- Completion ownership tests cover immediate finalize, worker enrichment,
-  submission drop, parser failure, invalidation, concurrent duplicate completion,
-  and shutdown; every request emits exactly one final record without waiting.
-- Known actual accounting and telemetry values agree; each adjustment ticket is
-  consumed once and no lease/ticket is retained solely for request history.
-- Blocked or failed telemetry enrichment cannot delay response bytes, flush, EOF,
-  cancellation, concurrency reuse, or critical persistence.
-
-Reference: `docs/architecture/accounting.md#usage-and-estimation`,
-`docs/architecture/accounting.md#pricing`,
-`docs/architecture/observability.md#telemetry`.
-
-Dependencies and out of scope: depends on T121-T126 and T111-T113. Do not parse
-upstream monetary metadata, store pricing rules, change limits, or add SQL.
-
-### T128 - Measure SSE stream-close delay safely
-
-Goal: measure last meaningful upstream event and downstream stream-close delay
-without parsing before delivery or allowing protocol metadata to control EOF.
-
-Scope:
-
-- For transparent SSE, append bounded checkpoints of successfully flushed wire
-  offsets and monotonic times, then let off-path observation map the last
-  meaningful event end offset to a checkpoint. Bound both bytes and checkpoint
-  count; overflow makes semantic timing unknown.
-- Carry the resulting timing in T127's same one-shot immutable enrichment before
-  its final record is emitted. A dropped/failed observation finalizes promptly
-  with stream-close delay unknown; never mutate an already emitted record and
-  never wait at downstream EOF for enrichment.
-- Reuse the existing SSE parser's definition of meaningful content/terminal
-  events and ignore comments/heartbeats for the last-meaningful timestamp. `[DONE]`
-  and `finish_reason` remain metadata and never terminate transparent transport.
-- For mandatory SSE-to-JSON aggregation, add the smallest event callback/result
-  timing needed to capture the last meaningful event during existing parsing;
-  do not add a second parse of rendered JSON or upstream SSE.
-- Stream-close delay is downstream completion minus last meaningful event and is
-  recorded only when both are known and ordered. Malformed, truncated, compressed
-  data without safe offset mapping, and clock anomalies remain unknown.
-
-Acceptance and tests:
-
-- Tests cover split/coalesced events, one-byte reads, comments after content,
-  usage-only terminal events, `[DONE]`, no `[DONE]`, clean EOF, malformed tails,
-  gzip, checkpoint/capture overflow, downstream failure, and cancellation.
-- Timing tests prove each transparent fragment is written and flushed before
-  checkpoint work and physical upstream EOF closes downstream immediately.
-- No per-chunk goroutine, unbounded allocation, idle wait, timer-based normal
-  termination, synchronous telemetry parser, or artificial final flush is added.
-
-Reference: `docs/architecture/streaming.md#transparent-sse`,
-`docs/architecture/streaming.md#termination`,
-`docs/architecture/observability.md#request-trace`.
-
-Dependencies and out of scope: depends on T126-T127. Do not hard-stop streams,
-insert SSE errors/heartbeats, infer missing events, or add metrics/storage.
-
-### T129 - Emit canonical structured completion logs
-
-Goal: make current bounded completion logging a secret-safe projection of the
-canonical trace rather than a separate narrow lifecycle model.
-
-Scope:
-
-- Keep the existing process-owned bounded `CompletionLogger` and nonblocking
-  handoff. Emit safe scalar fields for route/modes, statuses, terminal/error code,
-  byte counts, known usage/cost, and known latency values from the frozen record.
-- Consume only T127's final records. Immediate paths log after base finalization;
-  deferred paths log when the observation worker emits its enriched-or-unknown
-  final record. Logging never waits in the HTTP handler and never emits a second
-  correction event for one request.
-- Omit unknown optional fields rather than encoding misleading zero. Log known
-  zero explicitly where operationally meaningful. Use integer micros for money
-  and duration; do not emit floating-point costs or duration strings.
-- Bound model/key-name/path values before they reach `slog`. Never log bodies,
-  headers, raw keys, prefixes as credentials, digest, pepper, policy JSON, pricing
-  rates/rules, reservations, SQL errors, or per-token/per-event data.
-- Preserve queue capacity, drop counter, concurrent shutdown safety, and bounded
-  shutdown. Logging remains best effort and cannot influence response status.
-
-Acceptance and tests:
-
-- Attribute tests cover complete and every rejection/failure class, known zero
-  versus unknown, JSON/SSE/conversion, cancellation, and malformed bounded text.
-- Saturated and blocked sinks cannot delay JSON completion, first SSE flush, EOF,
-  cancellation, accounting finalization, or concurrency reuse under race tests.
-- Canary scans prove all forbidden credentials, payloads, prices, reservations,
-  headers, and database details are absent from captured structured logs.
-
-Reference: `docs/architecture/observability.md#logging`,
-`docs/architecture/observability.md#telemetry`.
-
-Dependencies and out of scope: depends on T121-T128. Do not write SQLite, log body
-content, add metrics exporters, request-ID labels, or change public responses.
-
-## Bounded Body Inspection
-
-### T130 - Validate observability configuration
-
-Goal: define strict deployment bounds for detailed telemetry and sensitive body
-retention before any capture or persistence is enabled.
-
-Scope:
-
-- Add an `observability` YAML object with bounded telemetry queue capacity,
-  `max_captured_body_bytes`, request-metadata retention, and independently shorter
-  body retention. Choose conservative documented defaults; zero body bytes
-  disables capture globally even if a key opts in.
-- Define retention execution constants rather than more deployment knobs: one
-  pass at worker startup and after each 1024 processed jobs, deleting at most 1000
-  body rows and then 1000 metadata rows per pass. Tests may inject these constants
-  or an equivalent internal policy, but production defaults remain fixed.
-- Parse retention as the repository's existing strict duration representation or
-  introduce one narrow checked representation. Reject negatives, overflow, nulls,
-  unknown fields, ambiguous units, body retention longer than metadata retention,
-  and values above explicit memory/storage safety caps.
-- Keep this limit independent from request policy inspection bounds and the usage
-  observation bound. Configuration is validated once before listener startup.
-- Configuration contains no per-key policy and no body content. Error messages
-  include field names but never dump credentials or complete configuration.
-
-Acceptance and tests:
-
-- Strict config tests cover omitted object/defaults, explicit disablement, minimum
-  and maximum values, unknown/null/wrong-type fields, malformed durations,
-  overflow, invalid retention ordering, and environment-secret coexistence.
-- Existing minimal configurations remain valid and body capture stays disabled by
-  default; no invented retention task runs when detailed telemetry is disabled.
-- Tests prove changing body capture limits cannot alter tokenizer, request
-  inspection, accounting observation, pricing, or transport timeout limits.
-
-Reference: `docs/architecture/operations.md#configuration`,
-`docs/architecture/observability.md#body-capture`,
-`docs/architecture/storage.md#boundaries`.
-
-Dependencies and out of scope: depends on T129. Do not add hot reload, key policy,
-capture wrappers, SQL, Prometheus, `/ready`, or arbitrary redaction.
-
-### T131 - Add per-key body capture policy
-
-Goal: make sensitive request and response body capture an explicit per-key opt-in
-within the existing full-replacement policy transaction.
-
-Scope:
-
-- Add strict boolean `log_request_body` and `log_response_body` policy fields.
-  Absence means false; reject null, strings/numbers, duplicates, and unknown
-  nested policy shapes under existing strict JSON decoding.
-- Compile copied values into immutable `auth.EffectivePolicy`. Request capture
-  enables distinct client and upstream request bodies; response capture enables
-  only bytes delivered downstream. T130's global maximum always caps both.
-- Extend admin create/replacement responses, SQLite `policy_json`, reopen loading,
-  and atomic auth snapshot publication. Invalid replacement changes neither
-  durable policy nor runtime snapshots/limiter generations.
-- Logging policy changes affect only newly authenticated requests. An active
-  request keeps its captured immutable policy and is not retroactively enabled.
-
-Acceptance and tests:
-
-- Policy and real admin HTTP tests cover absent/false/true combinations, null and
-  wrong types, unknown fields, idempotent replacement, concurrent replacement,
-  immediate visibility, active-request snapshot isolation, and reopen.
-- Ordinary gateway keys cannot change policy; raw keys, bodies, pepper, digest,
-  upstream/admin credentials, and full policy JSON never enter errors or logs.
-- Existing model/request/token/concurrency/budget replacement and stale-principal
-  tests remain behaviorally unchanged.
-
-Reference: `docs/architecture/policy.md#effective-policy`,
-`docs/architecture/observability.md#body-capture`,
+- HTTP tests cover: existing key with complex policy, non-existent ID, malformed ID, 
+  disabled key, expired key, key with null expires_at, no admin auth, wrong auth.
+- Response contains complete parseable policy matching what's effective for requests. 
+  No digest, pepper, raw key, SQL, or internal limiter generation values exposed.
+- Concurrent policy update doesn't race with GET. Policy in response matches what 
+  was committed to SQLite at read time.
+- `go test ./...` and `go build ./...` pass.
+
+Reference: `docs/architecture/policy.md#effective-policy`, 
 `docs/architecture/storage.md#api-keys`.
 
-Dependencies and out of scope: depends on T130. Do not add per-key byte limits,
-header capture, content redaction claims, retention overrides, or history routes.
+Dependencies and out of scope: depends on T141. Do not add usage statistics, 
+request history links, policy PATCH, key deletion, or policy validation endpoint.
 
-### T132 - Implement bounded binary body recording
+### T143 - Add admin GET /requests endpoint with pagination
 
-Goal: provide one protocol-independent recorder that retains a fixed prefix while
-counting the complete observed byte length.
-
-Scope:
-
-- Record at most the configured number of bytes, checked original byte count,
-  truncation state, and a strict body-kind identity. Preserve arbitrary binary,
-  NUL, invalid UTF-8, compressed, and empty content without text conversion.
-- A zero bound performs no allocation and retains no content. Truncation is true
-  whenever observed size exceeds retained size; known empty capture remains
-  distinguishable from no capture.
-- Snapshot returns independent immutable bytes and cannot expose recorder capacity
-  for mutation. After snapshot/finalization, later writes fail safely or are
-  ignored according to one documented deterministic contract.
-- Keep the recorder independent of HTTP, OpenAI/SSE parsing, gzip decoding,
-  policy, trace state, accounting, SQLite, logging, and goroutines.
-
-Acceptance and tests:
-
-- Table tests cover disabled, empty, under/exact/over bound, fragmented writes,
-  large write, binary/NUL/invalid UTF-8, short accepted counts, overflow, repeated
-  snapshot/finalize, and caller mutation attempts.
-- Property/fuzz tests prove retained bytes are exactly the observed prefix,
-  original size never wraps, and memory remains O(configured bound).
-- Recorder errors and debug formatting contain no captured payload bytes.
-
-Reference: `docs/architecture/observability.md#body-capture`,
-`docs/architecture/storage.md#requests-and-bodies`.
-
-Dependencies and out of scope: depends on T130-T131. Do not wrap HTTP bodies,
-parse/redact payloads, compress content, persist snapshots, or add retention.
-
-### T133 - Capture client and upstream request bodies
-
-Goal: separately observe bytes consumed from the client and bytes read by the
-upstream transport without pre-buffering generic uploads.
+Goal: list request history with pagination, time filters, and per-key filtering 
+without loading body content or exposing secrets.
 
 Scope:
 
-- When the captured effective policy enables request logging and the global bound
-  is nonzero, wrap the incoming body at authentication success to record bytes
-  actually consumed as `client_request`; never drain rejected/abandoned bodies.
-- Wrap the final replayed/original body passed to `client.Do` separately as
-  `upstream_request`. Compose with `InspectRequestBody` and `replayedRequestBody`
-  so policy inspection occurs once and replay remains byte-for-byte.
-- Preserve `ContentLength`, `GetBody` behavior where currently supported, chunked
-  streaming, close/error propagation, upload cancellation, nil/`NoBody`, and the
-  exact upstream-start accounting boundary.
-- Finalize immutable snapshots on every success, rejection, read/close error,
-  cancellation, and internal exit. Client/upstream sizes may legitimately differ
-  after partial reads and must not be synthesized from headers.
+- Add `GET /admin/v1/requests` accepting query parameters: `?limit=N`, `?cursor=C`, 
+  `?key_id=KID`, `?after=RFC3339`, `?before=RFC3339`. Default limit 50, max 500.
+- Return JSON with `requests` array and optional `next_cursor`. Each request object 
+  contains all T136 schema fields except bodies: `request_id`, `api_key_id` (nullable), 
+  `api_key_name` (nullable, bounded), `method`, `path`, `route`, `model` (nullable), 
+  modes (requested/upstream/delivered), statuses, terminal outcome, error code, 
+  byte counts, token counts (nullable), cost (nullable integer micros), timestamps, 
+  latencies (nullable integer micros).
+- Repository method `ListRequests(ctx, ListRequestsFilter, limit, cursor)` queries 
+  `requests` table with indexed time range and optional key filter. Order by 
+  `completed_at DESC` (newest first). Cursor encodes timestamp+request_id bookmark.
+- Time filters use `completed_at`. Invalid RFC3339 or after>before returns 400. 
+  Unknown `key_id` returns empty results, not 404.
+- Require admin auth. Preserve NULL vs 0 distinction for tokens/cost/latencies.
 
 Acceptance and tests:
 
-- Real HTTP tests cover inspected and unrestricted known routes, generic chunked
-  uploads, empty/nil bodies, exact/over bound, partial upstream upload failure,
-  client read error, cancellation, auth/policy rejection, and concurrent keys.
-- Admitted upstream receives identical method/path/query/headers/content length
-  and body; generic traffic starts upstream before client EOF and is not buffered.
-- Disabled capture adds no body-sized allocation; no body bytes appear in trace,
-  logs, errors, accounting jobs, or credentials.
+- HTTP tests: empty history, single page, multi-page, key filter, time range, 
+  combined filters, no matches, invalid params, pagination across 1000+ records.
+- Cursor-based pagination is stable during concurrent new requests. Page boundaries 
+  are exact with no duplicates or gaps under normal operation.
+- Response never includes body bytes, raw keys, Authorization headers, digest, 
+  pepper, policy JSON, pricing rules, or SQL errors.
+- Null fields serialize as JSON `null`. Unknown vs zero: absent token count is 
+  `null`, known zero tokens is `0`.
+- Tests with T140 fixture data covering all request types: JSON, SSE, converted, 
+  rejected, cancelled, various error codes.
 
-Reference: `docs/architecture/transport.md#request-body`,
-`docs/architecture/observability.md#body-capture`,
-`docs/architecture/repository.md#request-orchestration`.
-
-Dependencies and out of scope: depends on T125 and T131-T132. Do not capture
-headers, modify bodies, add content filtering, SQL, retries, or request history.
-
-### T134 - Capture JSON and opaque responses
-
-Goal: retain a bounded copy of only bytes successfully accepted downstream for
-transparent JSON and opaque responses.
-
-Scope:
-
-- Integrate T132 at the downstream writer boundary only when response logging is
-  enabled. Capture exactly the returned successful write count, including partial
-  writes; never capture unread upstream bytes or infer size from `Content-Length`.
-- Keep response body capture separate from accounting response observation: each
-  has its own enablement and bound, and dropping detailed telemetry cannot affect
-  token/budget reconciliation.
-- Preserve current `io.Copy` behavior, status, safe headers, content encoding,
-  byte identity, implicit status, cancellation, and immediate EOF completion.
-- Finalize known empty bodies and partial/error snapshots correctly. Do not decode
-  gzip, parse JSON, redact arbitrary content, or place body bytes in T121 fields.
-
-Acceptance and tests:
-
-- Real HTTP tests cover identity/gzip/binary/invalid UTF-8, empty, exact/over
-  bound, upstream 4xx/5xx, short downstream writes, upstream read failure,
-  cancellation, enabled/disabled keys, and response-policy replacement races.
-- Captured bytes equal the delivered prefix and original size equals successfully
-  delivered bytes; response output remains byte/header/status identical.
-- A blocked/failed recorder path cannot delay completion or alter critical usage
-  observation, lease settlement, and concurrency reuse.
-
-Reference: `docs/architecture/observability.md#body-capture`,
-`docs/architecture/transport.md#generic-passthrough`.
-
-Dependencies and out of scope: depends on T124 and T131-T133. Do not handle SSE
-or conversion yet, persist bodies, inspect MIME content, or capture headers.
-
-### T135 - Capture SSE and converted responses
-
-Goal: capture the downstream representation of streaming and converted responses
-without changing flush order or conversion semantics.
-
-Scope:
-
-- For transparent SSE, record only after each downstream write and successful
-  flush, matching accounting observation semantics. Capture bookkeeping for a
-  fragment completes only after flush and must not wait for event framing.
-- For `stream:false` plus upstream SSE, capture generated JSON bytes actually
-  accepted downstream, not discarded upstream SSE. Reuse the same writer-level
-  mechanism as T134 rather than reparsing rendered JSON.
-- Preserve exact `[DONE]`, EOF-without-DONE, fragmented/coalesced events, gzip
-  bounds/trailer validation, tool-call aggregation, header sanitation,
-  cancellation, and known usage retained before later drain/write failure.
-- Bound capture independently from T128 checkpoints, accounting observation, and
-  aggregation limits. Overflow only truncates detailed capture.
-
-Acceptance and tests:
-
-- Timing tests cover first flush, every fragment, EOF, blocked recorder consumer,
-  exact/over bound, `[DONE]` followed by delayed EOF, no `[DONE]`, malformed SSE,
-  gzip, downstream failure, cancellation, and parallel unrestricted streams.
-- Transparent captured bytes exactly equal successfully written/flushed wire
-  bytes; converted captured bytes exactly equal accepted generated JSON bytes.
-- No parser, queue, SQL, per-chunk goroutine, heartbeat, idle wait, or extra flush
-  enters transparent transport.
-
-Reference: `docs/architecture/streaming.md#transparent-sse`,
-`docs/architecture/streaming.md#sse-to-json`,
-`docs/architecture/observability.md#body-capture`.
-
-Dependencies and out of scope: depends on T128 and T131-T134. Do not persist yet,
-store upstream conversion input, alter aggregation, or terminate on metadata.
-
-## Persistent Request History
-
-### T136 - Add persistent request history schema
-
-Goal: store canonical request metadata with strict integrity while preserving
-unknown values and keeping sensitive body bytes outside the main table.
-
-Scope:
-
-- Add the next embedded migration for `requests`, keyed by collision-safe request
-  ID, with nullable stable API key foreign key and bounded historical key name,
-  route/method/path/model/modes, statuses, terminal/error codes, byte/token/cost
-  values, timestamps, and latency fields required by T121.
-- Use `NULL` for unknown and integer zero for known zero. Add checks for enums,
-  non-negative counts/micros/durations, valid status ranges, timestamp ordering,
-  mode combinations, and bounded text lengths.
-- Define intentional key deletion behavior without storing raw keys or digests.
-  Add indexes for recent history and per-key/time lookup; do not add speculative
-  indexes for future UI filters without a demonstrated query.
-- Preserve transactional/idempotent migration, WAL/foreign keys, upgrade from
-  schema 6, fresh creation, failed-migration rollback, and future-version reject.
-
-Acceptance and tests:
-
-- Fresh/upgrade/reopen schema tests inspect columns, nullability, checks, foreign
-  keys, indexes, version, and rollback; constraints reject every invalid enum,
-  negative/overflowing value, impossible time, duplicate ID, and orphan key.
-- Round-trip fixtures preserve known zero versus unknown for usage, cost, status,
-  and latency and support unauthenticated requests with no key ID.
-- Schema contains no body BLOB, raw key, Authorization/header data, digest,
-  pepper, policy JSON, pricing rule, reservation, or arbitrary error text.
-
-Reference: `docs/architecture/storage.md#requests-and-bodies`,
-`docs/architecture/storage.md#boundaries`,
+Reference: `docs/architecture/storage.md#requests-and-bodies`, 
 `docs/architecture/observability.md#request-trace`.
 
-Dependencies and out of scope: depends on T121-T129. Do not add repository code,
-body tables, retention, admin queries, full-text search, metrics, or request replay.
+Dependencies and out of scope: depends on T141-T142. Do not add full-text search, 
+arbitrary SQL filters, CSV export, real-time streaming, aggregations, or body access.
 
-### T137 - Add sensitive request body schema
+### T144 - Add admin GET /requests/:id endpoint
 
-Goal: store optional bounded bodies separately so they can have shorter retention
-and cannot accidentally enter ordinary metadata queries.
+Goal: retrieve complete metadata for one historical request without body content.
 
 Scope:
 
-- Add `request_bodies` in the same next migration or the immediately following
-  embedded migration, keyed by `(request_id, body_kind)` with strict kinds
-  `client_request`, `upstream_request`, and `response`.
-- Store body as SQLite BLOB, checked original byte size, and strict truncation
-  flag. Enforce captured length at or below configured schema safety maximum,
-  captured length at or below original size, and consistent truncation semantics.
-- Foreign-key bodies to requests with cascading metadata deletion. Known empty
-  capture is a zero-length row; capture not requested is absence of a row.
-- Keep media parsing, headers, encodings, body hashes, deduplication, compression,
-  encryption/key management, and searchable text out of this schema.
+- Add `GET /admin/v1/requests/:id` where `:id` is the request ID string from T121. 
+  Return 404 if not found, 400 if malformed ID, 401 without admin auth.
+- Response JSON contains the same fields as T143 list items but for a single request: 
+  all scalar metadata from the T136 `requests` table row.
+- Repository method `GetRequestByID(ctx, requestID) (*RequestDetailRecord, error)` 
+  performs indexed lookup. Do not JOIN or load body rows in this endpoint.
+- Preserve all NULL vs 0 semantics. Timestamps as RFC3339, durations and cost as 
+  integer micros, enums as strings matching T121 definitions.
+- Response includes `has_bodies` boolean array indicating which body kinds exist 
+  (client_request, upstream_request, response) without loading actual bytes.
 
 Acceptance and tests:
 
-- Fresh/upgrade/reopen tests cover all body kinds, binary/NUL/invalid UTF-8,
-  empty/exact/truncated bodies, duplicate kinds, orphans, cascade, rollback, and
-  every malformed size/truncation combination.
-- Queries of the main `requests` table never load body content, and body deletion
-  can occur independently while retaining request metadata.
-- Schema and constraint errors never include body bytes or credentials.
+- HTTP tests: successful request with all fields, rejected pre-upstream, cancelled, 
+  converted SSE, unauthenticated request (null key_id), non-existent ID, malformed ID.
+- `has_bodies` correctly reflects T137 `request_bodies` rows. Empty array if no 
+  bodies captured, up to 3 kinds if all captured.
+- Response identical to what T143 would return for same request. No raw keys, 
+  headers, body bytes, digest, policy, SQL, or pricing rules exposed.
+- Concurrent body deletion doesn't cause 500; `has_bodies` reflects current state.
 
-Reference: `docs/architecture/storage.md#requests-and-bodies`,
+Reference: `docs/architecture/storage.md#requests-and-bodies`.
+
+Dependencies and out of scope: depends on T143. Do not add body content retrieval, 
+request replay, related requests, aggregated stats, or DELETE operation yet.
+
+### T145 - Add admin GET /requests/:id/bodies/:kind endpoint
+
+Goal: retrieve one captured body by request ID and kind with proper content type 
+and size bounds enforcement.
+
+Scope:
+
+- Add `GET /admin/v1/requests/:id/bodies/:kind` where `:kind` is one of 
+  `client_request`, `upstream_request`, or `response`. Return 404 if request or 
+  body kind not found, 400 if invalid kind, 401 without admin auth.
+- Response headers: `Content-Type: application/octet-stream`, 
+  `X-Original-Size: <bytes>`, `X-Truncated: true|false`. Stream body bytes directly.
+- Repository method `GetRequestBody(ctx, requestID, kind) (*BodyContent, error)` 
+  loads BLOB from T137 `request_bodies` table. Validate original size and truncation 
+  flag consistency with captured bytes length.
+- Enforce safety: refuse to serve bodies larger than 10MB even if stored. Refuse if 
+  stored bytes exceed schema constant `MaxCapturedBodyBytes` (1MB from T130).
+- Do not decode, parse, redact, or transform bytes. Serve exactly what was captured.
+
+Acceptance and tests:
+
+- HTTP tests: all three kinds for one request, empty body (0 bytes), truncated 
+  large body, binary/NUL/invalid UTF-8 content, non-existent kind, wrong kind name, 
+  missing request, no admin auth.
+- Response bytes exactly match what T133/T134/T135 captured. Headers correctly 
+  reflect truncation state and original size.
+- Oversized or schema-inconsistent stored body returns 500, not corrupted download.
+- Concurrent retention cleanup causing body deletion during GET returns 404, not 
+  partial content or 500.
+- Tests use T140 captured fixtures covering JSON, SSE fragments, gzip responses.
+
+Reference: `docs/architecture/storage.md#requests-and-bodies`, 
 `docs/architecture/observability.md#body-capture`.
 
-Dependencies and out of scope: depends on T132 and T136. Do not add persistence
-workers, encryption, redaction, admin body access, export, or retention scheduling.
+Dependencies and out of scope: depends on T144. Do not add body search, diff, 
+pretty-printing, automatic JSON formatting, redaction, or streaming decompression.
 
-### T138 - Persist telemetry transactionally
+## CLI Tool
 
-Goal: insert one validated completion record and its optional body snapshots
-atomically through a narrow storage repository.
+### T146 - Create gwctl CLI foundation
 
-Scope:
-
-- Add a repository API that maps T121 records and up to one snapshot per T137
-  body kind into SQLite in one transaction. Validate before SQL and use explicit
-  column lists; no HTTP, policy, parser, logger, or limiter types enter storage.
-- Duplicate request ID, invalid key identity, malformed record/body, cancellation,
-  and any statement failure roll back every row. Return typed bounded errors that
-  omit SQL text, body bytes, model/path payload fragments, and credentials.
-- Add bounded deletion operations for body and metadata cutoffs separately, each
-  accepting a positive maximum-row count. Body retention runs first; metadata
-  deletion cascades remaining bodies. Cutoffs use completion timestamps and
-  deterministic inclusive/exclusive semantics.
-- Keep write and retention calls synchronous at repository level for testability;
-  T139 owns all asynchronous scheduling and retry/drop policy.
-
-Acceptance and tests:
-
-- Integration tests cover full/minimal/unauthenticated records, every unknown and
-  known-zero field, all body kinds, binary data, transaction rollback, duplicate
-  IDs, key deletion behavior, context cancellation, reopen, and corruption.
-- Retention tests use a fake clock/cutoffs and cover exact boundary, independent
-  body removal, metadata cascade, empty batches, idempotence, and multiple keys.
-- Repository never logs, exposes mutable SQL rows, returns body content in errors,
-  or updates token/budget aggregates and runtime limiter state.
-
-Reference: `docs/architecture/storage.md#requests-and-bodies`,
-`docs/architecture/storage.md#boundaries`.
-
-Dependencies and out of scope: depends on T136-T137. Do not add HTTP list/get
-routes, pagination, telemetry queues, background goroutines, or request replay.
-
-### T139 - Add bounded history persistence worker
-
-Goal: persist detailed request history best-effort through one bounded worker so
-SQLite latency and failures never stall transport or accounting.
+Goal: build a minimal CLI binary that authenticates with the admin API and provides 
+a foundation for key and request management commands.
 
 Scope:
 
-- Add a process-owned worker accepting one immutable job containing T127's final
-  T121 record and optional immutable T132 snapshots. Submission is nonblocking and
-  reports accepted/dropped without retaining request/context/header/policy/lease.
-- Bound queue capacity from T130. Track accepted, processed, persisted, failed,
-  and dropped counts with atomics; queue saturation drops only detailed telemetry
-  and never invokes synchronous SQL fallback.
-- Run T138 writes and deterministic bounded retention off transport: one pass at
-  worker startup and after every 1024 processed jobs, at most 1000 body rows then
-  1000 metadata rows per pass, using the injectable worker clock. A failed pass is
-  counted and retried only at the next scheduled trigger; shutdown starts no new
-  pass. Write retry cannot reorder duplicate IDs indefinitely or grow memory;
-  safe failure may drop history but must be counted.
-- Shutdown stops admission, drains within the caller's deadline, then drops the
-  remainder deterministically. It must not close SQLite itself or outlive storage;
-  concurrent submit/shutdown must be race-free and panic-free.
+- Add `cmd/gwctl/main.go` as a separate binary. Support `--gateway-url` (default 
+  `http://localhost:8080`) and `--admin-credential` (or env `GWCTL_ADMIN_CREDENTIAL`) 
+  flags globally.
+- Implement `gwctl version` showing CLI version and `gwctl ping` hitting 
+  `/admin/v1/keys?limit=1` to verify connectivity and auth.
+- Use a simple CLI framework (e.g., `spf13/cobra` or stdlib `flag` with subcommands). 
+  Do not add heavy dependencies like full TUI frameworks.
+- Store no credentials on disk in this task. Require explicit flag or env var each 
+  invocation. Validate URL format and non-empty credential before API calls.
+- Return exit code 0 on success, 1 on usage errors, 2 on API errors. Print errors 
+  to stderr, output to stdout.
 
 Acceptance and tests:
 
-- Tests cover FIFO insert, bodies, saturation, blocked/failing/recovering SQLite,
-  duplicate records, retention trigger, concurrent producers, shutdown drain,
-  deadline expiry, post-shutdown submit, and exact counters under `go test -race`.
-- Blocked persistence cannot delay headers, JSON body, first/per-fragment SSE
-  flush, EOF, cancellation, concurrency release, usage adjustment, or critical
-  token/budget accumulator writes.
-- Dropped jobs release all captured memory and reveal no body/key/credential in
-  logs or returned errors.
+- `gwctl version` prints version without requiring auth or URL.
+- `gwctl ping` succeeds against real running gateway with valid admin credential, 
+  fails with 401 for invalid credential, fails with connection error for wrong URL.
+- `gwctl --help` shows usage. Unknown command returns exit 1 with error message.
+- Integration test: start gateway, run gwctl commands, verify exit codes and output.
+- Build produces standalone `gwctl` binary: `go build ./cmd/gwctl` succeeds.
 
-Reference: `docs/architecture/observability.md#telemetry`,
-`docs/architecture/storage.md#boundaries`,
-`docs/architecture/operations.md#server-lifecycle`.
+Reference: `docs/architecture/operations.md#admin-api`.
 
-Dependencies and out of scope: depends on T130 and T138. Do not make history
-durable for enforcement, add an unbounded retry spool, metrics endpoint, or SQL
-on request/response goroutines.
+Dependencies and out of scope: depends on T141-T145. Do not add key create/list/get, 
+request list/get, config file, credential storage, interactive mode, or TUI yet.
 
-### T140 - Complete the observability milestone
+### T147 - Add gwctl keys list and get commands
 
-Goal: wire request tracing, structured logs, optional bounded body capture,
-asynchronous history persistence, retention, and lifecycle shutdown end to end
-without regressing the policy proxy.
+Goal: implement CLI commands for listing and inspecting API keys using T141-T142 
+admin endpoints.
 
 Scope:
 
-- Construct trace/worker dependencies at startup, attach trace state at the outer
-  request boundary, freeze one base after lifecycle cleanup, and use T127 one-shot
-  ownership to emit exactly one immediate or asynchronously enriched final record
-  to logs/history without blocking HTTP. Ensure health/admin and pre-auth failures
-  receive safe records without body capture or fabricated key identity.
-- Order graceful shutdown: stop new HTTP work, finish/cancel handlers, finish
-  accounting observation and critical accumulators, stop telemetry submissions,
-  bounded-drain completion logs/history, then close SQLite. No worker may submit
-  after its sink closes.
-- Add one real-HTTP lifecycle scenario across restart with multiple keys and body
-  policies. Cover JSON, opaque, transparent SSE, conversion, gzip, upstream 4xx/5xx,
-  malformed/oversized traffic, all policy rejections, failures, and cancellation.
-- Audit memory/secret boundaries and immediate architecture wording. Detailed
-  telemetry remains droppable; token and budget enforcement/persistence remains
-  correct when logging/history/capture is disabled, saturated, blocked, or failed.
+- Add `gwctl keys list [--limit N]` calling `GET /admin/v1/keys`. Display table with 
+  columns: ID (first 12 chars), Name, Prefix, Enabled, Created. Support `--json` 
+  flag for raw JSON output.
+- Add `gwctl keys get <id>` calling `GET /admin/v1/keys/:id`. Display human-readable 
+  formatted output: key metadata, policy section with limits/budgets/models/logging.
+- Handle pagination transparently in `list`: fetch all pages automatically unless 
+  `--limit` specified. Show progress to stderr if fetching multiple pages.
+- Format timestamps as local time in human output, preserve RFC3339 in JSON mode.
+- Error handling: 401→"Authentication failed", 404→"Key not found", network errors 
+  with helpful message, malformed JSON→"Invalid API response".
 
 Acceptance and tests:
 
-- End-to-end records contain correct identity, modes, statuses, terminal/error
-  code, delivered bytes, usage/cost-known state, TTFT/header/close timing, and only
-  policy-enabled bounded bodies with independent retention after restart.
-- Transparent traffic preserves method, escaped path, query, headers, body,
-  status, response headers/bytes, first flush, every fragment, physical-EOF close,
-  cancellation, and unrestricted concurrency. Every rejection makes zero upstream
-  calls and consumes no body solely for telemetry.
-- Saturated queues and blocked/failed SQLite/log sinks cannot delay transport or
-  leak resources. Canary scans find no raw/admin/upstream keys, pepper, digest,
-  Authorization, policy JSON, pricing/reservations, SQL detail, or payload content
-  when capture is disabled.
-- `go test -race ./...`, `go fmt ./...`, `go test ./...`, and `go build ./...`
-  pass. `CURRENT.md` marks T121-T140 done and leaves the next milestone unset.
+- Integration tests against real gateway with multiple keys: list all, list with 
+  limit, get existing, get non-existent, invalid auth, both human and JSON output.
+- Human output is readable and aligned. JSON output is valid and parseable.
+- `keys list` with 150 keys fetches 3 pages automatically without manual pagination.
+- Empty list shows "No keys found", not an error.
 
-Reference: `docs/architecture/testing.md#transport-integration`,
-`docs/architecture/testing.md#security-and-performance`,
-`docs/architecture/observability.md#telemetry`,
-`docs/architecture/operations.md#server-lifecycle`.
+Reference: `docs/architecture/operations.md#admin-api`.
 
-Dependencies and out of scope: depends on T121-T139. Do not add `/metrics`,
-`/ready`, CLI, request-history admin APIs, Web UI, tool-call validation/execution,
-provider routing/translation, retries, Redis, PostgreSQL, or distributed telemetry.
+Dependencies and out of scope: depends on T146. Do not add key creation, deletion, 
+policy update, filtering, sorting, or usage statistics display yet.
+
+### T148 - Add gwctl requests list and get commands
+
+Goal: implement CLI commands for viewing request history using T143-T144 endpoints.
+
+Scope:
+
+- Add `gwctl requests list [--limit N] [--key-id ID] [--after TIME] [--before TIME]` 
+  calling `GET /admin/v1/requests`. Display table: Request ID (first 12), Key Name, 
+  Method, Route, Model, Status, Tokens, Cost, Duration, Completed.
+- Add `gwctl requests get <request-id>` calling `GET /admin/v1/requests/:id`. 
+  Display formatted sections: identity, request metadata, response metadata, 
+  usage/cost, timing, error (if any).
+- Add `gwctl requests get <request-id> --body <kind>` calling body endpoint T145. 
+  Write body bytes to stdout or `--output FILE`. Show truncation warning to stderr 
+  if `X-Truncated: true`.
+- Format: tokens with thousand separators, cost as dollars (from micros), durations 
+  as human readable (e.g., "1.234s", "456ms"), timestamps as local time.
+- Support `--json` for raw API output. Handle null fields gracefully: show "-" or 
+  "unknown" for null tokens/cost/latency in human mode.
+
+Acceptance and tests:
+
+- Integration tests: list recent requests, filter by key, time range, get complete 
+  request, get with all body kinds, get truncated body, non-existent request.
+- Body output writes exact bytes to stdout/file. Binary content doesn't corrupt 
+  terminal when piped or redirected.
+- Empty list shows "No requests found". Pagination handled like T147.
+- Cost display: 1500000 micros → "$1.50", null → "-".
+
+Reference: `docs/architecture/storage.md#requests-and-bodies`.
+
+Dependencies and out of scope: depends on T147. Do not add request replay, 
+aggregation, export, filtering by model/status/error, or real-time tail mode yet.
+
+## Health and Metrics
+
+### T149 - Implement /ready endpoint with deep checks
+
+Goal: add a readiness endpoint that validates critical subsystem health without 
+requiring admin authentication, suitable for Kubernetes/Docker health checks.
+
+Scope:
+
+- Add `GET /ready` (no auth required) returning 200 if ready, 503 if not ready. 
+  Response JSON: `{"ready": true/false, "checks": {...}}` with individual check results.
+- Perform checks: SQLite connectivity (execute `SELECT 1`), SQLite schema version 
+  matches expected, telemetry worker accepting jobs (check queue not in shutdown), 
+  upstream URL configured and parseable.
+- Each check result includes: `name`, `status` ("pass"/"fail"), optional `message`. 
+  Overall ready=true only if all checks pass. Use 2-second timeout for all checks.
+- Do not ping upstream 9router on every readiness check. Only validate configuration, 
+  not external service availability.
+- Readiness fails during graceful shutdown after HTTP listener stops accepting.
+
+Acceptance and tests:
+
+- HTTP tests: healthy gateway returns 200 with all checks passing, SQLite closed 
+  returns 503, wrong schema version returns 503, during shutdown returns 503.
+- Timeout test: slow SQLite query doesn't hang readiness check beyond 2 seconds.
+- No authentication required. Endpoint works before any keys are created.
+- Output valid JSON. Failed check includes helpful message, not stack traces or SQL.
+- Kubernetes liveness/readiness probe examples work in docker-compose.
+
+Reference: `docs/architecture/operations.md#health-checks`.
+
+Dependencies and out of scope: depends on T141-T148. Do not add /health deprecation, 
+upstream connectivity check, limiter state checks, or detailed metrics yet.
+
+### T150 - Add Prometheus /metrics endpoint
+
+Goal: expose operational metrics in Prometheus format for observability without 
+adding heavy metric dependencies or changing hot paths.
+
+Scope:
+
+- Add `GET /metrics` (no auth required) returning Prometheus text format. Use 
+  `prometheus/client_golang` or minimal compatible implementation.
+- Expose counters from existing atomic counters and telemetry worker: 
+  `gateway_requests_total{route,method,status,outcome}`, 
+  `gateway_request_errors_total{error_code}`, 
+  `gateway_upstream_requests_total{status}`, 
+  `gateway_telemetry_jobs_total{result}` (persisted/dropped/failed).
+- Expose gauges: `gateway_active_requests`, `gateway_telemetry_queue_depth`.
+- Add histograms for latency (use existing trace timing): 
+  `gateway_request_duration_seconds`, `gateway_upstream_duration_seconds`, 
+  `gateway_ttfb_seconds`. Use reasonable buckets: [.001,.005,.01,.025,.05,.1,.25,.5,1,2.5,5,10].
+- Instrument in `httpserver` at existing trace/completion boundaries. No per-request 
+  allocation or lock contention on hot path. Use lock-free atomics where possible.
+
+Acceptance and tests:
+
+- HTTP test: `/metrics` returns valid Prometheus format parseable by prometheus 
+  parser library. Counter/gauge/histogram syntax correct.
+- Integration test: perform requests (success, error, rejection), verify counters 
+  increment correctly, histogram buckets populated, labels accurate.
+- Metrics collection doesn't delay response headers, first byte, flush, or EOF.
+- No credentials, API keys, model names with PII, or body content in metric labels.
+- Concurrent requests under race detector don't cause metric races.
+
+Reference: `docs/architecture/operations.md#metrics`.
+
+Dependencies and out of scope: depends on T149. Do not add custom metric 
+registration API, metric push, exemplars, /metrics admin auth, per-key metrics, 
+or OpenTelemetry yet.
+
+### T151 - Implement ordered graceful shutdown
+
+Goal: coordinate subsystem shutdown in correct dependency order so in-flight 
+requests complete, telemetry drains, and no data corruption occurs.
+
+Scope:
+
+- Extend existing `Run()` in `cmd/gateway/main.go` to handle `SIGTERM`/`SIGINT`. 
+  Shutdown order: stop accepting new connections → wait for active handlers (with 
+  timeout) → stop accounting observation worker → drain telemetry queue → close SQLite.
+- Use `http.Server.Shutdown(ctx)` with configurable timeout (default 30s). Active 
+  requests have this time to complete before force-close.
+- Accounting observation and telemetry workers receive shutdown signal, finish 
+  current job, drain bounded queue up to shutdown deadline, then stop. Unprocessed 
+  telemetry is dropped with logged count.
+- SQLite close is the final step. If critical accounting writes are pending, they 
+  must complete before SQLite closes. Telemetry writes are best-effort.
+- Log shutdown phases: "shutting down HTTP server", "draining telemetry 
+  (N pending)", "closing storage", "shutdown complete". Include dropped counts.
+
+Acceptance and tests:
+
+- Integration test: start gateway, send requests, send SIGTERM during active 
+  request, verify request completes successfully, telemetry written, clean exit.
+- Test: shutdown with saturated telemetry queue drains up to deadline, logs 
+  dropped count, doesn't corrupt SQLite.
+- Test: shutdown timeout expires, active requests cancelled, exit without hang.
+- Race detector clean. No goroutine leaks (use goleak if available).
+- `/ready` returns 503 immediately after shutdown signal received.
+
+Reference: `docs/architecture/operations.md#server-lifecycle`.
+
+Dependencies and out of scope: depends on T150. Do not add hot reload, zero-downtime 
+restart, graceful upgrade, or connection draining beyond stdlib `Shutdown()`.
+
+## Security Hardening
+
+### T152 - Harden path traversal and injection risks
+
+Goal: prevent path traversal, header injection, and malformed input attacks in 
+admin and proxy paths without breaking legitimate Unicode or encoded content.
+
+Scope:
+
+- Validate admin route parameters `:id` and `:kind`: reject patterns containing 
+  `..`, null bytes, control characters, path separators. Allow alphanumeric, hyphen, 
+  underscore, and forward slash only where semantically valid.
+- Sanitize cursor values: validate base64/URL-safe encoding before decode. Reject 
+  cursors with embedded newlines, nulls, or exceeding reasonable length (1KB).
+- Validate upstream URL from config at startup: must be valid absolute HTTP/HTTPS 
+  URL, reject file://, javascript:, data:, and relative paths. Reject URLs with 
+  embedded credentials in production environments.
+- Escape/quote values in structured logs. Never interpolate user input directly 
+  into log format strings. Use `slog` structured attributes exclusively.
+- Add request size limits enforced before reading: max header size 16KB, max URL 
+  length 8KB, max query string 4KB. Return 431 (Request Header Fields Too Large).
+
+Acceptance and tests:
+
+- Security tests: path traversal attempts in key ID (`../../../etc/passwd`), null 
+  bytes in request ID, oversized cursors, malformed base64, control chars in model name.
+- Log injection test: malicious input with newlines/ANSI codes doesn't corrupt log 
+  output or create fake log entries.
+- Upstream URL validation: reject `file:///etc/passwd`, `javascript:alert()`, 
+  relative URLs, credentials in URL (`http://user:pass@host`).
+- Legitimate use cases still work: Unicode model names, long but valid request IDs, 
+  URL-encoded query parameters in generic passthrough.
+- All rejection paths return appropriate 4xx, never 5xx for validation failures.
+
+Reference: `docs/architecture/transport.md#security`.
+
+Dependencies and out of scope: depends on T151. Do not add rate limiting by IP, 
+WAF rules, SQL injection prevention (already using parameterized queries), CSRF 
+tokens, or content security policy headers yet.
+
+### T153 - Enforce body size limits consistently
+
+Goal: prevent memory exhaustion and abuse by enforcing documented limits on request 
+and response body sizes at all ingress points.
+
+Scope:
+
+- Enforce `http.MaxBytesReader` on incoming client request bodies: 10MB hard limit 
+  before any policy inspection or body capture. Return 413 (Payload Too Large) with 
+  structured error if exceeded.
+- Enforce upstream response body size limit: 100MB for non-streaming responses. For 
+  streaming SSE, enforce per-chunk size sanity (individual SSE event <1MB) but allow 
+  unbounded total stream as long as chunks are consumed.
+- Validate `Content-Length` header if present against limits before reading body. 
+  Reject oversized declared lengths immediately.
+- Body capture respects T130 `max_captured_body_bytes` (max 1MB) but does not 
+  reject requests that exceed it—only truncates capture. The 10MB request and 100MB 
+  response limits are separate enforcement boundaries.
+- Add metrics: `gateway_rejected_requests_total{reason="body_too_large"}`.
+
+Acceptance and tests:
+
+- HTTP tests: 9.9MB request succeeds, 10.1MB returns 413, oversized `Content-Length` 
+  rejected before reading body, chunked upload enforced incrementally.
+- Streaming SSE with 500MB total succeeds if individual events small. Single 2MB 
+  SSE event is rejected or truncated with error.
+- Body capture correctly truncates at 1MB even when request is 5MB and allowed.
+- Memory usage doesn't spike: oversized request doesn't buffer entire body into RAM.
+- Error responses include helpful message and max size, no stack trace or internals.
+
+Reference: `docs/architecture/transport.md#request-body`, 
+`docs/architecture/observability.md#body-capture`.
+
+Dependencies and out of scope: depends on T152. Do not add per-key body size limits, 
+streaming request upload progress, multipart form limits, or dynamic limit adjustment.
+
+### T154 - Add secret redaction audit
+
+Goal: systematically verify no credentials, keys, or sensitive config values can 
+leak through logs, metrics, errors, or admin API responses.
+
+Scope:
+
+- Create `internal/security/redaction_test.go` with comprehensive leak detection 
+  tests. Use canary values for: raw API key, admin credential, auth pepper, upstream 
+  API key, SQLite password (if applicable), request body with mock secrets.
+- Test all error paths: malformed requests, auth failures, storage errors, upstream 
+  errors, timeout, cancellation. Capture structured logs, HTTP error bodies, panic 
+  recovery messages.
+- Test all admin API endpoints with injected sensitive data in edge cases: keys 
+  named with credential patterns, models containing secrets, malformed policy JSON 
+  with embedded keys.
+- Verify cursor values don't encode raw IDs or offsets that could leak DB structure.
+- Check metric labels and histogram buckets don't include API keys or user data.
+- Add CI test that fails if any canary value appears in captured output.
+
+Acceptance and tests:
+
+- Comprehensive secret canary tests covering 50+ scenarios across all major code paths.
+- Test passes: no canary value (full or substring) appears in any log, error, metric, 
+  admin response, or panic message.
+- Legitimate data still present: cost values, token counts, timing, bounded model 
+  names, request IDs, stable key IDs (not raw keys).
+- Test documents each checked scenario with comments explaining the leak risk.
+- Add to CI: `go test -v ./internal/security -run TestSecretRedaction`.
+
+Reference: `docs/architecture/observability.md#logging`, 
+`docs/architecture/operations.md#security`.
+
+Dependencies and out of scope: depends on T153. Do not add runtime secret scanning, 
+DLP integration, audit log export, or credential rotation mechanism yet.
+
+## Packaging and Deployment
+
+### T155 - Create minimal Docker image
+
+Goal: build a production-ready Docker image with multi-stage build, minimal attack 
+surface, and no unnecessary tooling or files in the final image.
+
+Scope:
+
+- Create `Dockerfile` with multi-stage build: build stage with Go toolchain, runtime 
+  stage with minimal base (distroless, alpine, or scratch with CA certificates).
+- Build both `gateway` and `gwctl` binaries. Final image contains `/gateway`, 
+  `/gwctl`, CA certs for HTTPS upstream, and timezone data.
+- Image runs as non-root user (UID 65532). SQLite DB path defaults to `/data/gateway.db`. 
+  Config path `/etc/gateway/config.yaml` or overridable via `--config` flag.
+- Support build args: `VERSION`, `COMMIT_SHA`, `BUILD_DATE`. Embed these in binary 
+  via `-ldflags` for `gwctl version` output.
+- Image size target: <50MB compressed. No gcc, shells, package managers, or source 
+  code in final image.
+- Health check: `HEALTHCHECK --interval=30s --timeout=3s CMD ["/gateway", "healthcheck"]` 
+  or HTTP GET to `/ready`.
+
+Acceptance and tests:
+
+- Build: `docker build -t 9gateway:latest .` succeeds in <2min.
+- Run: `docker run -v ./data:/data -v ./config.yaml:/etc/gateway/config.yaml -p 8080:8080 9gateway:latest` 
+  starts gateway successfully.
+- Image inspection: final stage has no shell, minimal layers, runs as non-root, 
+  contains only necessary binaries and certs.
+- Security scan: `docker scan` or `trivy` shows no high/critical vulnerabilities.
+- Multi-arch: document build for linux/amd64 and linux/arm64 (actual multi-arch 
+  build optional, can be follow-up).
+
+Reference: `docs/architecture/operations.md#deployment`.
+
+Dependencies and out of scope: depends on T154. Do not add Kubernetes manifests, 
+Helm charts, auto-scaling, or multi-arch automated builds yet.
+
+### T156 - Create docker-compose example
+
+Goal: provide a complete working docker-compose setup for local development and 
+small production deployments with gateway, mock upstream, and observability.
+
+Scope:
+
+- Create `docker-compose.yml` with services: `gateway` (using T155 image), 
+  `mock-upstream` (simple OpenAI-compatible mock from test helpers), optional 
+  `prometheus` for metrics scraping.
+- Gateway service: volume mounts for `./data` (SQLite), `./config.yaml`, exposes 
+  8080, environment variables for secrets, health checks enabled, restart policy.
+- Mock upstream: builds from `tests/mock-upstream` (create minimal Go server 
+  responding to `/v1/chat/completions`), exposes 8081 internally.
+- Prometheus (optional): scrapes `gateway:8080/metrics` every 15s, web UI on 9090.
+- Include `.env.example` with: `UPSTREAM_API_KEY`, `ADMIN_CREDENTIAL`, `AUTH_PEPPER`.
+- Include `config.example.yaml` with reasonable defaults pointing to `mock-upstream:8081`.
+- Document in `README.md`: `docker-compose up` starts everything, create first key 
+  with `docker-compose exec gateway gwctl keys create`, test with `curl`.
+
+Acceptance and tests:
+
+- `docker-compose up` starts all services successfully on fresh checkout.
+- Gateway healthcheck passes. Prometheus scrapes metrics successfully.
+- Create API key via gwctl, send request via curl to gateway, gateway proxies to 
+  mock-upstream, response returns correctly, request appears in history.
+- `docker-compose down` stops cleanly, `docker-compose down -v` removes volumes.
+- README walkthrough completeable by new user in <5 minutes.
+
+Reference: `docs/architecture/operations.md#deployment`.
+
+Dependencies and out of scope: depends on T155. Do not add Traefik/nginx reverse 
+proxy, TLS termination, log aggregation, or distributed tracing yet.
+
+### T157 - Add configuration validation and startup checks
+
+Goal: fail fast on startup with clear error messages for invalid configuration, 
+missing secrets, or incompatible settings before accepting any traffic.
+
+Scope:
+
+- Validate all config fields at startup before listener opens: required fields 
+  present, types correct, ranges valid, durations parseable, URLs absolute HTTP/HTTPS.
+- Validate secrets resolved from environment variables exist and non-empty: 
+  `upstream_api_key`, `admin_credential`, `auth_pepper`. Never log actual values.
+- Validate SQLite path writable, schema version compatible. If DB doesn't exist, 
+  create with correct schema. If exists with wrong version, fail with upgrade message.
+- Validate pricing patterns compilable, tokenizer mode valid, observability limits 
+  within safety bounds (T130).
+- Cross-field validation: body retention <= request retention, upstream URL doesn't 
+  point to gateway itself (detect simple loops), listen addr not privileged if 
+  running as non-root.
+- Exit code 1 with clear error message on validation failure. Error format: 
+  `"config validation failed: field 'X': reason"`. Never dump entire config.
+
+Acceptance and tests:
+
+- Unit tests: every invalid config variant triggers specific validation error with 
+  field name, valid configs pass.
+- Integration tests: start with missing secret (env not set) fails, wrong SQLite 
+  schema fails, circular upstream URL fails, out-of-range retention fails.
+- Error messages helpful: "upstream_api_key environment variable 'UPSTREAM_API_KEY' 
+  not set", not "invalid config".
+- Valid minimal config starts successfully even with optional fields omitted.
+
+Reference: `docs/architecture/operations.md#configuration`.
+
+Dependencies and out of scope: depends on T156. Do not add config hot reload, 
+validation API endpoint, config migration tool, or schema documentation generator.
+
+### T158 - Add version information and build metadata
+
+Goal: embed version, commit, and build info in binaries for operational tracking 
+and support diagnostics without requiring external version files.
+
+Scope:
+
+- Add `internal/version/version.go` with variables: `Version`, `CommitSHA`, 
+  `BuildDate`, `GoVersion`. Set via `-ldflags` during build.
+- Add `gateway --version` and `gwctl version` commands printing: version string, 
+  commit SHA (short), build date, Go version, OS/arch.
+- Include version in startup logs: `"starting gateway version=v0.1.0 commit=abc123 
+  build=2026-09-13T21:00:00Z"`.
+- Add version to `/ready` response JSON: `"version": "v0.1.0"`, `"commit": "abc123"`.
+- Add version comment to generated metrics: `# gateway version v0.1.0`.
+- Default version when not set via ldflags: `"dev"`, commit: `"unknown"`, build: 
+  `"unknown"`.
+
+Acceptance and tests:
+
+- Build with ldflags: 
+  `go build -ldflags="-X internal/version.Version=v0.1.0 -X internal/version.CommitSHA=$(git rev-parse --short HEAD)"` 
+  produces binary with correct version output.
+- `gateway --version` and `gwctl version` show version info, exit 0.
+- Startup log includes version. `/ready` JSON includes version fields.
+- Build without ldflags uses "dev" defaults, no errors.
+- Docker image T155 embeds version from build args.
+
+Reference: `docs/architecture/operations.md#versioning`.
+
+Dependencies and out of scope: depends on T157. Do not add auto-versioning from 
+git tags, changelog generation, update checking, or semantic version parsing yet.
+
+## Documentation and Testing
+
+### T159 - Add comprehensive integration test suite
+
+Goal: create end-to-end integration tests covering complete gateway lifecycle with 
+real HTTP, SQLite, and all subsystems working together.
+
+Scope:
+
+- Add `internal/integration/gateway_test.go` with test harness that starts real 
+  gateway server, mock upstream, and runs complete scenarios against live HTTP.
+- Test scenarios: key creation → policy update → authenticated requests (JSON, SSE, 
+  converted) → token/budget enforcement → request history → body retrieval → 
+  graceful shutdown.
+- Multi-key scenario: parallel requests from different keys with different policies, 
+  verify isolation (no cross-key limit leakage).
+- Failure scenario: upstream errors, timeout, cancelled requests, rejected requests, 
+  saturated telemetry queue, verify correct accounting and history.
+- Performance regression: measure TTFB and stream-close delay, verify <10ms overhead 
+  vs direct mock upstream, verify no artificial delays (T128 regression).
+- Use real SQLite (tmpfile), real HTTP server, real time (with accelerated retention 
+  for testing). No mocks of core gateway components.
+
+Acceptance and tests:
+
+- `go test ./internal/integration -v` runs full suite in <30s, all scenarios pass.
+- Tests cover at least 80% of happy path code (check with `go test -cover`).
+- Performance test: 100 concurrent SSE requests complete with mean stream-close 
+  delay <50ms, no request takes >10s total.
+- Tests clean up: no leaked goroutines (use goleak), temp files deleted, ports released.
+- Tests pass on CI with race detector: `go test -race ./internal/integration`.
+- Documented: each scenario has comment explaining what it validates and why.
+
+Reference: `docs/architecture/testing.md#integration`.
+
+Dependencies and out of scope: depends on T158. Do not add load testing, chaos 
+testing, fuzz testing beyond existing unit fuzzing, or benchmark suite yet.
+
+### T160 - Complete milestone documentation and release prep
+
+Goal: finalize documentation, verify all acceptance criteria met, update CURRENT.md, 
+and prepare for first tagged release.
+
+Scope:
+
+- Update `README.md` with complete quickstart: prerequisites, installation 
+  (Docker/binary), configuration, create first key, send first request, view history.
+- Add `docs/operations/` guides: configuration reference (all YAML fields), admin 
+  API reference (all endpoints with examples), CLI reference (`gwctl` commands), 
+  deployment guide (Docker, docker-compose, binary).
+- Update `CURRENT.md`: mark T141-T160 done, document milestone completion: "The 
+  gateway now provides complete admin read API, CLI tool, health/metrics endpoints, 
+  graceful shutdown, security hardening, and production packaging."
+- Audit task completion: verify every T141-T160 acceptance criterion met, all tests 
+  pass, no broken functionality, no TODO comments in critical paths.
+- Verify end-to-end: follow README quickstart on clean machine/container, ensure 
+  every command works as documented.
+- Tag release candidate: prepare for `v0.1.0-rc1` with changelog from T141-T160.
+
+Acceptance and tests:
+
+- README walkthrough works on Ubuntu 22.04/24.04 and macOS from clean state.
+- All documentation cross-references valid (no broken links to non-existent files).
+- `go test ./...` passes all tests. `go build ./...` builds all binaries.
+- Docker image builds and runs per README. docker-compose setup works.
+- CI green: tests, lints, builds all pass. No race conditions.
+- `CURRENT.md` accurately reflects completed work. Next milestone (T161+) clearly 
+  delineated as out of scope.
+- Git log shows all T141-T160 tasks committed with proper messages.
+
+Reference: All architecture docs in `docs/architecture/`.
+
+Dependencies and out of scope: final task in T141-T160 milestone. Do not implement 
+T161+ tasks (Web UI, advanced features, provider routing). Do not add contribution 
+guidelines, governance, or public release announcement yet.
+
+---
+
+## Milestone Summary
+
+After completing T141-T160, the gateway provides:
+
+**Admin & Operations:**
+- Complete admin read API (keys, requests, bodies)
+- `gwctl` CLI for management and inspection
+- `/ready` endpoint with deep health checks
+- `/metrics` Prometheus endpoint
+- Ordered graceful shutdown
+
+**Security & Hardening:**
+- Path traversal protection
+- Body size enforcement (10MB request, 100MB response)
+- Secret redaction audit
+- Non-root Docker execution
+
+**Deployment:**
+- Production Docker image (<50MB)
+- docker-compose example with mock upstream
+- Configuration validation with clear errors
+- Version embedding and build metadata
+
+**Testing & Docs:**
+- Comprehensive integration test suite
+- Complete operational documentation
+- Verified README quickstart
+- Release candidate ready
+
+**Next Milestone (T161+, not in this batch):**
+Web UI, advanced request filtering, usage analytics, key deletion, policy templates, 
+request replay, export capabilities, and enhanced observability.
+
