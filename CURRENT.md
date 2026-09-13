@@ -3,11 +3,17 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T137`.
+Done: `T001`-`T138`.
 
-Current: `T138` - persist telemetry transactionally.
+Current: `T139` - add bounded history persistence worker.
 
-Queued: `T138`-`T140` in dependency order from `TASKS.md`.
+Queued: `T139`-`T140` in dependency order from `TASKS.md`.
+
+T138 adds synchronous `RequestHistoryRepository.Persist`/`Insert` for one
+validated scalar history record plus optional immutable body snapshots, and
+separate bounded body/metadata deletion methods. Retention is deterministic
+and deletes rows with `finished_at < cutoff` (the exact cutoff is retained),
+with body cleanup preceding metadata cascade.
 
 T136 advances SQLite schema version 7 with the `requests` history table. T137
 advances it to version 8 with separate `request_bodies`; body rows cascade on
