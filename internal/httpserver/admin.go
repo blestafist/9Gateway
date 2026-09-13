@@ -49,6 +49,10 @@ type apiKeyPageLister interface {
 	ListAPIKeys(context.Context, int, string) ([]storage.KeyListRecord, string, error)
 }
 
+type apiKeyDetailGetter interface {
+	GetAPIKeyByID(context.Context, string) (*storage.KeyDetailRecord, error)
+}
+
 type apiKeyPolicyUpdater interface {
 	UpdatePolicy(context.Context, string, bool, string) error
 }
@@ -80,6 +84,13 @@ func newAdminKeyService(repository apiKeyRepository, pepper []byte, tokenModes .
 	authenticator, err := auth.NewAuthenticator(pepper, nil, tokenModes...)
 	if err != nil {
 		return nil, errAdminKeyCreation
+	}
+	if configured, ok := repository.(interface{ SetTokenMode(auth.TokenMode) }); ok {
+		mode := auth.TokenModeEstimate
+		if len(tokenModes) == 1 {
+			mode = tokenModes[0]
+		}
+		configured.SetTokenMode(mode)
 	}
 	service := &adminKeyService{
 		repository: repository,
@@ -166,6 +177,60 @@ type adminPolicySummary struct {
 	DenyModels      bool `json:"deny_models"`
 	LogRequestBody  bool `json:"log_request_body"`
 	LogResponseBody bool `json:"log_response_body"`
+}
+
+type adminPolicyWindow struct {
+	Amount   int64 `json:"amount"`
+	Duration int64 `json:"duration_seconds"`
+}
+
+type adminRequestPolicyWindow struct {
+	Amount   int   `json:"amount"`
+	Duration int64 `json:"duration_seconds"`
+}
+
+type adminBudgetLimit struct {
+	Period       string `json:"period"`
+	AmountMicros int64  `json:"amount_micros"`
+}
+
+type adminKeyPolicy struct {
+	AllowedModels         []string                   `json:"allowed_models"`
+	DeniedModels          []string                   `json:"denied_models"`
+	RequestWindows        []adminRequestPolicyWindow `json:"request_windows"`
+	TokenWindows          []adminPolicyWindow        `json:"token_windows"`
+	TokenMode             auth.TokenMode             `json:"token_mode"`
+	MaxConcurrentRequests int                        `json:"max_concurrent_requests"`
+	BudgetLimits          []adminBudgetLimit         `json:"budget_limits"`
+	LogRequestBody        bool                       `json:"log_request_body"`
+	LogResponseBody       bool                       `json:"log_response_body"`
+}
+
+type adminKeyDetailItem struct {
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	DisplayPrefix string         `json:"display_prefix"`
+	Enabled       bool           `json:"enabled"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	ExpiresAt     *time.Time     `json:"expires_at"`
+	Policy        adminKeyPolicy `json:"policy"`
+}
+
+func validAPIKeyID(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
+			if index == 0 && (character == '-' || character == '_') {
+				return false
+			}
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // create makes one persistent key. A small retry budget handles an extremely
@@ -397,6 +462,10 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		handler.listKeys(response, request)
 		return
 	}
+	if request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/admin/v1/keys/") {
+		handler.getKey(response, request)
+		return
+	}
 	if request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/admin/v1/keys/") && strings.HasSuffix(request.URL.Path, "/policy") {
 		handler.updatePolicy(response, request)
 		return
@@ -445,6 +514,65 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		Policy    json.RawMessage `json:"policy"`
 	}{created.ID, created.Name, created.Prefix, created.Enabled, created.ExpiresAt, created.CreatedAt, created.RawKey, created.Policy}
 	writeAdminJSON(response, http.StatusCreated, responseBody)
+}
+
+func (handler *adminHandler) getKey(response http.ResponseWriter, request *http.Request) {
+	const prefix = "/admin/v1/keys/"
+	if !adminBearerMatches(request, handler.credential) {
+		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+		return
+	}
+	id := strings.TrimPrefix(request.URL.Path, prefix)
+	if !validAPIKeyID(id) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid key id")
+		return
+	}
+	getter, ok := handler.service.repository.(apiKeyDetailGetter)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "key lookup failed")
+		return
+	}
+	record, err := getter.GetAPIKeyByID(request.Context(), id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeAdminError(response, http.StatusNotFound, gatewayErrorNotFound, "")
+		} else {
+			writeAdminError(response, http.StatusInternalServerError, "internal_error", "key lookup failed")
+		}
+		return
+	}
+	writeAdminJSON(response, http.StatusOK, adminKeyDetailFromRecord(*record))
+}
+
+func adminKeyDetailFromRecord(record storage.KeyDetailRecord) adminKeyDetailItem {
+	policy := record.Policy
+	requestWindows := policy.RequestWindows()
+	requestPolicy := make([]adminRequestPolicyWindow, 0, len(requestWindows))
+	for _, window := range requestWindows {
+		requestPolicy = append(requestPolicy, adminRequestPolicyWindow{Amount: window.Amount, Duration: int64(window.Duration / time.Second)})
+	}
+	tokenWindows := policy.TokenWindows()
+	tokenPolicy := make([]adminPolicyWindow, 0, len(tokenWindows))
+	for _, window := range tokenWindows {
+		tokenPolicy = append(tokenPolicy, adminPolicyWindow{Amount: window.Amount, Duration: int64(window.Duration / time.Second)})
+	}
+	budgets := policy.BudgetLimits()
+	budgetPolicy := make([]adminBudgetLimit, 0, len(budgets))
+	for _, budget := range budgets {
+		amount, _ := budget.Amount.Micros()
+		budgetPolicy = append(budgetPolicy, adminBudgetLimit{Period: string(budget.Period), AmountMicros: amount})
+	}
+	return adminKeyDetailItem{
+		ID: record.ID, Name: record.Name, DisplayPrefix: record.DisplayPrefix,
+		Enabled: record.Enabled, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		ExpiresAt: record.ExpiresAt,
+		Policy: adminKeyPolicy{
+			AllowedModels: policy.AllowedModels(), DeniedModels: policy.DeniedModels(),
+			RequestWindows: requestPolicy, TokenWindows: tokenPolicy,
+			TokenMode: policy.TokenMode(), MaxConcurrentRequests: policy.MaxConcurrency(),
+			BudgetLimits: budgetPolicy, LogRequestBody: policy.LogRequestBody(), LogResponseBody: policy.LogResponseBody(),
+		},
+	}
 }
 
 func (handler *adminHandler) listKeys(response http.ResponseWriter, request *http.Request) {

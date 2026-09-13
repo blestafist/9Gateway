@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pestit/9gateway/internal/auth"
 )
 
 func TestAPIKeyRepositoryRoundTripAndBoundaryCopies(t *testing.T) {
@@ -127,6 +129,46 @@ func TestAPIKeyRepositoryListAPIsafeCursorPaginationAndSummary(t *testing.T) {
 	}
 	if _, _, err := repository.ListAPIKeys(ctx, 2, cursor+"tampered"); !errors.Is(err, ErrInvalidCursor) {
 		t.Fatalf("tampered cursor error = %v", err)
+	}
+}
+
+func TestAPIKeyRepositoryGetDetailParsesEffectivePolicyAndHidesSecrets(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewAPIKeyRepository(database)
+	when := time.Unix(1_700_000_000, 0).UTC()
+	policy := `{"allowed_models":["gpt-*"],"denied_models":["gpt-secret"],"request_windows":[{"amount":7,"duration":"90s"}],"token_windows":[{"amount":1234,"duration":"2h"}],"token_mode":"usage_only","max_concurrent_requests":3,"budget_limits":[{"amount_micros":42,"period":"total"},{"amount_micros":43,"period":"day"},{"amount_micros":44,"period":"month"}],"log_request_body":true,"log_response_body":true}`
+	if err := repository.Insert(ctx, APIKeyRecord{ID: "detail-key", Name: "detail", DisplayPrefix: "prefix", Digest: bytesOf(1), Enabled: false, ExpiresAt: nil, CreatedAt: when, UpdatedAt: when, PolicyJSON: policy}); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := repository.GetAPIKeyByID(ctx, "detail-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ID != "detail-key" || detail.Enabled || detail.ExpiresAt != nil || detail.Policy.MaxConcurrency() != 3 || detail.Policy.TokenMode() != auth.TokenModeUsageOnly {
+		t.Fatalf("detail metadata/policy = %#v", detail)
+	}
+	if got := detail.Policy.RequestWindows(); len(got) != 1 || got[0].Amount != 7 || got[0].Duration != 90*time.Second {
+		t.Fatalf("request windows = %#v", got)
+	}
+	if got := detail.Policy.TokenWindows(); len(got) != 1 || got[0].Amount != 1234 || got[0].Duration != 2*time.Hour {
+		t.Fatalf("token windows = %#v", got)
+	}
+	if total, ok := detail.Policy.TotalBudget(); func() bool { micros, known := total.Micros(); return !ok || !known || micros != 42 }() {
+		t.Fatalf("total budget = %#v/%v", total, ok)
+	}
+	if !detail.Policy.LogRequestBody() || !detail.Policy.LogResponseBody() || len(detail.Policy.AllowedModels()) != 1 || len(detail.Policy.DeniedModels()) != 1 {
+		t.Fatalf("policy details = %#v", detail.Policy)
+	}
+	if _, err := database.Exec(`UPDATE api_keys SET policy_json = ? WHERE id = ?`, `{"unknown":true}`, "detail-key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.GetAPIKeyByID(ctx, "detail-key"); !errors.Is(err, auth.ErrInvalidPolicy) {
+		t.Fatalf("corrupt policy error = %v, want auth.ErrInvalidPolicy", err)
 	}
 }
 

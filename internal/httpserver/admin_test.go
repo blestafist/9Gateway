@@ -141,6 +141,129 @@ func TestAdminListKeysHTTPReturnsSafePaginatedMetadata(t *testing.T) {
 	}
 }
 
+func TestAdminGetKeyHTTPReturnsCompleteSafeEffectivePolicy(t *testing.T) {
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := storage.NewAPIKeyRepository(database)
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), "http://127.0.0.1:1", "upstream", "admin-secret", "pepper", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Unix(1_700_000_000, 0).UTC()
+	expires := created.Add(time.Hour)
+	id := "key-0123456789abcdef0123456789abcdef"
+	policy := `{"allowed_models":["gpt-*"],"denied_models":["gpt-secret"],"request_windows":[{"amount":7,"duration":"90s"}],"token_windows":[{"amount":1234,"duration":"2h"}],"token_mode":"usage_only","max_concurrent_requests":3,"budget_limits":[{"amount_micros":42,"period":"total"},{"amount_micros":43,"period":"day"},{"amount_micros":44,"period":"month"}],"log_request_body":true,"log_response_body":true}`
+	for _, record := range []storage.APIKeyRecord{
+		{ID: id, Name: "detail", DisplayPrefix: "prefix", Digest: bytes.Repeat([]byte{1}, storage.HMACDigestSize), Enabled: false, ExpiresAt: &expires, CreatedAt: created, UpdatedAt: created, PolicyJSON: policy},
+		{ID: "key-fedcba9876543210fedcba9876543210", Name: "null-expiry", DisplayPrefix: "prefix2", Digest: bytes.Repeat([]byte{2}, storage.HMACDigestSize), Enabled: true, CreatedAt: created, UpdatedAt: created, PolicyJSON: `{}`},
+	} {
+		if err := repository.Insert(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/admin/v1/keys/"+id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		ID            string     `json:"id"`
+		Name          string     `json:"name"`
+		DisplayPrefix string     `json:"display_prefix"`
+		Enabled       bool       `json:"enabled"`
+		ExpiresAt     *time.Time `json:"expires_at"`
+		Policy        struct {
+			AllowedModels  []string `json:"allowed_models"`
+			DeniedModels   []string `json:"denied_models"`
+			RequestWindows []struct {
+				Amount   int   `json:"amount"`
+				Duration int64 `json:"duration_seconds"`
+			} `json:"request_windows"`
+			TokenWindows []struct {
+				Amount   int64 `json:"amount"`
+				Duration int64 `json:"duration_seconds"`
+			} `json:"token_windows"`
+			TokenMode      string `json:"token_mode"`
+			MaxConcurrency int    `json:"max_concurrent_requests"`
+			BudgetLimits   []struct {
+				Period string `json:"period"`
+				Amount int64  `json:"amount_micros"`
+			} `json:"budget_limits"`
+			LogRequestBody  bool `json:"log_request_body"`
+			LogResponseBody bool `json:"log_response_body"`
+		} `json:"policy"`
+	}
+	decodeResponse(t, response, &body)
+	if response.StatusCode != http.StatusOK || body.ID != id || body.Name != "detail" || body.DisplayPrefix != "prefix" || body.Enabled || body.ExpiresAt == nil || !body.ExpiresAt.Equal(expires) {
+		t.Fatalf("detail response = %#v, status %d", body, response.StatusCode)
+	}
+	if !reflect.DeepEqual(body.Policy.AllowedModels, []string{"gpt-*"}) || !reflect.DeepEqual(body.Policy.DeniedModels, []string{"gpt-secret"}) || len(body.Policy.RequestWindows) != 1 || body.Policy.RequestWindows[0].Amount != 7 || body.Policy.RequestWindows[0].Duration != 90 || len(body.Policy.TokenWindows) != 1 || body.Policy.TokenWindows[0].Amount != 1234 || body.Policy.TokenWindows[0].Duration != 7200 || body.Policy.TokenMode != "usage_only" || body.Policy.MaxConcurrency != 3 || len(body.Policy.BudgetLimits) != 3 || body.Policy.BudgetLimits[2].Amount != 44 || !body.Policy.LogRequestBody || !body.Policy.LogResponseBody {
+		t.Fatalf("policy response = %#v", body.Policy)
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"digest", "key_hash", "pepper", "raw_key", "policy_json", "generation", "SELECT"} {
+		if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+			t.Fatalf("detail response leaked %q: %s", forbidden, encoded)
+		}
+	}
+
+	nullRequest := request.Clone(context.Background())
+	nullRequest.URL.Path = "/admin/v1/keys/key-fedcba9876543210fedcba9876543210"
+	nullResponse, err := http.DefaultClient.Do(nullRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nullBody map[string]any
+	decodeResponse(t, nullResponse, &nullBody)
+	if nullBody["expires_at"] != nil {
+		t.Fatalf("null expiry response = %#v", nullBody["expires_at"])
+	}
+
+	for _, path := range []string{"/admin/v1/keys/missing", "/admin/v1/keys/not valid"} {
+		badRequest := request.Clone(context.Background())
+		badRequest.URL.Path = path
+		badResponse, err := http.DefaultClient.Do(badRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badResponse.Body.Close()
+		want := http.StatusNotFound
+		if strings.Contains(path, "not valid") {
+			want = http.StatusBadRequest
+		}
+		if badResponse.StatusCode != want {
+			t.Fatalf("path %q status = %d, want %d", path, badResponse.StatusCode, want)
+		}
+	}
+	for _, credential := range []string{"", "Bearer wrong"} {
+		unauthenticated := request.Clone(context.Background())
+		unauthenticated.Header.Del("Authorization")
+		if credential != "" {
+			unauthenticated.Header.Set("Authorization", credential)
+		}
+		unauthenticatedResponse, err := http.DefaultClient.Do(unauthenticated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unauthenticatedResponse.Body.Close()
+		if unauthenticatedResponse.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("credential %q status = %d", credential, unauthenticatedResponse.StatusCode)
+		}
+	}
+}
+
 func TestAdminCreateKeyHTTPRejectsMissingWrongAndGatewayCredentials(t *testing.T) {
 	database, err := storage.Open(context.Background(), ":memory:")
 	if err != nil {

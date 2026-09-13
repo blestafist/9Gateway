@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/pestit/9gateway/internal/auth"
 )
 
 const (
@@ -93,6 +95,20 @@ type KeyListRecord struct {
 	PolicySummary KeyPolicySummary
 }
 
+// KeyDetailRecord is the safe, fully compiled representation used by the
+// administrative detail endpoint. It deliberately contains neither the key
+// digest nor the stored policy document.
+type KeyDetailRecord struct {
+	ID            string
+	Name          string
+	DisplayPrefix string
+	Enabled       bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	ExpiresAt     *time.Time
+	Policy        auth.EffectivePolicy
+}
+
 type apiKeyListCursor struct {
 	CreatedAt int64
 	ID        string
@@ -154,6 +170,7 @@ type dbQueries interface {
 type APIKeyRepository struct {
 	database   dbQueries
 	cursorAEAD cipher.AEAD
+	tokenMode  auth.TokenMode
 }
 
 // NewAPIKeyRepository creates a repository over an opened storage database.
@@ -177,7 +194,17 @@ func newAPIKeyRepository(database dbQueries, key []byte) *APIKeyRepository {
 			aead, _ = cipher.NewGCM(block)
 		}
 	}
-	return &APIKeyRepository{database: database, cursorAEAD: aead}
+	return &APIKeyRepository{database: database, cursorAEAD: aead, tokenMode: auth.TokenModeEstimate}
+}
+
+// SetTokenMode configures the deployment default used when a stored policy
+// omits token_mode. It is called during process wiring, before requests are
+// served, and keeps detail reads consistent with authentication enforcement.
+func (repository *APIKeyRepository) SetTokenMode(mode auth.TokenMode) {
+	if repository == nil || (mode != auth.TokenModeUsageOnly && mode != auth.TokenModeEstimate) {
+		return
+	}
+	repository.tokenMode = mode
 }
 
 // SetCursorSecret scopes cursors to the server's existing secret. It is called
@@ -266,6 +293,62 @@ func (repository *APIKeyRepository) GetByID(ctx context.Context, id string) (API
 	}
 	return repository.lookup(ctx, `SELECT id, name, prefix, key_hash, enabled, expires_at, created_at, updated_at, policy_json
 		FROM api_keys WHERE id = ?`, id, "get api key")
+}
+
+// GetAPIKeyByID returns one safe, typed detail record. The policy is parsed as
+// part of the same SQLite row read, so callers never combine metadata from one
+// committed row with policy from another. Stored policy corruption is returned
+// as auth.ErrInvalidPolicy and is therefore an internal error to HTTP callers.
+func (repository *APIKeyRepository) GetAPIKeyByID(ctx context.Context, id string) (*KeyDetailRecord, error) {
+	if ctx == nil {
+		return nil, errors.New("get api key detail: nil context")
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, ErrInvalidRecord
+	}
+	if repository == nil || repository.database == nil {
+		return nil, ErrRepositoryUnavailable
+	}
+	var record KeyDetailRecord
+	var enabled int64
+	var expiresAt sql.NullInt64
+	var createdAt, updatedAt int64
+	var policyJSON string
+	err := repository.database.QueryRowContext(ctx, `
+		SELECT id, name, prefix, enabled, expires_at, created_at, updated_at, policy_json
+		FROM api_keys WHERE id = ?`, id).Scan(
+		&record.ID, &record.Name, &record.DisplayPrefix, &enabled, &expiresAt,
+		&createdAt, &updatedAt, &policyJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, errors.New("get api key detail: database read failed")
+	}
+	if enabled != 0 && enabled != 1 {
+		return nil, ErrInvalidRecord
+	}
+	created, createdOK := unixTimestamp(createdAt)
+	updated, updatedOK := unixTimestamp(updatedAt)
+	if !createdOK || !updatedOK || updated.Before(created) {
+		return nil, ErrInvalidRecord
+	}
+	if expiresAt.Valid {
+		expires := time.Unix(expiresAt.Int64, 0).UTC()
+		record.ExpiresAt = &expires
+	}
+	record.Enabled = enabled == 1
+	record.CreatedAt = created
+	record.UpdatedAt = updated
+	mode := repository.tokenMode
+	if mode == "" {
+		mode = auth.TokenModeEstimate
+	}
+	record.Policy, err = auth.ParsePolicyJSONWithTokenMode([]byte(policyJSON), mode)
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
 }
 
 // Get is a concise spelling for GetByID.

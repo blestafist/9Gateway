@@ -3,9 +3,9 @@
 Current milestone: admin read API, CLI, readiness/metrics, packaging
 (`T141`-`T160`).
 
-Done: `T001`-`T141`.
+Done: `T001`-`T142`.
 
-Current: `T142`.
+Current: `T143`.
 
 Queued: `T143`-`T160`.
 
