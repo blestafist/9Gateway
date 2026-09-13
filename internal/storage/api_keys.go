@@ -169,6 +169,7 @@ type dbQueries interface {
 // APIKeyRepository persists APIKeyRecords in the schema installed by T066.
 type APIKeyRepository struct {
 	database   dbQueries
+	beginner   txBeginner
 	cursorAEAD cipher.AEAD
 	tokenMode  auth.TokenMode
 }
@@ -204,7 +205,27 @@ func newAPIKeyRepository(database dbQueries, key []byte) *APIKeyRepository {
 			aead, _ = cipher.NewGCM(block)
 		}
 	}
-	return &APIKeyRepository{database: database, cursorAEAD: aead, tokenMode: auth.TokenModeEstimate}
+	repository := &APIKeyRepository{database: database, cursorAEAD: aead, tokenMode: auth.TokenModeEstimate}
+	if beginner, ok := database.(txBeginner); ok {
+		repository.beginner = beginner
+	}
+	return repository
+}
+
+// GetRequestByID reads request metadata and body-kind availability through the
+// shared history projection. It intentionally does not expose key material or
+// body contents.
+func (repository *APIKeyRepository) GetRequestByID(ctx context.Context, requestID string) (*RequestDetailRecord, error) {
+	if ctx == nil {
+		return nil, errors.New("get request detail: nil context")
+	}
+	if !validHistoryRequestID(requestID) {
+		return nil, ErrHistoryInvalidRecord
+	}
+	if repository == nil || repository.database == nil {
+		return nil, ErrRepositoryUnavailable
+	}
+	return getRequestByID(repository.database, repository.beginner, ctx, requestID)
 }
 
 // SetTokenMode configures the deployment default used when a stored policy

@@ -165,6 +165,14 @@ type RequestListRecord struct {
 	StreamCloseDelayMicros      OptionalInt64
 }
 
+// RequestDetailRecord is the scalar request projection plus the kinds of
+// captured bodies available for a request. Body contents are deliberately not
+// part of this record.
+type RequestDetailRecord struct {
+	RequestListRecord
+	HasBodies []string
+}
+
 type requestListCursor struct {
 	FinishedAt    int64
 	FinishedKnown bool
@@ -195,6 +203,133 @@ func (repository *RequestHistoryRepository) ListRequests(ctx context.Context, fi
 		return nil, "", ErrHistoryRepositoryUnavailable
 	}
 	return listRequests(repository.database, repository.cursorAEAD, ctx, filter, limit, cursor)
+}
+
+// GetRequestByID returns one request's metadata and the available body kinds.
+// The metadata query is indexed by request_id and never selects body BLOBs.
+// When the database supports transactions, both reads share a SQLite snapshot
+// so a concurrent body cleanup cannot make the detail read fail or mix states.
+func (repository *RequestHistoryRepository) GetRequestByID(ctx context.Context, requestID string) (*RequestDetailRecord, error) {
+	if ctx == nil {
+		return nil, errors.New("get request detail: nil context")
+	}
+	if !validHistoryRequestID(requestID) {
+		return nil, ErrHistoryInvalidRecord
+	}
+	if repository == nil || repository.database == nil {
+		return nil, ErrHistoryRepositoryUnavailable
+	}
+	return getRequestByID(repository.database, repository.beginner, ctx, requestID)
+}
+
+const requestMetadataQuery = `SELECT request_id, api_key_id, key_name, method, path, route, model,
+	requested_mode, upstream_mode, delivered_mode, downstream_status,
+	upstream_status, terminal_outcome, upstream_started, error_code,
+	client_bytes, upstream_bytes, delivered_bytes, input_tokens, output_tokens,
+	total_tokens, cached_input_tokens, reasoning_output_tokens, cost_micros,
+	started_at, upstream_started_at, upstream_headers_at, first_byte_at,
+	finished_at, total_micros, time_to_upstream_headers_micros,
+	time_to_first_byte_micros, stream_close_delay_micros FROM requests WHERE request_id = ?`
+
+func getRequestByID(database dbQueries, beginner txBeginner, ctx context.Context, requestID string) (*RequestDetailRecord, error) {
+	if beginner != nil {
+		tx, err := beginner.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, errors.New("get request detail: database read failed")
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		record, err := scanRequestDetail(tx.QueryRowContext(ctx, requestMetadataQuery, requestID), tx, ctx, requestID)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, errors.New("get request detail: database read failed")
+		}
+		committed = true
+		return record, nil
+	}
+	return scanRequestDetail(database.QueryRowContext(ctx, requestMetadataQuery, requestID), database, ctx, requestID)
+}
+
+type sqlScanner interface {
+	Scan(...any) error
+}
+
+func scanRequestDetail(metadata sqlScanner, bodyDB dbQueries, ctx context.Context, requestID string) (*RequestDetailRecord, error) {
+	record, err := scanRequestMetadata(metadata)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	bodies, err := bodyKinds(bodyDB, ctx, requestID)
+	if err != nil {
+		return nil, errors.New("get request detail: database read failed")
+	}
+	record.HasBodies = bodies
+	return record, nil
+}
+
+func scanRequestMetadata(scanner sqlScanner) (*RequestDetailRecord, error) {
+	var record RequestDetailRecord
+	var keyID, keyName, method, path, route, model, requested, upstream, delivered, outcome, errorCode sql.NullString
+	var status, upstreamStatus, clientBytes, upstreamBytes, deliveredBytes, input, output, total, cached, reasoning, cost sql.NullInt64
+	var started, upstreamStartedAt, headers, firstByte, finished, totalMicros, headerLatency, firstByteLatency, closeDelay sql.NullInt64
+	var upstreamStarted int64
+	err := scanner.Scan(&record.RequestID, &keyID, &keyName, &method, &path, &route, &model, &requested, &upstream, &delivered, &status, &upstreamStatus, &outcome, &upstreamStarted, &errorCode, &clientBytes, &upstreamBytes, &deliveredBytes, &input, &output, &total, &cached, &reasoning, &cost, &started, &upstreamStartedAt, &headers, &firstByte, &finished, &totalMicros, &headerLatency, &firstByteLatency, &closeDelay)
+	if err != nil {
+		return nil, err
+	}
+	if upstreamStarted != 0 && upstreamStarted != 1 {
+		return nil, ErrHistoryInvalidRecord
+	}
+	text := func(value sql.NullString) string {
+		if value.Valid {
+			return value.String
+		}
+		return ""
+	}
+	number := func(value sql.NullInt64) OptionalInt64 {
+		if value.Valid {
+			return KnownInt64(value.Int64)
+		}
+		return OptionalInt64{}
+	}
+	record.APIKeyID, record.KeyName, record.Method, record.Path, record.Route, record.Model = text(keyID), text(keyName), text(method), text(path), text(route), text(model)
+	record.RequestedMode, record.UpstreamMode, record.DeliveredMode, record.TerminalOutcome, record.ErrorCode = text(requested), text(upstream), text(delivered), text(outcome), text(errorCode)
+	record.UpstreamStarted = upstreamStarted == 1
+	record.DownstreamStatus, record.UpstreamStatus = number(status), number(upstreamStatus)
+	record.ClientBytes, record.UpstreamBytes, record.DeliveredBytes = number(clientBytes), number(upstreamBytes), number(deliveredBytes)
+	record.InputTokens, record.OutputTokens, record.TotalTokens, record.CachedInputTokens, record.ReasoningOutputTokens, record.CostMicros = number(input), number(output), number(total), number(cached), number(reasoning), number(cost)
+	record.StartedAt, record.UpstreamStartedAt, record.UpstreamHeadersAt, record.FirstByteAt, record.FinishedAt = number(started), number(upstreamStartedAt), number(headers), number(firstByte), number(finished)
+	record.TotalMicros, record.TimeToUpstreamHeadersMicros, record.TimeToFirstByteMicros, record.StreamCloseDelayMicros = number(totalMicros), number(headerLatency), number(firstByteLatency), number(closeDelay)
+	return &record, nil
+}
+
+func bodyKinds(database dbQueries, ctx context.Context, requestID string) ([]string, error) {
+	rows, err := database.QueryContext(ctx, `SELECT body_kind FROM request_bodies WHERE request_id = ? AND body_kind IN ('client_request', 'upstream_request', 'response') ORDER BY CASE body_kind WHEN 'client_request' THEN 1 WHEN 'upstream_request' THEN 2 WHEN 'response' THEN 3 END`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0, 3)
+	for rows.Next() {
+		var kind string
+		if err := rows.Scan(&kind); err != nil {
+			return nil, err
+		}
+		result = append(result, kind)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // listRequests is shared with the API-key repository because the admin handler

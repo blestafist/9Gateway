@@ -57,6 +57,10 @@ type requestPageLister interface {
 	ListRequests(context.Context, storage.ListRequestsFilter, int, string) ([]storage.RequestListRecord, string, error)
 }
 
+type requestDetailGetter interface {
+	GetRequestByID(context.Context, string) (*storage.RequestDetailRecord, error)
+}
+
 type apiKeyPolicyUpdater interface {
 	UpdatePolicy(context.Context, string, bool, string) error
 }
@@ -462,6 +466,10 @@ func newAPIKeyID() (string, error) {
 }
 
 func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/admin/v1/requests/") {
+		handler.getRequest(response, request)
+		return
+	}
 	if request.Method == http.MethodGet && request.URL.Path == "/admin/v1/requests" {
 		handler.listRequests(response, request)
 		return
@@ -560,6 +568,11 @@ type adminRequestListItem struct {
 	StreamCloseDelayMicros      *int64     `json:"stream_close_delay_micros"`
 }
 
+type adminRequestDetailItem struct {
+	adminRequestListItem
+	HasBodies []string `json:"has_bodies"`
+}
+
 func adminRequestListItemFromRecord(record storage.RequestListRecord) adminRequestListItem {
 	text := func(value string) *string {
 		if value == "" {
@@ -647,6 +660,37 @@ func (handler *adminHandler) listRequests(response http.ResponseWriter, request 
 		Requests   []adminRequestListItem `json:"requests"`
 		NextCursor string                 `json:"next_cursor,omitempty"`
 	}{Requests: items, NextCursor: nextCursor})
+}
+
+func (handler *adminHandler) getRequest(response http.ResponseWriter, request *http.Request) {
+	if !adminBearerMatches(request, handler.credential) {
+		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+		return
+	}
+	const prefix = "/admin/v1/requests/"
+	id := strings.TrimPrefix(request.URL.Path, prefix)
+	if !validRequestID(id) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request id")
+		return
+	}
+	getter, ok := handler.service.repository.(requestDetailGetter)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "request lookup failed")
+		return
+	}
+	record, err := getter.GetRequestByID(request.Context(), id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeAdminError(response, http.StatusNotFound, gatewayErrorNotFound, "")
+		} else {
+			writeAdminError(response, http.StatusInternalServerError, "internal_error", "request lookup failed")
+		}
+		return
+	}
+	writeAdminJSON(response, http.StatusOK, adminRequestDetailItem{
+		adminRequestListItem: adminRequestListItemFromRecord(record.RequestListRecord),
+		HasBodies:            record.HasBodies,
+	})
 }
 
 func parseAdminListLimit(query map[string][]string) (int, error) {
