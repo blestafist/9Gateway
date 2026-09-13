@@ -3,15 +3,18 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T131`.
+Done: `T001`-`T132`.
 
-Current: `T132` - implement bounded binary body recording.
+Current: `T133` - capture client and upstream request bodies.
 
-Queued: `T132`-`T140` in dependency order from `TASKS.md`.
+Queued: `T133`-`T140` in dependency order from `TASKS.md`.
 
 T131 established strict per-key request/response body-capture opt-ins in the
-immutable effective policy and atomic admin replacement/reopen path; T132 must
-consume those snapshots without changing transport behavior.
+immutable effective policy and atomic admin replacement/reopen path. T132 adds
+the protocol-independent `observability.BodyRecorder`: it retains a bounded
+prefix, checked `int64` original size, strict body kind, and immutable snapshots;
+zero bound allocates nothing, and finalized recorders reject later writes with
+`ErrFinalized`. T133-T135 must copy each snapshot only at their handoff.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
