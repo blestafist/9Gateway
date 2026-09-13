@@ -403,6 +403,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var clientBodyCapture, upstreamBodyCapture *requestBodyCapture
 	var clientBodyRecorder, upstreamBodyRecorder *observability.BodyRecorder
 	var upstreamBody *capturedRequestBody
+	var responseBodyRecorder *observability.BodyRecorder
 	completion := completionOwnershipFromContext(request.Context())
 	var dispatchErr error
 	// client.Do owns the ambiguous boundary. Before it is called, cleanup can
@@ -475,6 +476,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			if trace != nil {
 				trace.SetRequestBodySnapshots(clientSnapshot, upstreamSnapshot)
 			}
+		}
+		if responseBodyRecorder != nil && trace != nil {
+			trace.SetResponseBodySnapshot(responseBodyRecorder.Finalize())
 		}
 		inspectionLease.Release()
 		if lifecycleLease != nil {
@@ -740,6 +744,17 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		setTerminal(TerminalOutcomeCustomDispatch)
 		handler.responseDispatch(response, upstreamResponse, metadata)
 		return
+	}
+	if authenticated && principal.Policy.LogResponseBody() && handler.tokenConfig.MaxCapturedBodyBytes > 0 && (responseMode == ResponseModeJSON || responseMode == ResponseModeOpaque) {
+		// Response capture is installed at the sole downstream writer boundary.
+		// Its bound and enablement are independent from responseObservation, which
+		// exists only for accounting and usage reconciliation.
+		if recorder, err := observability.NewBodyRecorder(observability.BodyKindResponse, handler.tokenConfig.MaxCapturedBodyBytes); err == nil {
+			responseBodyRecorder = recorder
+			if completion := completionWriterFor(response); completion != nil {
+				completion.responseBodyRecorder = recorder
+			}
+		}
 	}
 	if trace != nil {
 		// A malformed or ambiguous header has no provable actual mode, but the
@@ -1733,6 +1748,18 @@ func completionWriter(response http.ResponseWriter, trace *RequestTraceState, te
 	return writer, decorateCompletionWriter(writer)
 }
 
+func completionWriterFor(response http.ResponseWriter) *completionResponseWriter {
+	if writer, ok := response.(*completionResponseWriter); ok {
+		return writer
+	}
+	if existing, ok := response.(interface {
+		completionWriter() *completionResponseWriter
+	}); ok {
+		return existing.completionWriter()
+	}
+	return nil
+}
+
 func decorateCompletionWriter(writer *completionResponseWriter) http.ResponseWriter {
 	var wrapped http.ResponseWriter = writer
 	_, flushable := writer.ResponseWriter.(http.Flusher)
@@ -1755,9 +1782,10 @@ func requestIDFromContext(ctx context.Context) string {
 
 type completionResponseWriter struct {
 	http.ResponseWriter
-	status   int
-	trace    *RequestTraceState
-	terminal *terminalMetadataState
+	status               int
+	trace                *RequestTraceState
+	terminal             *terminalMetadataState
+	responseBodyRecorder *observability.BodyRecorder
 }
 
 // Bifrost provenance review: commit 03ab391865710462302bbcf52dca2f32682b91b5,
@@ -1884,6 +1912,12 @@ func (writer *completionResponseWriter) Write(body []byte) (int, error) {
 		writer.WriteHeader(http.StatusOK)
 	}
 	written, err := writer.ResponseWriter.Write(body)
+	if writer.responseBodyRecorder != nil && written >= 0 && written <= len(body) {
+		// n is the number accepted by the downstream writer, including a short
+		// write accompanied by an error. Recorder failures are deliberately
+		// ignored: capture is best effort and must not affect transport.
+		_ = writer.responseBodyRecorder.WriteObserved(body, written)
+	}
 	if writer.trace != nil && written >= 0 && written <= len(body) {
 		if written > 0 || err == nil {
 			// n is the number accepted by the underlying writer, even when a

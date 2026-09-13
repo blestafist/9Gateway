@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T133`.
+Done: `T001`-`T134`.
 
-Current: `T134` - capture JSON and opaque responses.
+Current: `T135` - capture SSE and converted responses.
 
-Queued: `T134`-`T140` in dependency order from `TASKS.md`.
+Queued: `T135`-`T140` in dependency order from `TASKS.md`.
 
 T131 established strict per-key request/response body-capture opt-ins in the
 immutable effective policy and atomic admin replacement/reopen path. T132 adds
@@ -21,6 +21,10 @@ T133 stores finalized client/upstream request snapshots alongside request-local
 trace state, reachable through `RequestBodySnapshots`; capture wraps the
 authenticated client body before inspection and the final replay body before
 `client.Do`, without entering completion records or logs.
+
+T134 attaches the bounded response recorder to the sole completion response
+writer after JSON/opaque dispatch is selected, recording only downstream-accepted
+bytes. T135 must reuse that writer-level hook for transparent SSE and conversion.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

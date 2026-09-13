@@ -123,7 +123,9 @@ type RequestTraceState struct {
 	bodyMu           sync.Mutex
 	clientBody       observability.BodySnapshot
 	upstreamBody     observability.BodySnapshot
+	responseBody     observability.BodySnapshot
 	bodySnapshotsSet bool
+	responseBodySet  bool
 }
 
 func (state *RequestTraceState) setCompletionOwnership(ownership *completionOwnership) {
@@ -432,6 +434,38 @@ func (state *RequestTraceState) RequestBodySnapshots() (observability.BodySnapsh
 func copyBodySnapshot(snapshot observability.BodySnapshot) observability.BodySnapshot {
 	snapshot.Bytes = append([]byte(nil), snapshot.Bytes...)
 	return snapshot
+}
+
+// SetResponseBodySnapshot stores the terminal downstream response capture
+// separately from CompletionRecord. The retained bytes are copied at this
+// lifecycle handoff so the trace owns immutable snapshot values.
+func (state *RequestTraceState) SetResponseBodySnapshot(snapshot observability.BodySnapshot) bool {
+	if state == nil {
+		return false
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if state.responseBodySet {
+		return false
+	}
+	state.responseBody = copyBodySnapshot(snapshot)
+	state.responseBodySet = true
+	return true
+}
+
+// ResponseBodySnapshot returns an independent copy of the terminal downstream
+// response capture. It is intentionally not part of CompletionRecord or
+// completion logging.
+func (state *RequestTraceState) ResponseBodySnapshot() (observability.BodySnapshot, bool) {
+	if state == nil {
+		return observability.BodySnapshot{}, false
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if !state.responseBodySet {
+		return observability.BodySnapshot{}, false
+	}
+	return copyBodySnapshot(state.responseBody), true
 }
 
 func (state *RequestTraceState) SetUpstreamBytes(count ByteCount) bool {
