@@ -256,6 +256,13 @@ func TestT137Migration009PreservesVersionEightRows(t *testing.T) {
 	if err := database.Ping(); err != nil {
 		t.Fatal(err)
 	}
+	var fkEnabled int
+	if err := database.QueryRow(`PRAGMA foreign_keys`).Scan(&fkEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if fkEnabled != 1 {
+		t.Fatalf("foreign_keys = %d, want 1", fkEnabled)
+	}
 	migrations := mustEmbeddedMigrations(t)
 	if err := runMigrations(context.Background(), database, migrations[:8]); err != nil {
 		t.Fatalf("create version eight schema: %v", err)
@@ -270,6 +277,27 @@ func TestT137Migration009PreservesVersionEightRows(t *testing.T) {
 		t.Fatalf("apply migration 009: %v", err)
 	}
 	assertSchemaVersion(t, database, CurrentSchemaVersion)
+	var fkErrors int
+	if err := database.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check()`).Scan(&fkErrors); err != nil {
+		t.Fatal(err)
+	}
+	if fkErrors != 0 {
+		t.Fatalf("foreign_key_check returned %d errors after upgrade", fkErrors)
+	}
+	var fkTable, onDelete string
+	if err := database.QueryRow(`SELECT "table", on_delete FROM pragma_foreign_key_list('request_bodies') WHERE "from" = 'request_id'`).Scan(&fkTable, &onDelete); err != nil {
+		t.Fatal(err)
+	}
+	if fkTable != "requests" || onDelete != "CASCADE" {
+		t.Fatalf("request_bodies FK = table %q, on_delete %q; want requests, CASCADE", fkTable, onDelete)
+	}
+	var apiKeyFKOnDelete string
+	if err := database.QueryRow(`SELECT on_delete FROM pragma_foreign_key_list('requests') WHERE "from" = 'api_key_id'`).Scan(&apiKeyFKOnDelete); err != nil {
+		t.Fatal(err)
+	}
+	if apiKeyFKOnDelete != "SET NULL" {
+		t.Fatalf("requests.api_key_id FK on_delete = %q, want SET NULL", apiKeyFKOnDelete)
+	}
 	var started, upstreamStarted, finished int64
 	if err := database.QueryRow(`SELECT started_at, upstream_started_at, finished_at FROM requests WHERE request_id = ?`, t137RequestID).Scan(&started, &upstreamStarted, &finished); err != nil {
 		t.Fatal(err)
@@ -283,6 +311,16 @@ func TestT137Migration009PreservesVersionEightRows(t *testing.T) {
 	}
 	if string(body) != "abc" {
 		t.Fatalf("preserved body = %q", body)
+	}
+	if _, err := database.Exec(`DELETE FROM requests WHERE request_id = ?`, t137RequestID); err != nil {
+		t.Fatal(err)
+	}
+	var bodyCount int
+	if err := database.QueryRow(`SELECT count(*) FROM request_bodies WHERE request_id = ?`, t137RequestID).Scan(&bodyCount); err != nil {
+		t.Fatal(err)
+	}
+	if bodyCount != 0 {
+		t.Fatalf("cascade after upgrade left %d body rows, want 0", bodyCount)
 	}
 }
 
@@ -298,6 +336,14 @@ func TestT137Migration009RollsBackWithoutChangingVersionEightSchema(t *testing.T
 	migrations := mustEmbeddedMigrations(t)
 	if err := runMigrations(context.Background(), database, migrations[:8]); err != nil {
 		t.Fatalf("create version eight schema: %v", err)
+	}
+	const rollbackRequestID = "abcdef0123456789abcdef0123456789"
+	if _, err := database.Exec(`INSERT INTO requests (request_id, upstream_started, api_key_id, key_name, method, path, route, model, downstream_status, upstream_status, client_bytes, delivered_bytes, input_tokens, output_tokens, total_tokens, cost_micros, started_at, finished_at) VALUES (?, 0, NULL, 'test-key', 'POST', '/v1/chat/completions', 'chat_completions', 'test-model', 200, 200, 0, 0, 10, 20, 30, 0, 1000, 2000)`, rollbackRequestID); err != nil {
+		t.Fatal(err)
+	}
+	binaryBody := []byte{0x00, 0xff, 0xc3, 0x28, 0x00}
+	if _, err := database.Exec(`INSERT INTO request_bodies (request_id, body_kind, body, original_size, truncated) VALUES (?, 'client_request', ?, 5, 0)`, rollbackRequestID, binaryBody); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := database.Exec(`CREATE TABLE index_conflict (id INTEGER); CREATE INDEX idx_requests_finished ON index_conflict(id)`); err != nil {
 		t.Fatal(err)
@@ -318,6 +364,45 @@ func TestT137Migration009RollsBackWithoutChangingVersionEightSchema(t *testing.T
 	}
 	if count != 1 {
 		t.Fatalf("request_bodies table count after rollback = %d, want 1", count)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_requests_recent'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("idx_requests_recent after rollback = %d, want 1", count)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_requests_finished'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("idx_requests_finished after rollback = %d, want conflicting sentinel index", count)
+	}
+	var upstreamStarted int
+	var apiKeyID sql.NullString
+	var keyName, method, path, route, model string
+	var downstreamStatus, upstreamStatus, clientBytes, deliveredBytes, inputTokens, outputTokens, totalTokens, costMicros, startedAt, finishedAt int64
+	if err := database.QueryRow(`SELECT upstream_started, api_key_id, key_name, method, path, route, model, downstream_status, upstream_status, client_bytes, delivered_bytes, input_tokens, output_tokens, total_tokens, cost_micros, started_at, finished_at FROM requests WHERE request_id = ?`, rollbackRequestID).Scan(&upstreamStarted, &apiKeyID, &keyName, &method, &path, &route, &model, &downstreamStatus, &upstreamStatus, &clientBytes, &deliveredBytes, &inputTokens, &outputTokens, &totalTokens, &costMicros, &startedAt, &finishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if upstreamStarted != 0 || apiKeyID.Valid || keyName != "test-key" || method != "POST" || path != "/v1/chat/completions" || route != "chat_completions" || model != "test-model" || downstreamStatus != 200 || upstreamStatus != 200 || clientBytes != 0 || deliveredBytes != 0 || inputTokens != 10 || outputTokens != 20 || totalTokens != 30 || costMicros != 0 || startedAt != 1000 || finishedAt != 2000 {
+		t.Fatalf("rolled-back request values changed: upstream_started=%d, api_key_id=%v, key_name=%s, method=%s, path=%s, route=%s, model=%s, downstream_status=%d, upstream_status=%d, client_bytes=%d, delivered_bytes=%d, input_tokens=%d, output_tokens=%d, total_tokens=%d, cost_micros=%d, started_at=%d, finished_at=%d", upstreamStarted, apiKeyID, keyName, method, path, route, model, downstreamStatus, upstreamStatus, clientBytes, deliveredBytes, inputTokens, outputTokens, totalTokens, costMicros, startedAt, finishedAt)
+	}
+	var bodyKind string
+	var body []byte
+	var originalSize int64
+	var truncated int
+	if err := database.QueryRow(`SELECT body_kind, body, original_size, truncated FROM request_bodies WHERE request_id = ?`, rollbackRequestID).Scan(&bodyKind, &body, &originalSize, &truncated); err != nil {
+		t.Fatal(err)
+	}
+	if bodyKind != "client_request" || !bytes.Equal(body, binaryBody) || originalSize != 5 || truncated != 0 {
+		t.Fatalf("rolled-back body changed: kind=%s, body=%v, original_size=%d, truncated=%d", bodyKind, body, originalSize, truncated)
+	}
+	var fkErrors int
+	if err := database.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check()`).Scan(&fkErrors); err != nil {
+		t.Fatal(err)
+	}
+	if fkErrors != 0 {
+		t.Fatalf("foreign_key_check returned %d errors after rollback", fkErrors)
 	}
 }
 
@@ -406,5 +491,21 @@ func TestT137RequestBodiesAcceptSchemaMaximum(t *testing.T) {
 	body := bytes.Repeat([]byte{'x'}, int(RequestBodySchemaSafetyMaxBytes))
 	if _, err := database.Exec(`INSERT INTO request_bodies (request_id, body_kind, body, original_size, truncated) VALUES (?, 'client_request', ?, ?, 0)`, t137RequestID, body, RequestBodySchemaSafetyMaxBytes); err != nil {
 		t.Fatalf("schema maximum rejected: %v", err)
+	}
+}
+
+func TestT137RequestBodiesSQLLiteralMatchesSafetyMaximum(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var tableSQL string
+	if err := database.QueryRow(`SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'request_bodies'`).Scan(&tableSQL); err != nil {
+		t.Fatal(err)
+	}
+	expectedLiteral := fmt.Sprintf("length(body) <= %d", RequestBodySchemaSafetyMaxBytes)
+	if !strings.Contains(tableSQL, expectedLiteral) {
+		t.Fatalf("request_bodies schema SQL does not contain %q:\n%s", expectedLiteral, tableSQL)
 	}
 }

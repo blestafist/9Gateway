@@ -373,20 +373,65 @@ func assertT140PersistedScalars(t *testing.T, row t140HistoryRow, log map[string
 		t.Error("persisted key_id is empty")
 	}
 	for name, value := range map[string]sql.NullInt64{
-		"downstream_status": row.downstreamStatus, "upstream_status": row.upstreamStatus,
 		"delivered_bytes": row.deliveredBytes,
-		"input_tokens":    row.inputTokens, "output_tokens": row.outputTokens, "total_tokens": row.totalTokens,
-		"total_micros": row.totalMicros, "time_to_upstream_headers_micros": row.headersMicros,
+		"total_micros":    row.totalMicros, "time_to_upstream_headers_micros": row.headersMicros,
 		"time_to_first_byte_micros": row.firstByteMicros,
 	} {
 		if !value.Valid || value.Int64 < 0 {
 			t.Errorf("persisted %s = %#v, want known non-negative scalar", name, value)
 		}
+		logValue, ok := log[name].(int64)
+		if !ok {
+			t.Errorf("log %s = %#v, want int64", name, log[name])
+		} else if value.Int64 != logValue {
+			t.Errorf("persisted %s = %d, log = %d", name, value.Int64, logValue)
+		}
 	}
-	if !row.upstreamStarted.Valid || row.upstreamStarted.Int64 != 1 || row.costMicros.Valid {
-		t.Errorf("persisted upstream_started/cost = %#v/%#v", row.upstreamStarted, row.costMicros)
+	for name, value := range map[string]sql.NullInt64{
+		"downstream_status": row.downstreamStatus,
+		"upstream_status":   row.upstreamStatus,
+	} {
+		if !value.Valid || value.Int64 != 200 {
+			t.Errorf("persisted %s = %#v, want 200", name, value)
+		}
+		logValue, ok := log[name].(int64)
+		if !ok {
+			t.Errorf("log %s = %#v, want int64", name, log[name])
+		} else if value.Int64 != logValue {
+			t.Errorf("persisted %s = %d, log = %d", name, value.Int64, logValue)
+		}
+	}
+	for name, value := range map[string]sql.NullInt64{
+		"input_tokens":  row.inputTokens,
+		"output_tokens": row.outputTokens,
+		"total_tokens":  row.totalTokens,
+	} {
+		if !value.Valid || value.Int64 < 0 {
+			t.Errorf("persisted %s = %#v, want known non-negative scalar", name, value)
+		}
+		logName := "usage_" + name[:len(name)-len("_tokens")]
+		logValue, ok := log[logName].(int64)
+		if !ok {
+			t.Errorf("log %s = %#v, want int64", logName, log[logName])
+		} else if value.Int64 != logValue {
+			t.Errorf("persisted %s = %d, log %s = %d", name, value.Int64, logName, logValue)
+		}
+	}
+	if !row.upstreamStarted.Valid || row.upstreamStarted.Int64 != 1 {
+		t.Errorf("persisted upstream_started = %#v, want 1", row.upstreamStarted)
+	}
+	if row.costMicros.Valid {
+		t.Errorf("persisted cost_micros = %#v, want NULL for unknown cost", row.costMicros)
+	}
+	if _, ok := log["cost_micros"]; ok {
+		t.Errorf("log cost_micros = %#v, want unknown cost omitted", log["cost_micros"])
 	}
 	if row.clientBytes.Valid || row.upstreamBytes.Valid {
 		t.Errorf("persisted unknown request byte counts = %#v/%#v", row.clientBytes, row.upstreamBytes)
+	}
+	for _, key := range []string{"client_bytes", "upstream_bytes"} {
+		if _, ok := log[key]; ok {
+			t.Errorf("log %s = %#v, want unknown omitted", key, log[key])
+		}
 	}
 }

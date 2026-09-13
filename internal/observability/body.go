@@ -180,10 +180,14 @@ func (recorder *BodyRecorder) snapshot() BodySnapshot {
 		if len(snapshot.Bytes) != 0 {
 			snapshot.Bytes = make([]byte, len(snapshot.Bytes))
 			copy(snapshot.Bytes, recorder.frozen.Bytes)
-		} else if snapshot.Captured {
-			// Return an independently owned zero-capacity slice for empty captures
-			// to prevent appending to one snapshot from affecting another.
-			snapshot.Bytes = make([]byte, 0)
+		} else if cap(snapshot.Bytes) > 0 {
+			// Bytes has a backing array but is empty. Return an independent
+			// slice: nil for uncaptured, zero-cap for captured.
+			if snapshot.Captured {
+				snapshot.Bytes = make([]byte, 0)
+			} else {
+				snapshot.Bytes = nil
+			}
 		}
 		return snapshot
 	}
@@ -191,9 +195,12 @@ func (recorder *BodyRecorder) snapshot() BodySnapshot {
 	if len(recorder.bytes) != 0 {
 		bytes = make([]byte, len(recorder.bytes))
 		copy(bytes, recorder.bytes)
-	} else if recorder.captured {
-		// Return an independently owned zero-capacity slice for empty captures.
-		bytes = make([]byte, 0)
+	} else if cap(recorder.bytes) > 0 {
+		// Bytes has a backing array but is empty. Return an independent
+		// slice: nil for uncaptured, zero-cap for captured.
+		if recorder.captured {
+			bytes = make([]byte, 0)
+		}
 	}
 	return BodySnapshot{
 		Kind:         recorder.kind,

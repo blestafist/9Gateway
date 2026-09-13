@@ -183,7 +183,6 @@ func (worker *HistoryPersistenceWorker) drain() {
 func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			worker.processed.Add(1)
 			worker.persistFailed.Add(1)
 			clearHistoryJob(&job)
 		}
