@@ -82,6 +82,8 @@ func TestParsePolicy(t *testing.T) {
 		{name: "malformed pattern", json: `{"allowed_models":["gpt-["]}`, wantErr: true},
 		{name: "invalid window", json: `{"request_windows":[{"amount":0,"duration":"1m"}]}`, wantErr: true},
 		{name: "invalid duration", json: `{"request_windows":[{"amount":1,"duration":"nope"}]}`, wantErr: true},
+		{name: "fractional request duration", json: `{"request_windows":[{"amount":1,"duration":"500ms"}]}`, wantErr: true},
+		{name: "fractional request duration two", json: `{"request_windows":[{"amount":1,"duration":"1500ms"}]}`, wantErr: true},
 		{name: "null token windows", json: `{"token_windows":null}`, wantErr: true},
 		{name: "null budget limits", json: `{"budget_limits":null}`, wantErr: true},
 		{name: "budget day", json: `{"budget_limits":[{"amount_micros":1,"period":"day"}]}`},

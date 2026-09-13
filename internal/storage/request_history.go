@@ -183,9 +183,13 @@ type BodyContent struct {
 }
 
 type requestListCursor struct {
-	FinishedAt    int64
-	FinishedKnown bool
-	RequestID     string
+	// SnapshotSequence is the insertion high-water mark captured at the
+	// beginning of a traversal. It makes timestamp+ID pagination a traversal of
+	// one immutable initial population rather than a moving live table.
+	SnapshotSequence int64
+	FinishedAt       int64
+	FinishedKnown    bool
+	RequestID        string
 }
 
 const maxRequestCursorBytes = 512
@@ -445,6 +449,14 @@ func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, f
 		return nil, "", err
 	}
 
+	snapshotSequence := int64(0)
+	if bookmark != nil {
+		snapshotSequence = bookmark.SnapshotSequence
+	} else {
+		if err := database.QueryRowContext(ctx, `SELECT COALESCE(MAX(insertion_seq), 0) FROM requests`).Scan(&snapshotSequence); err != nil {
+			return nil, "", errors.New("list requests: database read failed")
+		}
+	}
 	query := `SELECT request_id, api_key_id, key_name, method, path, route, model,
 		requested_mode, upstream_mode, delivered_mode, downstream_status,
 		upstream_status, terminal_outcome, upstream_started, error_code,
@@ -453,8 +465,9 @@ func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, f
 		started_at, upstream_started_at, upstream_headers_at, first_byte_at,
 		finished_at, total_micros, time_to_upstream_headers_micros,
 		time_to_first_byte_micros, stream_close_delay_micros FROM requests`
-	conditions := make([]string, 0, 5)
+	conditions := []string{"insertion_seq <= ?"}
 	args := make([]any, 0, 10)
+	args = append(args, snapshotSequence)
 	if filter.KeyID != "" {
 		conditions = append(conditions, "api_key_id = ?")
 		args = append(args, filter.KeyID)
@@ -502,7 +515,7 @@ func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, f
 	}
 	last := result[limit-1]
 	result = result[:limit]
-	next, err := encodeRequestCursor(signer, requestListCursor{FinishedAt: last.FinishedAt.Value, FinishedKnown: last.FinishedAt.Known, RequestID: last.RequestID})
+	next, err := encodeRequestCursor(signer, requestListCursor{SnapshotSequence: snapshotSequence, FinishedAt: last.FinishedAt.Value, FinishedKnown: last.FinishedAt.Known, RequestID: last.RequestID})
 	if err != nil {
 		return nil, "", err
 	}
@@ -582,20 +595,21 @@ func validRequestKeyID(value string) bool {
 func sha256Sum(value []byte) [32]byte { return sha256.Sum256(value) }
 
 func encodeRequestCursor(signer cipher.AEAD, cursor requestListCursor) (string, error) {
-	if signer == nil || cursor.RequestID == "" || len(cursor.RequestID) > 256 {
+	if signer == nil || cursor.SnapshotSequence <= 0 || cursor.RequestID == "" || len(cursor.RequestID) > 256 {
 		return "", ErrInvalidCursor
 	}
 	if !validHistoryRequestID(cursor.RequestID) {
 		return "", ErrInvalidCursor
 	}
-	payload := make([]byte, 14+len(cursor.RequestID))
+	payload := make([]byte, 22+len(cursor.RequestID))
 	copy(payload, requestCursorMagic[:])
 	if cursor.FinishedKnown {
 		payload[3] = 1
 	}
-	binary.BigEndian.PutUint64(payload[4:], uint64(cursor.FinishedAt))
-	binary.BigEndian.PutUint16(payload[12:], uint16(len(cursor.RequestID)))
-	copy(payload[14:], cursor.RequestID)
+	binary.BigEndian.PutUint64(payload[4:], uint64(cursor.SnapshotSequence))
+	binary.BigEndian.PutUint64(payload[12:], uint64(cursor.FinishedAt))
+	binary.BigEndian.PutUint16(payload[20:], uint16(len(cursor.RequestID)))
+	copy(payload[22:], cursor.RequestID)
 	nonce := make([]byte, signer.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", ErrInvalidCursor
@@ -615,14 +629,15 @@ func decodeRequestCursor(signer cipher.AEAD, value string) (*requestListCursor, 
 		return nil, ErrInvalidCursor
 	}
 	payload, err := signer.Open(nil, sealed[:signer.NonceSize()], sealed[signer.NonceSize():], nil)
-	if err != nil || len(payload) < 14 || payload[0] != requestCursorMagic[0] || payload[1] != requestCursorMagic[1] || payload[2] != requestCursorMagic[2] || (payload[3] != 0 && payload[3] != 1) {
+	if err != nil || len(payload) < 22 || payload[0] != requestCursorMagic[0] || payload[1] != requestCursorMagic[1] || payload[2] != requestCursorMagic[2] || (payload[3] != 0 && payload[3] != 1) {
 		return nil, ErrInvalidCursor
 	}
-	idLength := int(binary.BigEndian.Uint16(payload[12:]))
-	if idLength == 0 || idLength != len(payload)-14 || idLength > 256 || !validHistoryRequestID(string(payload[14:])) {
+	snapshotSequence := int64(binary.BigEndian.Uint64(payload[4:12]))
+	idLength := int(binary.BigEndian.Uint16(payload[20:]))
+	if snapshotSequence <= 0 || idLength == 0 || idLength != len(payload)-22 || idLength > 256 || !validHistoryRequestID(string(payload[22:])) {
 		return nil, ErrInvalidCursor
 	}
-	return &requestListCursor{FinishedKnown: payload[3] == 1, FinishedAt: int64(binary.BigEndian.Uint64(payload[4:])), RequestID: string(payload[14:])}, nil
+	return &requestListCursor{SnapshotSequence: snapshotSequence, FinishedKnown: payload[3] == 1, FinishedAt: int64(binary.BigEndian.Uint64(payload[12:20])), RequestID: string(payload[22:])}, nil
 }
 
 // Persist inserts one record and its optional body captures atomically. At

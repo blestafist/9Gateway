@@ -202,7 +202,7 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 			return EffectivePolicy{}, ErrInvalidPolicy
 		}
 		duration, err := time.ParseDuration(window.Duration)
-		if err != nil || duration <= 0 {
+		if err != nil || duration <= 0 || duration%time.Second != 0 {
 			return EffectivePolicy{}, ErrInvalidPolicy
 		}
 		normalized := RequestWindow{Amount: window.Amount, Duration: duration}

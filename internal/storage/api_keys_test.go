@@ -132,6 +132,33 @@ func TestAPIKeyRepositoryListAPIsafeCursorPaginationAndSummary(t *testing.T) {
 	}
 }
 
+func TestAPIKeyRepositoryListPaginationUsesInitialRowIDSnapshot(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewAPIKeyRepository(database)
+	when := time.Unix(1_700_000_000, 0).UTC()
+	for _, id := range []string{"a", "b", "c"} {
+		if err := repository.Insert(ctx, APIKeyRecord{ID: id, Name: id, DisplayPrefix: "prefix-" + id, Digest: bytesOf(id[0]), Enabled: true, CreatedAt: when, UpdatedAt: when, PolicyJSON: `{}`}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, cursor, err := repository.ListAPIKeys(ctx, 2, "")
+	if err != nil || len(first) != 2 || cursor == "" {
+		t.Fatalf("first page = %#v, cursor %q, error %v", first, cursor, err)
+	}
+	if err := repository.Insert(ctx, APIKeyRecord{ID: "b5", Name: "new", DisplayPrefix: "prefix-new", Digest: bytesOf(9), Enabled: true, CreatedAt: when, UpdatedAt: when, PolicyJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	second, next, err := repository.ListAPIKeys(ctx, 2, cursor)
+	if err != nil || next != "" || len(second) != 1 || second[0].ID != "a" {
+		t.Fatalf("second page changed by concurrent same-time insertion = %#v, cursor %q, error %v", second, next, err)
+	}
+}
+
 func TestAPIKeyRepositoryGetDetailParsesEffectivePolicyAndHidesSecrets(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, ":memory:")

@@ -169,3 +169,46 @@ func TestRequestHistoryRetentionPlansUseCompletionIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestHistoryListUsesDescendingCompletionIndex(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	queries := []string{
+		`EXPLAIN QUERY PLAN SELECT request_id FROM requests WHERE insertion_seq <= ? ORDER BY finished_at DESC, request_id DESC LIMIT ?`,
+		`EXPLAIN QUERY PLAN SELECT request_id FROM requests WHERE insertion_seq <= ? AND api_key_id = ? ORDER BY finished_at DESC, request_id DESC LIMIT ?`,
+	}
+	for index, query := range queries {
+		args := []any{1, 1}
+		if index == 1 {
+			args = []any{1, "key", 1}
+		}
+		rows, err := database.Query(query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var details []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			details = append(details, detail)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(details, " | ")
+		want := "idx_requests_finished_desc"
+		if index == 1 {
+			want = "idx_requests_key_finished"
+		}
+		if !strings.Contains(joined, want) {
+			t.Fatalf("query %d plan = %s, want %s", index, joined, want)
+		}
+	}
+}

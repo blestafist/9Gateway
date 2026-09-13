@@ -38,7 +38,7 @@ const (
 	RequestBodySchemaSafetyMaxBytes = schema.RequestBodySchemaSafetyMaxBytes
 
 	// CurrentSchemaVersion is the newest schema understood by this binary.
-	CurrentSchemaVersion = 10
+	CurrentSchemaVersion = 11
 )
 
 // migrationFiles is embedded in the binary so startup does not depend on an

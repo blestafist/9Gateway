@@ -53,6 +53,15 @@ func TestT143ListRequestsUsesCompletionBookmarkAndPreservesNulls(t *testing.T) {
 	if err != nil || len(second) != 1 || next != "" || second[0].FinishedAt.Value != 10 {
 		t.Fatalf("stable second page = %#v, cursor %q, error %v", second, next, err)
 	}
+	// A row inserted after the first page with the same completion timestamp
+	// must not displace an item from the initial traversal snapshot.
+	if _, err := database.Exec(`INSERT INTO requests (request_id,terminal_outcome,upstream_started,finished_at) VALUES ('00000000000000000000000000000025','complete',1,20)`); err != nil {
+		t.Fatal(err)
+	}
+	third, _, err := repository.ListRequests(context.Background(), ListRequestsFilter{}, 2, cursor)
+	if err != nil || len(third) != 1 || third[0].FinishedAt.Value != 10 {
+		t.Fatalf("same-timestamp insertion changed snapshot = %#v, error %v", third, err)
+	}
 	if _, _, err := repository.ListRequests(context.Background(), ListRequestsFilter{}, 2, cursor+"x"); err != ErrInvalidCursor {
 		t.Fatalf("tampered cursor error = %v", err)
 	}

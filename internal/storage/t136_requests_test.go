@@ -28,6 +28,7 @@ func TestT136RequestsSchemaAndRoundTrip(t *testing.T) {
 		{"reasoning_output_tokens", 0}, {"cost_micros", 0}, {"started_at", 0}, {"upstream_started_at", 0},
 		{"upstream_headers_at", 0}, {"first_byte_at", 0}, {"finished_at", 0}, {"total_micros", 0},
 		{"time_to_upstream_headers_micros", 0}, {"time_to_first_byte_micros", 0}, {"stream_close_delay_micros", 0},
+		{"insertion_seq", 0},
 	}
 	for _, column := range wantColumns {
 		var got, notnull int
@@ -45,7 +46,7 @@ func TestT136RequestsSchemaAndRoundTrip(t *testing.T) {
 	if count != len(wantColumns) {
 		t.Fatalf("requests column count = %d, want %d", count, len(wantColumns))
 	}
-	for _, index := range []string{"idx_requests_recent", "idx_requests_finished"} {
+	for _, index := range []string{"idx_requests_recent", "idx_requests_finished", "idx_requests_finished_desc", "idx_requests_key_finished"} {
 		if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?`, index).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
@@ -55,6 +56,8 @@ func TestT136RequestsSchemaAndRoundTrip(t *testing.T) {
 	}
 	assertIndexColumns(t, database.DB, "idx_requests_recent", []string{"started_at", "request_id"})
 	assertIndexColumns(t, database.DB, "idx_requests_finished", []string{"finished_at", "request_id"})
+	assertIndexColumns(t, database.DB, "idx_requests_finished_desc", []string{"finished_at", "request_id"})
+	assertIndexColumns(t, database.DB, "idx_requests_key_finished", []string{"api_key_id", "finished_at", "request_id"})
 	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_requests_key_time'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

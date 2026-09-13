@@ -14,6 +14,77 @@ import (
 	"github.com/pestit/9gateway/internal/transport"
 )
 
+func TestT141T143HTTPPaginationUsesInitialInsertionSnapshot(t *testing.T) {
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys := storage.NewAPIKeyRepository(database)
+	when := time.Unix(1_700_000_000, 0).UTC()
+	for _, id := range []string{"key-a", "key-b", "key-c"} {
+		generated, err := auth.GenerateGatewayKey([]byte("pagination-" + id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := keys.Insert(context.Background(), storage.APIKeyRecord{ID: id, Name: id, DisplayPrefix: generated.DisplayPrefix, Digest: generated.Digest, Enabled: true, CreatedAt: when, UpdatedAt: when, PolicyJSON: `{}`}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	history := storage.NewRequestHistoryRepository(database)
+	for index, id := range []string{"00000000000000000000000000000001", "00000000000000000000000000000002", "00000000000000000000000000000003"} {
+		if err := history.Persist(context.Background(), storage.HistoryRecord{RequestID: id, APIKeyID: "key-a", KeyName: "key-a", Method: "GET", Path: "/v1/models", Route: "models", TerminalOutcome: "complete", UpstreamStarted: true, FinishedAt: storage.KnownInt64(20), StartedAt: storage.KnownInt64(19 - int64(index))}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), "http://127.0.0.1:1", "upstream", "admin-secret", "pepper", keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	get := func(path string) map[string]any {
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer admin-secret")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var body map[string]any
+		decodeResponse(t, response, &body)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d", path, response.StatusCode)
+		}
+		return body
+	}
+	keysPage := get("/admin/v1/keys?limit=2")
+	keyCursor := keysPage["next_cursor"].(string)
+	generated, err := auth.GenerateGatewayKey([]byte("pagination-new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keys.Insert(context.Background(), storage.APIKeyRecord{ID: "key-b5", Name: "new", DisplayPrefix: generated.DisplayPrefix, Digest: generated.Digest, Enabled: true, CreatedAt: when, UpdatedAt: when, PolicyJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	keysPage2 := get("/admin/v1/keys?limit=2&cursor=" + keyCursor)
+	if got := keysPage2["keys"].([]any); len(got) != 1 || got[0].(map[string]any)["id"] != "key-a" {
+		t.Fatalf("key page 2 = %#v", keysPage2)
+	}
+	requestsPage := get("/admin/v1/requests?limit=2")
+	requestCursor := requestsPage["next_cursor"].(string)
+	if err := history.Persist(context.Background(), storage.HistoryRecord{RequestID: "00000000000000000000000000000025", APIKeyID: "key-a", KeyName: "key-a", Method: "GET", Path: "/v1/models", Route: "models", TerminalOutcome: "complete", UpstreamStarted: true, FinishedAt: storage.KnownInt64(20), StartedAt: storage.KnownInt64(18)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	requestsPage2 := get("/admin/v1/requests?limit=2&cursor=" + requestCursor)
+	if got := requestsPage2["requests"].([]any); len(got) != 1 || got[0].(map[string]any)["request_id"] != "00000000000000000000000000000001" {
+		t.Fatalf("request page 2 = %#v", requestsPage2)
+	}
+}
+
 func TestT143ListRequestsHTTPIsAuthenticatedAndMetadataOnly(t *testing.T) {
 	database, err := storage.Open(context.Background(), ":memory:")
 	if err != nil {

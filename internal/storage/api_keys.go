@@ -110,8 +110,12 @@ type KeyDetailRecord struct {
 }
 
 type apiKeyListCursor struct {
-	CreatedAt int64
-	ID        string
+	// SnapshotSequence is the insertion high-water mark captured when the
+	// traversal starts. It prevents rows inserted between pages (including
+	// rows tied on CreatedAt) from moving the page boundary.
+	SnapshotSequence int64
+	CreatedAt        int64
+	ID               string
 }
 
 // Validate checks all invariants which the repository requires of a record.
@@ -505,6 +509,14 @@ func (repository *APIKeyRepository) ListAPIKeys(ctx context.Context, limit int, 
 	if err != nil {
 		return nil, "", err
 	}
+	snapshotSequence := int64(0)
+	if bookmark != nil {
+		snapshotSequence = bookmark.SnapshotSequence
+	} else {
+		if err := repository.database.QueryRowContext(ctx, `SELECT COALESCE(MAX(insertion_seq), 0) FROM api_keys`).Scan(&snapshotSequence); err != nil {
+			return nil, "", errors.New("list api keys: database read failed")
+		}
+	}
 	query := `SELECT id, name, prefix, enabled, expires_at, created_at, updated_at,
 			CASE WHEN json_array_length(json_extract(policy_json, '$.allowed_models')) > 0 THEN 1 ELSE 0 END,
 			CASE WHEN json_array_length(json_extract(policy_json, '$.denied_models')) > 0 THEN 1 ELSE 0 END,
@@ -512,10 +524,13 @@ func (repository *APIKeyRepository) ListAPIKeys(ctx context.Context, limit int, 
 			CASE WHEN json_extract(policy_json, '$.log_response_body') = 1 THEN 1 ELSE 0 END
 		FROM api_keys`
 	args := []any{}
+	conditions := []string{"insertion_seq <= ?"}
+	args = append(args, snapshotSequence)
 	if bookmark != nil {
-		query += ` WHERE (created_at < ? OR (created_at = ? AND id < ?))`
+		conditions = append(conditions, `(created_at < ? OR (created_at = ? AND id < ?))`)
 		args = append(args, bookmark.CreatedAt, bookmark.CreatedAt, bookmark.ID)
 	}
+	query += ` WHERE ` + strings.Join(conditions, " AND ")
 	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
 	rows, err := repository.database.QueryContext(ctx, query, args...)
@@ -553,7 +568,7 @@ func (repository *APIKeyRepository) ListAPIKeys(ctx context.Context, limit int, 
 	}
 	last := result[limit-1]
 	result = result[:limit]
-	next, err := repository.encodeListCursor(apiKeyListCursor{CreatedAt: last.CreatedAt.Unix(), ID: last.ID})
+	next, err := repository.encodeListCursor(apiKeyListCursor{SnapshotSequence: snapshotSequence, CreatedAt: last.CreatedAt.Unix(), ID: last.ID})
 	if err != nil {
 		return nil, "", err
 	}
@@ -561,13 +576,14 @@ func (repository *APIKeyRepository) ListAPIKeys(ctx context.Context, limit int, 
 }
 
 func (repository *APIKeyRepository) encodeListCursor(cursor apiKeyListCursor) (string, error) {
-	if repository.cursorAEAD == nil || cursor.CreatedAt <= 0 || cursor.ID == "" {
+	if repository.cursorAEAD == nil || cursor.SnapshotSequence <= 0 || cursor.CreatedAt <= 0 || cursor.ID == "" {
 		return "", ErrInvalidCursor
 	}
-	payload := make([]byte, 10+len(cursor.ID))
-	binary.BigEndian.PutUint64(payload, uint64(cursor.CreatedAt))
-	binary.BigEndian.PutUint16(payload[8:], uint16(len(cursor.ID)))
-	copy(payload[10:], cursor.ID)
+	payload := make([]byte, 18+len(cursor.ID))
+	binary.BigEndian.PutUint64(payload, uint64(cursor.SnapshotSequence))
+	binary.BigEndian.PutUint64(payload[8:], uint64(cursor.CreatedAt))
+	binary.BigEndian.PutUint16(payload[16:], uint16(len(cursor.ID)))
+	copy(payload[18:], cursor.ID)
 	nonce := make([]byte, repository.cursorAEAD.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", ErrInvalidCursor
@@ -589,18 +605,19 @@ func (repository *APIKeyRepository) decodeListCursor(value string) (*apiKeyListC
 	}
 	nonce := sealed[:repository.cursorAEAD.NonceSize()]
 	payload, err := repository.cursorAEAD.Open(nil, nonce, sealed[repository.cursorAEAD.NonceSize():], nil)
-	if err != nil || len(payload) < 10 {
+	if err != nil || len(payload) < 18 {
 		return nil, ErrInvalidCursor
 	}
-	idLength := int(binary.BigEndian.Uint16(payload[8:10]))
-	if idLength == 0 || idLength != len(payload)-10 || idLength > 256 {
+	idLength := int(binary.BigEndian.Uint16(payload[16:18]))
+	if idLength == 0 || idLength != len(payload)-18 || idLength > 256 {
 		return nil, ErrInvalidCursor
 	}
-	created := int64(binary.BigEndian.Uint64(payload[:8]))
-	if created <= 0 {
+	snapshotSequence := int64(binary.BigEndian.Uint64(payload[:8]))
+	created := int64(binary.BigEndian.Uint64(payload[8:16]))
+	if snapshotSequence <= 0 || created <= 0 {
 		return nil, ErrInvalidCursor
 	}
-	return &apiKeyListCursor{CreatedAt: created, ID: string(payload[10:])}, nil
+	return &apiKeyListCursor{SnapshotSequence: snapshotSequence, CreatedAt: created, ID: string(payload[18:])}, nil
 }
 
 // SetEnabled changes the active state and refreshes the record timestamp.
