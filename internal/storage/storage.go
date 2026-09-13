@@ -31,7 +31,7 @@ const (
 	fileMaxIdleConnections  = 4
 
 	// CurrentSchemaVersion is the newest schema understood by this binary.
-	CurrentSchemaVersion = 6
+	CurrentSchemaVersion = 7
 )
 
 // migrationFiles is embedded in the binary so startup does not depend on an

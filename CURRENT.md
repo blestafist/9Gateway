@@ -3,11 +3,15 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T135`.
+Done: `T001`-`T136`.
 
-Current: `T136` - add persistent request history schema.
+Current: `T137` - add sensitive request body schema.
 
-Queued: `T136`-`T140` in dependency order from `TASKS.md`.
+Queued: `T137`-`T140` in dependency order from `TASKS.md`.
+
+T136 advances SQLite schema version 7 with the `requests` history table. Key
+deletion sets `api_key_id` to NULL; unknown canonical values are NULL and known
+zero values are integer 0.
 
 T131 established strict per-key request/response body-capture opt-ins in the
 immutable effective policy and atomic admin replacement/reopen path. T132 adds
