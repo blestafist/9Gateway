@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,10 @@ type apiKeyLister interface {
 type apiKeyRepository interface {
 	apiKeyInserter
 	apiKeyLister
+}
+
+type apiKeyPageLister interface {
+	ListAPIKeys(context.Context, int, string) ([]storage.KeyListRecord, string, error)
 }
 
 type apiKeyPolicyUpdater interface {
@@ -143,6 +148,24 @@ type updatedAdminKey struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Policy    json.RawMessage
+}
+
+type adminKeyListItem struct {
+	ID            string             `json:"id"`
+	Name          string             `json:"name"`
+	DisplayPrefix string             `json:"display_prefix"`
+	Enabled       bool               `json:"enabled"`
+	CreatedAt     time.Time          `json:"created_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+	ExpiresAt     *time.Time         `json:"expires_at"`
+	PolicySummary adminPolicySummary `json:"policy_summary"`
+}
+
+type adminPolicySummary struct {
+	AllowModels     bool `json:"allow_models"`
+	DenyModels      bool `json:"deny_models"`
+	LogRequestBody  bool `json:"log_request_body"`
+	LogResponseBody bool `json:"log_response_body"`
 }
 
 // create makes one persistent key. A small retry budget handles an extremely
@@ -370,6 +393,10 @@ func newAPIKeyID() (string, error) {
 }
 
 func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet && request.URL.Path == "/admin/v1/keys" {
+		handler.listKeys(response, request)
+		return
+	}
 	if request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/admin/v1/keys/") && strings.HasSuffix(request.URL.Path, "/policy") {
 		handler.updatePolicy(response, request)
 		return
@@ -418,6 +445,73 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		Policy    json.RawMessage `json:"policy"`
 	}{created.ID, created.Name, created.Prefix, created.Enabled, created.ExpiresAt, created.CreatedAt, created.RawKey, created.Policy}
 	writeAdminJSON(response, http.StatusCreated, responseBody)
+}
+
+func (handler *adminHandler) listKeys(response http.ResponseWriter, request *http.Request) {
+	if !adminBearerMatches(request, handler.credential) {
+		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+		return
+	}
+	lister, ok := handler.service.repository.(apiKeyPageLister)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "key listing failed")
+		return
+	}
+	limit := 50
+	values, present := request.URL.Query()["limit"]
+	if present {
+		if len(values) != 1 || values[0] == "" {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
+			return
+		}
+		value := values[0]
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 || parsed > 500 {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
+			return
+		}
+		limit = parsed
+	}
+	cursorValues, cursorPresent := request.URL.Query()["cursor"]
+	if cursorPresent && len(cursorValues) != 1 {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
+		return
+	}
+	cursor := ""
+	if cursorPresent {
+		cursor = cursorValues[0]
+		if cursor == "" {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
+			return
+		}
+	}
+	if len(cursor) > 512 || strings.ContainsAny(cursor, "\r\n") {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
+		return
+	}
+	records, nextCursor, err := lister.ListAPIKeys(request.Context(), limit, cursor)
+	if err != nil {
+		if errors.Is(err, storage.ErrInvalidCursor) {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
+		} else {
+			writeAdminError(response, http.StatusInternalServerError, "internal_error", "key listing failed")
+		}
+		return
+	}
+	items := make([]adminKeyListItem, 0, len(records))
+	for _, record := range records {
+		items = append(items, adminKeyListItem{
+			ID: record.ID, Name: record.Name, DisplayPrefix: record.DisplayPrefix,
+			Enabled: record.Enabled, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+			ExpiresAt:     record.ExpiresAt,
+			PolicySummary: adminPolicySummary{AllowModels: record.PolicySummary.AllowModels, DenyModels: record.PolicySummary.DenyModels, LogRequestBody: record.PolicySummary.LogRequestBody, LogResponseBody: record.PolicySummary.LogResponseBody},
+		})
+	}
+	body := struct {
+		Keys       []adminKeyListItem `json:"keys"`
+		NextCursor string             `json:"next_cursor,omitempty"`
+	}{Keys: items, NextCursor: nextCursor}
+	writeAdminJSON(response, http.StatusOK, body)
 }
 
 func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request *http.Request) {

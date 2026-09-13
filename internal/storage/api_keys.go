@@ -3,8 +3,15 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -55,7 +62,41 @@ var (
 	ErrInvalidRecord = errors.New("invalid api key record")
 	// ErrRepositoryUnavailable indicates a nil or closed repository handle.
 	ErrRepositoryUnavailable = errors.New("api key repository unavailable")
+	// ErrInvalidCursor indicates a malformed, tampered, or incompatible page cursor.
+	ErrInvalidCursor = errors.New("invalid api key cursor")
 )
+
+const (
+	defaultAPIKeyListLimit = 50
+	maxAPIKeyListLimit     = 500
+	maxAPIKeyCursorBytes   = 512
+)
+
+// KeyPolicySummary contains only the policy facts safe for the list endpoint.
+type KeyPolicySummary struct {
+	AllowModels     bool
+	DenyModels      bool
+	LogRequestBody  bool
+	LogResponseBody bool
+}
+
+// KeyListRecord is the safe, metadata-only representation used by admin key
+// listing. It intentionally has no digest, raw key, or policy document.
+type KeyListRecord struct {
+	ID            string
+	Name          string
+	DisplayPrefix string
+	Enabled       bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	ExpiresAt     *time.Time
+	PolicySummary KeyPolicySummary
+}
+
+type apiKeyListCursor struct {
+	CreatedAt int64
+	ID        string
+}
 
 // Validate checks all invariants which the repository requires of a record.
 // PolicyJSON is intentionally opaque and is not parsed or otherwise
@@ -111,14 +152,45 @@ type dbQueries interface {
 
 // APIKeyRepository persists APIKeyRecords in the schema installed by T066.
 type APIKeyRepository struct {
-	database dbQueries
+	database   dbQueries
+	cursorAEAD cipher.AEAD
 }
 
 // NewAPIKeyRepository creates a repository over an opened storage database.
 // The argument is accepted as the narrow query capability so SQLite-specific
 // handles do not become part of the repository's domain API.
 func NewAPIKeyRepository(database dbQueries) *APIKeyRepository {
-	return &APIKeyRepository{database: database}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		// Failure of the system CSPRNG is not recoverable for a cursor signer.
+		// Keep construction backwards-compatible while making all resulting
+		// cursors fail closed rather than using a predictable fallback.
+		key = nil
+	}
+	return newAPIKeyRepository(database, key)
+}
+
+func newAPIKeyRepository(database dbQueries, key []byte) *APIKeyRepository {
+	var aead cipher.AEAD
+	if len(key) == 32 {
+		if block, err := aes.NewCipher(key); err == nil {
+			aead, _ = cipher.NewGCM(block)
+		}
+	}
+	return &APIKeyRepository{database: database, cursorAEAD: aead}
+}
+
+// SetCursorSecret scopes cursors to the server's existing secret. It is called
+// during handler construction, before the repository is shared by requests.
+func (repository *APIKeyRepository) SetCursorSecret(secret []byte) {
+	if repository == nil || len(secret) == 0 {
+		return
+	}
+	keyDigest := sha256.Sum256(secret)
+	key := keyDigest[:]
+	if block, err := aes.NewCipher(key); err == nil {
+		repository.cursorAEAD, _ = cipher.NewGCM(block)
+	}
 }
 
 // Repository is the short name for APIKeyRepository.
@@ -281,6 +353,122 @@ func (repository *APIKeyRepository) List(ctx context.Context) ([]APIKeyRecord, e
 		return nil, errors.New("list api keys: database read failed")
 	}
 	return records, nil
+}
+
+// ListAPIKeys returns safe metadata ordered newest-first. The query deliberately
+// selects neither key_hash nor policy_json; policy booleans are extracted by
+// SQLite into typed integer columns. A limit-sized-plus-one read determines
+// whether a following page exists without a count query.
+func (repository *APIKeyRepository) ListAPIKeys(ctx context.Context, limit int, cursor string) ([]KeyListRecord, string, error) {
+	if ctx == nil {
+		return nil, "", errors.New("list api keys: nil context")
+	}
+	if repository == nil || repository.database == nil || repository.cursorAEAD == nil {
+		return nil, "", ErrRepositoryUnavailable
+	}
+	if limit <= 0 || limit > maxAPIKeyListLimit {
+		return nil, "", fmt.Errorf("%w: limit", ErrInvalidCursor)
+	}
+	bookmark, err := repository.decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	query := `SELECT id, name, prefix, enabled, expires_at, created_at, updated_at,
+			CASE WHEN json_array_length(json_extract(policy_json, '$.allowed_models')) > 0 THEN 1 ELSE 0 END,
+			CASE WHEN json_array_length(json_extract(policy_json, '$.denied_models')) > 0 THEN 1 ELSE 0 END,
+			CASE WHEN json_extract(policy_json, '$.log_request_body') = 1 THEN 1 ELSE 0 END,
+			CASE WHEN json_extract(policy_json, '$.log_response_body') = 1 THEN 1 ELSE 0 END
+		FROM api_keys`
+	args := []any{}
+	if bookmark != nil {
+		query += ` WHERE (created_at < ? OR (created_at = ? AND id < ?))`
+		args = append(args, bookmark.CreatedAt, bookmark.CreatedAt, bookmark.ID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := repository.database.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", errors.New("list api keys: database read failed")
+	}
+	defer rows.Close()
+	result := make([]KeyListRecord, 0, limit)
+	for rows.Next() {
+		var record KeyListRecord
+		var enabled, allow, deny, logRequest, logResponse int64
+		var expires sql.NullInt64
+		var created, updated int64
+		if err := rows.Scan(&record.ID, &record.Name, &record.DisplayPrefix, &enabled, &expires, &created, &updated, &allow, &deny, &logRequest, &logResponse); err != nil {
+			return nil, "", errors.New("list api keys: database read failed")
+		}
+		if (enabled != 0 && enabled != 1) || created <= 0 || updated <= 0 || updated < created {
+			return nil, "", ErrInvalidRecord
+		}
+		record.Enabled = enabled == 1
+		record.CreatedAt = time.Unix(created, 0).UTC()
+		record.UpdatedAt = time.Unix(updated, 0).UTC()
+		if expires.Valid {
+			value := time.Unix(expires.Int64, 0).UTC()
+			record.ExpiresAt = &value
+		}
+		record.PolicySummary = KeyPolicySummary{AllowModels: allow == 1, DenyModels: deny == 1, LogRequestBody: logRequest == 1, LogResponseBody: logResponse == 1}
+		result = append(result, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", errors.New("list api keys: database read failed")
+	}
+	if len(result) <= limit {
+		return result, "", nil
+	}
+	last := result[limit-1]
+	result = result[:limit]
+	next, err := repository.encodeListCursor(apiKeyListCursor{CreatedAt: last.CreatedAt.Unix(), ID: last.ID})
+	if err != nil {
+		return nil, "", err
+	}
+	return result, next, nil
+}
+
+func (repository *APIKeyRepository) encodeListCursor(cursor apiKeyListCursor) (string, error) {
+	if repository.cursorAEAD == nil || cursor.CreatedAt <= 0 || cursor.ID == "" {
+		return "", ErrInvalidCursor
+	}
+	payload := make([]byte, 10+len(cursor.ID))
+	binary.BigEndian.PutUint64(payload, uint64(cursor.CreatedAt))
+	binary.BigEndian.PutUint16(payload[8:], uint16(len(cursor.ID)))
+	copy(payload[10:], cursor.ID)
+	nonce := make([]byte, repository.cursorAEAD.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", ErrInvalidCursor
+	}
+	sealed := repository.cursorAEAD.Seal(nonce, nonce, payload, nil)
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+func (repository *APIKeyRepository) decodeListCursor(value string) (*apiKeyListCursor, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if len(value) > maxAPIKeyCursorBytes || repository.cursorAEAD == nil {
+		return nil, ErrInvalidCursor
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(sealed) <= repository.cursorAEAD.NonceSize() {
+		return nil, ErrInvalidCursor
+	}
+	nonce := sealed[:repository.cursorAEAD.NonceSize()]
+	payload, err := repository.cursorAEAD.Open(nil, nonce, sealed[repository.cursorAEAD.NonceSize():], nil)
+	if err != nil || len(payload) < 10 {
+		return nil, ErrInvalidCursor
+	}
+	idLength := int(binary.BigEndian.Uint16(payload[8:10]))
+	if idLength == 0 || idLength != len(payload)-10 || idLength > 256 {
+		return nil, ErrInvalidCursor
+	}
+	created := int64(binary.BigEndian.Uint64(payload[:8]))
+	if created <= 0 {
+		return nil, ErrInvalidCursor
+	}
+	return &apiKeyListCursor{CreatedAt: created, ID: string(payload[10:])}, nil
 }
 
 // SetEnabled changes the active state and refreshes the record timestamp.

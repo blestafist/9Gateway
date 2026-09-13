@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,6 +89,56 @@ func TestAdminCreateKeyHTTPPersistsAndNeverCallsUpstream(t *testing.T) {
 		t.Fatalf("reopened record = %#v, error %v", reopened, err)
 	}
 	gateway.Close()
+}
+
+func TestAdminListKeysHTTPReturnsSafePaginatedMetadata(t *testing.T) {
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := storage.NewAPIKeyRepository(database)
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), "http://127.0.0.1:1", "upstream", "admin-secret", "pepper", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Unix(1_700_000_000, 0).UTC()
+	for index, policy := range []string{`{"allowed_models":["safe"],"log_request_body":true}`, `{}`} {
+		if err := repository.Insert(context.Background(), storage.APIKeyRecord{ID: "key-" + string(rune('a'+index)), Name: "safe", DisplayPrefix: "prefix-" + string(rune('a'+index)), Digest: bytes.Repeat([]byte{byte(index + 1)}, storage.HMACDigestSize), Enabled: true, CreatedAt: when.Add(time.Duration(index) * time.Second), UpdatedAt: when.Add(time.Duration(index) * time.Second), PolicyJSON: policy}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/admin/v1/keys?limit=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Keys []map[string]any `json:"keys"`
+		Next string           `json:"next_cursor"`
+	}
+	decodeResponse(t, response, &body)
+	if response.StatusCode != http.StatusOK || len(body.Keys) != 1 || body.Next == "" || strings.Contains(body.Next, "=") || strings.Contains(body.Next, "/") || strings.Contains(body.Next, "+") {
+		t.Fatalf("list response status/body = %d/%#v", response.StatusCode, body)
+	}
+	for _, forbidden := range []string{"digest", "key_hash", "pepper", "policy_json", "raw_key"} {
+		encoded, err := json.Marshal(body.Keys[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("response leaked %q: %v", forbidden, body.Keys[0])
+		}
+	}
+	if _, ok := body.Keys[0]["expires_at"]; !ok || body.Keys[0]["expires_at"] != nil {
+		t.Fatalf("expires_at = %#v, want explicit null", body.Keys[0]["expires_at"])
+	}
 }
 
 func TestAdminCreateKeyHTTPRejectsMissingWrongAndGatewayCredentials(t *testing.T) {

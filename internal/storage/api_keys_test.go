@@ -99,6 +99,37 @@ func TestAPIKeyRepositoryListUpdateConflictsAndNotFound(t *testing.T) {
 	}
 }
 
+func TestAPIKeyRepositoryListAPIsafeCursorPaginationAndSummary(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewAPIKeyRepository(database)
+	created := time.Unix(1_700_000_000, 0).UTC()
+	for index, policy := range []string{`{"allowed_models":["a"],"log_request_body":true}`, `{}`, `{"denied_models":["b"],"log_response_body":true}`} {
+		when := created.Add(time.Duration(index) * time.Second)
+		if err := repository.Insert(ctx, APIKeyRecord{ID: string(rune('a' + index)), Name: "key", DisplayPrefix: "prefix-" + string(rune('a'+index)), Digest: bytesOf(byte(index + 1)), Enabled: true, CreatedAt: when, UpdatedAt: when, PolicyJSON: policy}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, cursor, err := repository.ListAPIKeys(ctx, 2, "")
+	if err != nil || len(page) != 2 || cursor == "" {
+		t.Fatalf("first page = %#v, cursor %q, error %v", page, cursor, err)
+	}
+	if page[0].ID != "c" || page[1].ID != "b" || !page[0].PolicySummary.DenyModels || !page[0].PolicySummary.LogResponseBody || page[1].PolicySummary.AllowModels || page[1].PolicySummary.LogRequestBody {
+		t.Fatalf("page order/summary = %#v", page)
+	}
+	page2, cursor2, err := repository.ListAPIKeys(ctx, 2, cursor)
+	if err != nil || len(page2) != 1 || cursor2 != "" || page2[0].ID != "a" || page2[0].ExpiresAt != nil {
+		t.Fatalf("second page = %#v, cursor %q, error %v", page2, cursor2, err)
+	}
+	if _, _, err := repository.ListAPIKeys(ctx, 2, cursor+"tampered"); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("tampered cursor error = %v", err)
+	}
+}
+
 func TestAPIKeyRepositorySetEnabledPreservesFutureTimestampInvariant(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, ":memory:")

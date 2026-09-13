@@ -159,6 +159,9 @@ func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	if err != nil {
 		return nil, err
 	}
+	if signer, ok := repository.(interface{ SetCursorSecret([]byte) }); ok {
+		signer.SetCursorSecret([]byte(authPepper))
+	}
 	if tokenLimiter != nil {
 		service.allowTokenPolicyReplacement = func(id string, oldWindows, newWindows []auth.TokenWindow) bool {
 			return tokenLimiter.AllowsPolicyReplacement(id, oldWindows, newWindows)
