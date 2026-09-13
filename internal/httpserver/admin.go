@@ -181,12 +181,12 @@ type adminPolicySummary struct {
 
 type adminPolicyWindow struct {
 	Amount   int64 `json:"amount"`
-	Duration int64 `json:"duration_seconds"`
+	Duration int64 `json:"duration"`
 }
 
 type adminRequestPolicyWindow struct {
 	Amount   int   `json:"amount"`
-	Duration int64 `json:"duration_seconds"`
+	Duration int64 `json:"duration"`
 }
 
 type adminBudgetLimit struct {

@@ -186,11 +186,11 @@ func TestAdminGetKeyHTTPReturnsCompleteSafeEffectivePolicy(t *testing.T) {
 			DeniedModels   []string `json:"denied_models"`
 			RequestWindows []struct {
 				Amount   int   `json:"amount"`
-				Duration int64 `json:"duration_seconds"`
+				Duration int64 `json:"duration"`
 			} `json:"request_windows"`
 			TokenWindows []struct {
 				Amount   int64 `json:"amount"`
-				Duration int64 `json:"duration_seconds"`
+				Duration int64 `json:"duration"`
 			} `json:"token_windows"`
 			TokenMode      string `json:"token_mode"`
 			MaxConcurrency int    `json:"max_concurrent_requests"`
