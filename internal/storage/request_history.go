@@ -173,6 +173,15 @@ type RequestDetailRecord struct {
 	HasBodies []string
 }
 
+// BodyContent is one immutable captured request or response payload and its
+// storage metadata. Bytes are returned exactly as stored; callers must not
+// decode or otherwise transform them.
+type BodyContent struct {
+	Bytes        []byte
+	OriginalSize int64
+	Truncated    bool
+}
+
 type requestListCursor struct {
 	FinishedAt    int64
 	FinishedKnown bool
@@ -220,6 +229,25 @@ func (repository *RequestHistoryRepository) GetRequestByID(ctx context.Context, 
 		return nil, ErrHistoryRepositoryUnavailable
 	}
 	return getRequestByID(repository.database, repository.beginner, ctx, requestID)
+}
+
+// GetRequestBody returns one captured body after validating the storage
+// invariants that protect the HTTP download boundary. A read transaction keeps
+// the row and its bytes in one SQLite snapshot while retention may delete rows.
+func (repository *RequestHistoryRepository) GetRequestBody(ctx context.Context, requestID, kind string) (*BodyContent, error) {
+	if ctx == nil {
+		return nil, errors.New("get request body: nil context")
+	}
+	if !validHistoryRequestID(requestID) {
+		return nil, ErrHistoryInvalidRecord
+	}
+	if !validRequestBodyKind(kind) {
+		return nil, ErrHistoryInvalidBody
+	}
+	if repository == nil || repository.database == nil {
+		return nil, ErrHistoryRepositoryUnavailable
+	}
+	return getRequestBody(repository.database, repository.beginner, ctx, requestID, kind)
 }
 
 const requestMetadataQuery = `SELECT request_id, api_key_id, key_name, method, path, route, model,
@@ -330,6 +358,67 @@ func bodyKinds(database dbQueries, ctx context.Context, requestID string) ([]str
 		return nil, err
 	}
 	return result, nil
+}
+
+const maxRequestBodyDownloadBytes int64 = 10 * 1024 * 1024
+
+func getRequestBody(database dbQueries, beginner txBeginner, ctx context.Context, requestID, kind string) (*BodyContent, error) {
+	if database == nil {
+		return nil, ErrHistoryRepositoryUnavailable
+	}
+	const query = `SELECT body, original_size, truncated, typeof(body), typeof(original_size), typeof(truncated) FROM request_bodies WHERE request_id = ? AND body_kind = ?`
+	if beginner != nil {
+		tx, err := beginner.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, errors.New("get request body: database read failed")
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		content, err := scanRequestBody(tx.QueryRowContext(ctx, query, requestID, kind))
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, errors.New("get request body: database read failed")
+		}
+		committed = true
+		return content, nil
+	}
+	return scanRequestBody(database.QueryRowContext(ctx, query, requestID, kind))
+}
+
+func validRequestBodyKind(kind string) bool {
+	switch kind {
+	case "client_request", "upstream_request", "response":
+		return true
+	default:
+		return false
+	}
+}
+
+func scanRequestBody(scanner sqlScanner) (*BodyContent, error) {
+	var content BodyContent
+	var truncated int64
+	var bodyType, originalType, truncatedType string
+	if err := scanner.Scan(&content.Bytes, &content.OriginalSize, &truncated, &bodyType, &originalType, &truncatedType); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, errors.New("get request body: database read failed")
+	}
+	storedSize := int64(len(content.Bytes))
+	if bodyType != "blob" || originalType != "integer" || truncatedType != "integer" || content.OriginalSize < 0 || storedSize > RequestBodySchemaSafetyMaxBytes || storedSize > maxRequestBodyDownloadBytes || (truncated != 0 && truncated != 1) {
+		return nil, ErrHistoryInvalidBody
+	}
+	content.Truncated = truncated == 1
+	if storedSize > content.OriginalSize || content.Truncated != (storedSize < content.OriginalSize) {
+		return nil, ErrHistoryInvalidBody
+	}
+	return &content, nil
 }
 
 // listRequests is shared with the API-key repository because the admin handler

@@ -61,6 +61,10 @@ type requestDetailGetter interface {
 	GetRequestByID(context.Context, string) (*storage.RequestDetailRecord, error)
 }
 
+type requestBodyGetter interface {
+	GetRequestBody(context.Context, string, string) (*storage.BodyContent, error)
+}
+
 type apiKeyPolicyUpdater interface {
 	UpdatePolicy(context.Context, string, bool, string) error
 }
@@ -466,6 +470,10 @@ func newAPIKeyID() (string, error) {
 }
 
 func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet && isRequestBodyPath(request.URL.Path) {
+		handler.getRequestBody(response, request)
+		return
+	}
 	if request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/admin/v1/requests/") {
 		handler.getRequest(response, request)
 		return
@@ -530,6 +538,52 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		Policy    json.RawMessage `json:"policy"`
 	}{created.ID, created.Name, created.Prefix, created.Enabled, created.ExpiresAt, created.CreatedAt, created.RawKey, created.Policy}
 	writeAdminJSON(response, http.StatusCreated, responseBody)
+}
+
+func isRequestBodyPath(path string) bool {
+	const prefix = "/admin/v1/requests/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	return len(parts) >= 2 && parts[1] == "bodies"
+}
+
+func (handler *adminHandler) getRequestBody(response http.ResponseWriter, request *http.Request) {
+	if !adminBearerMatches(request, handler.credential) {
+		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+		return
+	}
+	const prefix = "/admin/v1/requests/"
+	parts := strings.Split(strings.TrimPrefix(request.URL.Path, prefix), "/")
+	if len(parts) != 3 || parts[1] != "bodies" || !validRequestID(parts[0]) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request id or body kind")
+		return
+	}
+	kind := parts[2]
+	if kind != "client_request" && kind != "upstream_request" && kind != "response" {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request id or body kind")
+		return
+	}
+	getter, ok := handler.service.repository.(requestBodyGetter)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "request body lookup failed")
+		return
+	}
+	content, err := getter.GetRequestBody(request.Context(), parts[0], kind)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeAdminError(response, http.StatusNotFound, gatewayErrorNotFound, "")
+		} else {
+			writeAdminError(response, http.StatusInternalServerError, "internal_error", "request body lookup failed")
+		}
+		return
+	}
+	response.Header().Set("Content-Type", "application/octet-stream")
+	response.Header().Set("X-Original-Size", strconv.FormatInt(content.OriginalSize, 10))
+	response.Header().Set("X-Truncated", strconv.FormatBool(content.Truncated))
+	response.WriteHeader(http.StatusOK)
+	_, _ = response.Write(content.Bytes)
 }
 
 type adminRequestListItem struct {

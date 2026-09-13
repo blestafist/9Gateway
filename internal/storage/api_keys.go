@@ -228,6 +228,24 @@ func (repository *APIKeyRepository) GetRequestByID(ctx context.Context, requestI
 	return getRequestByID(repository.database, repository.beginner, ctx, requestID)
 }
 
+// GetRequestBody shares the request-history body projection while keeping SQL
+// and body validation behind the storage boundary used by the admin handler.
+func (repository *APIKeyRepository) GetRequestBody(ctx context.Context, requestID, kind string) (*BodyContent, error) {
+	if ctx == nil {
+		return nil, errors.New("get request body: nil context")
+	}
+	if !validHistoryRequestID(requestID) {
+		return nil, ErrHistoryInvalidRecord
+	}
+	if !validRequestBodyKind(kind) {
+		return nil, ErrHistoryInvalidBody
+	}
+	if repository == nil || repository.database == nil {
+		return nil, ErrRepositoryUnavailable
+	}
+	return getRequestBody(repository.database, repository.beginner, ctx, requestID, kind)
+}
+
 // SetTokenMode configures the deployment default used when a stored policy
 // omits token_mode. It is called during process wiring, before requests are
 // served, and keeps detail reads consistent with authentication enforcement.

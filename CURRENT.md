@@ -3,11 +3,11 @@
 Current milestone: admin read API, CLI, readiness/metrics, packaging
 (`T141`-`T160`).
 
-Done: `T001`-`T144`.
+Done: `T001`-`T145`.
 
-Current: `T145`.
+Current: `T146`.
 
-Queued: `T145`-`T160`.
+Queued: `T146`-`T160`.
 
 The gateway now provides transparent policy enforcement, token and budget
 accounting, bounded safe request tracing, optional per-key body capture,
