@@ -173,6 +173,16 @@ type APIKeyRepository struct {
 	tokenMode  auth.TokenMode
 }
 
+// ListRequests shares the API-key repository's database and cursor signer with
+// the admin read handler. It still uses the request-history repository's
+// metadata-only projection and never selects request bodies.
+func (repository *APIKeyRepository) ListRequests(ctx context.Context, filter ListRequestsFilter, limit int, cursor string) ([]RequestListRecord, string, error) {
+	if repository == nil {
+		return nil, "", ErrRepositoryUnavailable
+	}
+	return listRequests(repository.database, repository.cursorAEAD, ctx, filter, limit, cursor)
+}
+
 // NewAPIKeyRepository creates a repository over an opened storage database.
 // The argument is accepted as the narrow query capability so SQLite-specific
 // handles do not become part of the repository's domain API.

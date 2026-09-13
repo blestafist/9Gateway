@@ -2,6 +2,13 @@ package storage
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"time"
@@ -99,16 +106,299 @@ var (
 // RequestHistoryRepository is the synchronous persistence boundary for request
 // history. It does not schedule, retry, or retain jobs.
 type RequestHistoryRepository struct {
-	database dbQueries
-	beginner txBeginner
+	database   dbQueries
+	beginner   txBeginner
+	cursorAEAD cipher.AEAD
 }
 
 func NewRequestHistoryRepository(database dbQueries) *RequestHistoryRepository {
-	repository := &RequestHistoryRepository{database: database}
+	repository := &RequestHistoryRepository{database: database, cursorAEAD: newHistoryCursorAEAD()}
 	if beginner, ok := database.(txBeginner); ok {
 		repository.beginner = beginner
 	}
 	return repository
+}
+
+// ListRequestsFilter selects completed request metadata without selecting any
+// request body columns. After and Before are inclusive completion-time bounds.
+type ListRequestsFilter struct {
+	KeyID  string
+	After  *time.Time
+	Before *time.Time
+}
+
+// RequestListRecord is the scalar, secret-safe projection of a requests row.
+// OptionalInt64 preserves SQL NULL separately from a known zero.
+type RequestListRecord struct {
+	RequestID                   string
+	APIKeyID                    string
+	KeyName                     string
+	Method                      string
+	Path                        string
+	Route                       string
+	Model                       string
+	RequestedMode               string
+	UpstreamMode                string
+	DeliveredMode               string
+	DownstreamStatus            OptionalInt64
+	UpstreamStatus              OptionalInt64
+	TerminalOutcome             string
+	UpstreamStarted             bool
+	ErrorCode                   string
+	ClientBytes                 OptionalInt64
+	UpstreamBytes               OptionalInt64
+	DeliveredBytes              OptionalInt64
+	InputTokens                 OptionalInt64
+	OutputTokens                OptionalInt64
+	TotalTokens                 OptionalInt64
+	CachedInputTokens           OptionalInt64
+	ReasoningOutputTokens       OptionalInt64
+	CostMicros                  OptionalInt64
+	StartedAt                   OptionalInt64
+	UpstreamStartedAt           OptionalInt64
+	UpstreamHeadersAt           OptionalInt64
+	FirstByteAt                 OptionalInt64
+	FinishedAt                  OptionalInt64
+	TotalMicros                 OptionalInt64
+	TimeToUpstreamHeadersMicros OptionalInt64
+	TimeToFirstByteMicros       OptionalInt64
+	StreamCloseDelayMicros      OptionalInt64
+}
+
+type requestListCursor struct {
+	FinishedAt    int64
+	FinishedKnown bool
+	RequestID     string
+}
+
+const maxRequestCursorBytes = 512
+
+var requestCursorMagic = [3]byte{'r', 'q', 1}
+
+// SetCursorSecret makes request cursors invalid after the server secret
+// changes. It is called during process wiring, before the repository is shared.
+func (repository *RequestHistoryRepository) SetCursorSecret(secret []byte) {
+	if repository == nil || len(secret) == 0 {
+		return
+	}
+	digest := sha256Sum(secret)
+	if block, err := aes.NewCipher(digest[:]); err == nil {
+		repository.cursorAEAD, _ = cipher.NewGCM(block)
+	}
+}
+
+// ListRequests returns newest-first request metadata and an opaque bookmark
+// for the following page. The query intentionally never touches
+// request_bodies, including for existence checks.
+func (repository *RequestHistoryRepository) ListRequests(ctx context.Context, filter ListRequestsFilter, limit int, cursor string) ([]RequestListRecord, string, error) {
+	if repository == nil {
+		return nil, "", ErrHistoryRepositoryUnavailable
+	}
+	return listRequests(repository.database, repository.cursorAEAD, ctx, filter, limit, cursor)
+}
+
+// listRequests is shared with the API-key repository because the admin handler
+// already receives that repository while the history writer owns a separate
+// repository value over the same database.
+func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, filter ListRequestsFilter, limit int, cursor string) ([]RequestListRecord, string, error) {
+	if ctx == nil {
+		return nil, "", errors.New("list requests: nil context")
+	}
+	if database == nil || signer == nil {
+		return nil, "", ErrHistoryRepositoryUnavailable
+	}
+	if limit <= 0 || limit > 500 {
+		return nil, "", ErrInvalidCursor
+	}
+	if filter.KeyID != "" && !validRequestKeyID(filter.KeyID) {
+		return nil, "", ErrInvalidCursor
+	}
+	if filter.After != nil && filter.Before != nil && filter.After.After(*filter.Before) {
+		return nil, "", ErrInvalidCursor
+	}
+	bookmark, err := decodeRequestCursor(signer, cursor)
+	if err != nil {
+		return nil, "", err
+	}
+
+	query := `SELECT request_id, api_key_id, key_name, method, path, route, model,
+		requested_mode, upstream_mode, delivered_mode, downstream_status,
+		upstream_status, terminal_outcome, upstream_started, error_code,
+		client_bytes, upstream_bytes, delivered_bytes, input_tokens, output_tokens,
+		total_tokens, cached_input_tokens, reasoning_output_tokens, cost_micros,
+		started_at, upstream_started_at, upstream_headers_at, first_byte_at,
+		finished_at, total_micros, time_to_upstream_headers_micros,
+		time_to_first_byte_micros, stream_close_delay_micros FROM requests`
+	conditions := make([]string, 0, 5)
+	args := make([]any, 0, 10)
+	if filter.KeyID != "" {
+		conditions = append(conditions, "api_key_id = ?")
+		args = append(args, filter.KeyID)
+	}
+	if filter.After != nil {
+		conditions = append(conditions, "finished_at >= ?")
+		args = append(args, filter.After.UTC().UnixMicro())
+	}
+	if filter.Before != nil {
+		conditions = append(conditions, "finished_at <= ?")
+		args = append(args, filter.Before.UTC().UnixMicro())
+	}
+	if bookmark != nil {
+		if bookmark.FinishedKnown {
+			conditions = append(conditions, "(finished_at IS NULL OR finished_at < ? OR (finished_at = ? AND request_id < ?))")
+			args = append(args, bookmark.FinishedAt, bookmark.FinishedAt, bookmark.RequestID)
+		} else {
+			conditions = append(conditions, "finished_at IS NULL AND request_id < ?")
+			args = append(args, bookmark.RequestID)
+		}
+	}
+	if len(conditions) != 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY finished_at DESC, request_id DESC LIMIT ?"
+	args = append(args, limit+1)
+	rows, err := database.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", errors.New("list requests: database read failed")
+	}
+	defer rows.Close()
+	result := make([]RequestListRecord, 0, limit)
+	for rows.Next() {
+		record, err := scanRequestListRecord(rows)
+		if err != nil {
+			return nil, "", errors.New("list requests: database read failed")
+		}
+		result = append(result, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", errors.New("list requests: database read failed")
+	}
+	if len(result) <= limit {
+		return result, "", nil
+	}
+	last := result[limit-1]
+	result = result[:limit]
+	next, err := encodeRequestCursor(signer, requestListCursor{FinishedAt: last.FinishedAt.Value, FinishedKnown: last.FinishedAt.Known, RequestID: last.RequestID})
+	if err != nil {
+		return nil, "", err
+	}
+	return result, next, nil
+}
+
+func scanRequestListRecord(rows *sql.Rows) (RequestListRecord, error) {
+	var record RequestListRecord
+	var keyID, keyName, method, path, route, model, requested, upstream, delivered, outcome, errorCode sql.NullString
+	var status, upstreamStatus, clientBytes, upstreamBytes, deliveredBytes, input, output, total, cached, reasoning, cost sql.NullInt64
+	var started, upstreamStartedAt, headers, firstByte, finished, totalMicros, headerLatency, firstByteLatency, closeDelay sql.NullInt64
+	var upstreamStarted int64
+	err := rows.Scan(&record.RequestID, &keyID, &keyName, &method, &path, &route, &model, &requested, &upstream, &delivered, &status, &upstreamStatus, &outcome, &upstreamStarted, &errorCode, &clientBytes, &upstreamBytes, &deliveredBytes, &input, &output, &total, &cached, &reasoning, &cost, &started, &upstreamStartedAt, &headers, &firstByte, &finished, &totalMicros, &headerLatency, &firstByteLatency, &closeDelay)
+	if err != nil {
+		return RequestListRecord{}, err
+	}
+	if upstreamStarted != 0 && upstreamStarted != 1 {
+		return RequestListRecord{}, ErrHistoryInvalidRecord
+	}
+	text := func(value sql.NullString) string {
+		if value.Valid {
+			return value.String
+		}
+		return ""
+	}
+	number := func(value sql.NullInt64) OptionalInt64 {
+		if value.Valid {
+			return KnownInt64(value.Int64)
+		}
+		return OptionalInt64{}
+	}
+	record.APIKeyID, record.KeyName, record.Method, record.Path, record.Route, record.Model = text(keyID), text(keyName), text(method), text(path), text(route), text(model)
+	record.RequestedMode, record.UpstreamMode, record.DeliveredMode, record.TerminalOutcome, record.ErrorCode = text(requested), text(upstream), text(delivered), text(outcome), text(errorCode)
+	record.UpstreamStarted = upstreamStarted == 1
+	record.DownstreamStatus, record.UpstreamStatus = number(status), number(upstreamStatus)
+	record.ClientBytes, record.UpstreamBytes, record.DeliveredBytes = number(clientBytes), number(upstreamBytes), number(deliveredBytes)
+	record.InputTokens, record.OutputTokens, record.TotalTokens, record.CachedInputTokens, record.ReasoningOutputTokens, record.CostMicros = number(input), number(output), number(total), number(cached), number(reasoning), number(cost)
+	record.StartedAt, record.UpstreamStartedAt, record.UpstreamHeadersAt, record.FirstByteAt, record.FinishedAt = number(started), number(upstreamStartedAt), number(headers), number(firstByte), number(finished)
+	record.TotalMicros, record.TimeToUpstreamHeadersMicros, record.TimeToFirstByteMicros, record.StreamCloseDelayMicros = number(totalMicros), number(headerLatency), number(firstByteLatency), number(closeDelay)
+	return record, nil
+}
+
+func newHistoryCursorAEAD() cipher.AEAD {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil
+	}
+	result, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil
+	}
+	return result
+}
+
+func validRequestKeyID(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
+			if index == 0 && (character == '-' || character == '_') {
+				return false
+			}
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// sha256Sum is kept local to avoid making cursor cryptography part of the
+// public storage API.
+func sha256Sum(value []byte) [32]byte { return sha256.Sum256(value) }
+
+func encodeRequestCursor(signer cipher.AEAD, cursor requestListCursor) (string, error) {
+	if signer == nil || cursor.RequestID == "" || len(cursor.RequestID) > 256 {
+		return "", ErrInvalidCursor
+	}
+	if !validHistoryRequestID(cursor.RequestID) {
+		return "", ErrInvalidCursor
+	}
+	payload := make([]byte, 14+len(cursor.RequestID))
+	copy(payload, requestCursorMagic[:])
+	if cursor.FinishedKnown {
+		payload[3] = 1
+	}
+	binary.BigEndian.PutUint64(payload[4:], uint64(cursor.FinishedAt))
+	binary.BigEndian.PutUint16(payload[12:], uint16(len(cursor.RequestID)))
+	copy(payload[14:], cursor.RequestID)
+	nonce := make([]byte, signer.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", ErrInvalidCursor
+	}
+	return base64.RawURLEncoding.EncodeToString(signer.Seal(nonce, nonce, payload, nil)), nil
+}
+
+func decodeRequestCursor(signer cipher.AEAD, value string) (*requestListCursor, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if len(value) > maxRequestCursorBytes || signer == nil {
+		return nil, ErrInvalidCursor
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(sealed) <= signer.NonceSize() {
+		return nil, ErrInvalidCursor
+	}
+	payload, err := signer.Open(nil, sealed[:signer.NonceSize()], sealed[signer.NonceSize():], nil)
+	if err != nil || len(payload) < 14 || payload[0] != requestCursorMagic[0] || payload[1] != requestCursorMagic[1] || payload[2] != requestCursorMagic[2] || (payload[3] != 0 && payload[3] != 1) {
+		return nil, ErrInvalidCursor
+	}
+	idLength := int(binary.BigEndian.Uint16(payload[12:]))
+	if idLength == 0 || idLength != len(payload)-14 || idLength > 256 || !validHistoryRequestID(string(payload[14:])) {
+		return nil, ErrInvalidCursor
+	}
+	return &requestListCursor{FinishedKnown: payload[3] == 1, FinishedAt: int64(binary.BigEndian.Uint64(payload[4:])), RequestID: string(payload[14:])}, nil
 }
 
 // Persist inserts one record and its optional body captures atomically. At

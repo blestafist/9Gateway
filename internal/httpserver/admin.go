@@ -53,6 +53,10 @@ type apiKeyDetailGetter interface {
 	GetAPIKeyByID(context.Context, string) (*storage.KeyDetailRecord, error)
 }
 
+type requestPageLister interface {
+	ListRequests(context.Context, storage.ListRequestsFilter, int, string) ([]storage.RequestListRecord, string, error)
+}
+
 type apiKeyPolicyUpdater interface {
 	UpdatePolicy(context.Context, string, bool, string) error
 }
@@ -458,6 +462,10 @@ func newAPIKeyID() (string, error) {
 }
 
 func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet && request.URL.Path == "/admin/v1/requests" {
+		handler.listRequests(response, request)
+		return
+	}
 	if request.Method == http.MethodGet && request.URL.Path == "/admin/v1/keys" {
 		handler.listKeys(response, request)
 		return
@@ -514,6 +522,179 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		Policy    json.RawMessage `json:"policy"`
 	}{created.ID, created.Name, created.Prefix, created.Enabled, created.ExpiresAt, created.CreatedAt, created.RawKey, created.Policy}
 	writeAdminJSON(response, http.StatusCreated, responseBody)
+}
+
+type adminRequestListItem struct {
+	RequestID                   string     `json:"request_id"`
+	APIKeyID                    *string    `json:"api_key_id"`
+	APIKeyName                  *string    `json:"api_key_name"`
+	Method                      *string    `json:"method"`
+	Path                        *string    `json:"path"`
+	Route                       *string    `json:"route"`
+	Model                       *string    `json:"model"`
+	RequestedMode               *string    `json:"requested_mode"`
+	UpstreamMode                *string    `json:"upstream_mode"`
+	DeliveredMode               *string    `json:"delivered_mode"`
+	DownstreamStatus            *int64     `json:"downstream_status"`
+	UpstreamStatus              *int64     `json:"upstream_status"`
+	TerminalOutcome             *string    `json:"terminal_outcome"`
+	UpstreamStarted             bool       `json:"upstream_started"`
+	ErrorCode                   *string    `json:"error_code"`
+	ClientBytes                 *int64     `json:"client_bytes"`
+	UpstreamBytes               *int64     `json:"upstream_bytes"`
+	DeliveredBytes              *int64     `json:"delivered_bytes"`
+	InputTokens                 *int64     `json:"input_tokens"`
+	OutputTokens                *int64     `json:"output_tokens"`
+	TotalTokens                 *int64     `json:"total_tokens"`
+	CachedInputTokens           *int64     `json:"cached_input_tokens"`
+	ReasoningOutputTokens       *int64     `json:"reasoning_output_tokens"`
+	CostMicros                  *int64     `json:"cost_micros"`
+	StartedAt                   *time.Time `json:"started_at"`
+	UpstreamStartedAt           *time.Time `json:"upstream_started_at"`
+	UpstreamHeadersAt           *time.Time `json:"upstream_headers_at"`
+	FirstByteAt                 *time.Time `json:"first_byte_at"`
+	FinishedAt                  *time.Time `json:"finished_at"`
+	TotalMicros                 *int64     `json:"total_micros"`
+	TimeToUpstreamHeadersMicros *int64     `json:"time_to_upstream_headers_micros"`
+	TimeToFirstByteMicros       *int64     `json:"time_to_first_byte_micros"`
+	StreamCloseDelayMicros      *int64     `json:"stream_close_delay_micros"`
+}
+
+func adminRequestListItemFromRecord(record storage.RequestListRecord) adminRequestListItem {
+	text := func(value string) *string {
+		if value == "" {
+			return nil
+		}
+		copy := value
+		return &copy
+	}
+	number := func(value storage.OptionalInt64) *int64 {
+		if !value.Known {
+			return nil
+		}
+		copy := value.Value
+		return &copy
+	}
+	timestamp := func(value storage.OptionalInt64) *time.Time {
+		if !value.Known {
+			return nil
+		}
+		stamp := time.UnixMicro(value.Value).UTC()
+		return &stamp
+	}
+	return adminRequestListItem{
+		RequestID: record.RequestID, APIKeyID: text(record.APIKeyID), APIKeyName: text(record.KeyName),
+		Method: text(record.Method), Path: text(record.Path), Route: text(record.Route), Model: text(record.Model),
+		RequestedMode: text(record.RequestedMode), UpstreamMode: text(record.UpstreamMode), DeliveredMode: text(record.DeliveredMode),
+		DownstreamStatus: number(record.DownstreamStatus), UpstreamStatus: number(record.UpstreamStatus), TerminalOutcome: text(record.TerminalOutcome), UpstreamStarted: record.UpstreamStarted, ErrorCode: text(record.ErrorCode),
+		ClientBytes: number(record.ClientBytes), UpstreamBytes: number(record.UpstreamBytes), DeliveredBytes: number(record.DeliveredBytes),
+		InputTokens: number(record.InputTokens), OutputTokens: number(record.OutputTokens), TotalTokens: number(record.TotalTokens), CachedInputTokens: number(record.CachedInputTokens), ReasoningOutputTokens: number(record.ReasoningOutputTokens), CostMicros: number(record.CostMicros),
+		StartedAt: timestamp(record.StartedAt), UpstreamStartedAt: timestamp(record.UpstreamStartedAt), UpstreamHeadersAt: timestamp(record.UpstreamHeadersAt), FirstByteAt: timestamp(record.FirstByteAt), FinishedAt: timestamp(record.FinishedAt),
+		TotalMicros: number(record.TotalMicros), TimeToUpstreamHeadersMicros: number(record.TimeToUpstreamHeadersMicros), TimeToFirstByteMicros: number(record.TimeToFirstByteMicros), StreamCloseDelayMicros: number(record.StreamCloseDelayMicros),
+	}
+}
+
+func (handler *adminHandler) listRequests(response http.ResponseWriter, request *http.Request) {
+	if !adminBearerMatches(request, handler.credential) {
+		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+		return
+	}
+	lister, ok := handler.service.repository.(requestPageLister)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "request listing failed")
+		return
+	}
+	query := request.URL.Query()
+	limit, err := parseAdminListLimit(query)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	cursor, err := singleAdminQueryValue(query, "cursor", false)
+	if err != nil || len(cursor) > 512 || strings.ContainsAny(cursor, "\r\n") {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	keyID, err := singleAdminQueryValue(query, "key_id", false)
+	if err != nil || (keyID != "" && !validAPIKeyID(keyID)) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	after, err := parseAdminListTime(query, "after")
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	before, err := parseAdminListTime(query, "before")
+	if err != nil || (after != nil && before != nil && after.After(*before)) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	records, nextCursor, err := lister.ListRequests(request.Context(), storage.ListRequestsFilter{KeyID: keyID, After: after, Before: before}, limit, cursor)
+	if err != nil {
+		if errors.Is(err, storage.ErrInvalidCursor) {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		} else {
+			writeAdminError(response, http.StatusInternalServerError, "internal_error", "request listing failed")
+		}
+		return
+	}
+	items := make([]adminRequestListItem, 0, len(records))
+	for _, record := range records {
+		items = append(items, adminRequestListItemFromRecord(record))
+	}
+	writeAdminJSON(response, http.StatusOK, struct {
+		Requests   []adminRequestListItem `json:"requests"`
+		NextCursor string                 `json:"next_cursor,omitempty"`
+	}{Requests: items, NextCursor: nextCursor})
+}
+
+func parseAdminListLimit(query map[string][]string) (int, error) {
+	value, err := singleAdminQueryValue(query, "limit", false)
+	if err != nil {
+		return 0, err
+	}
+	if value == "" {
+		return 50, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 || parsed > 500 {
+		return 0, errInvalidAdminRequest
+	}
+	return parsed, nil
+}
+
+func singleAdminQueryValue(query map[string][]string, name string, required bool) (string, error) {
+	values, present := query[name]
+	if !present {
+		if required {
+			return "", errInvalidAdminRequest
+		}
+		return "", nil
+	}
+	if len(values) != 1 || (!required && values[0] == "") {
+		return "", errInvalidAdminRequest
+	}
+	return values[0], nil
+}
+
+func parseAdminListTime(query map[string][]string, name string) (*time.Time, error) {
+	value, err := singleAdminQueryValue(query, name, false)
+	if err != nil {
+		return nil, err
+	}
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, errInvalidAdminRequest
+	}
+	// Request history timestamps are stored at microsecond precision. Normalize
+	// the user-supplied bound to that same precision before comparing bounds and
+	// passing it to SQLite.
+	parsed = parsed.UTC().Truncate(time.Microsecond)
+	return &parsed, nil
 }
 
 func (handler *adminHandler) getKey(response http.ResponseWriter, request *http.Request) {
