@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
+	"github.com/pestit/9gateway/internal/observability"
 )
 
 type traceTestClock struct {
@@ -52,6 +54,28 @@ func knownTraceUsage(t *testing.T, input, output int64) accounting.Usage {
 		t.Fatal(err)
 	}
 	return usage
+}
+
+func TestTraceBodyRecorderHandoffDefersBoundedPrefixCopy(t *testing.T) {
+	state, _ := traceTestState(t)
+	recorder, err := observability.NewBodyRecorder(observability.BodyKindResponse, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recorder.Write(bytes.Repeat([]byte{'x'}, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	recorder.FinalizeForHandoff()
+	if !state.SetResponseBodyRecorder(recorder) {
+		t.Fatal("response recorder handoff rejected")
+	}
+	if state.responseBody.Bytes != nil {
+		t.Fatal("response handoff copied bounded prefix")
+	}
+	snapshot, ok := state.ResponseBodySnapshot()
+	if !ok || len(snapshot.Bytes) != 1<<20 {
+		t.Fatalf("deferred snapshot = %s/%v", snapshot, ok)
+	}
 }
 
 func TestRequestTraceSettersAreFirstWriteWinsAndFreezeIsIdempotent(t *testing.T) {

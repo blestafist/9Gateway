@@ -5,10 +5,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/limiter"
+	"github.com/pestit/9gateway/internal/observability"
 	"github.com/pestit/9gateway/internal/transport"
 )
 
@@ -65,6 +67,29 @@ func TestT133RequestBodyCaptureSeparatesInspectedClientAndUpstreamReads(t *testi
 		client.OriginalSize != int64(len(payload)) || upstreamSnapshot.OriginalSize != int64(len(payload)) ||
 		!client.Captured || !upstreamSnapshot.Captured || client.Truncated || upstreamSnapshot.Truncated {
 		t.Fatalf("snapshots = %s / %s", client, upstreamSnapshot)
+	}
+}
+
+func TestT133UpstreamBodyCaptureSharesFinalizationBoundary(t *testing.T) {
+	recorder, err := observability.NewBodyRecorder(observability.BodyKindUpstreamRequest, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture := &requestBodyCapture{recorder: recorder}
+	body := capture.wrap(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("x"), 1024))))
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		_, _ = io.Copy(io.Discard, body)
+	}()
+	go func() {
+		defer wait.Done()
+		capture.finalize()
+	}()
+	wait.Wait()
+	if got := recorder.Finalize(); !got.Captured {
+		t.Fatal("concurrent upstream capture was not finalized")
 	}
 }
 

@@ -55,6 +55,7 @@ type BodyRecorder struct {
 	original  int64
 	captured  bool
 	finalized bool
+	frozen    *BodySnapshot
 }
 
 // NewBodyRecorder creates a recorder for kind with a fixed retention bound.
@@ -128,7 +129,7 @@ func (recorder *BodyRecorder) Snapshot() BodySnapshot {
 	if recorder == nil {
 		return BodySnapshot{}
 	}
-	recorder.finalized = true
+	recorder.freeze(false)
 	return recorder.snapshot()
 }
 
@@ -139,14 +140,49 @@ func (recorder *BodyRecorder) Finalize() BodySnapshot {
 	if recorder == nil {
 		return BodySnapshot{}
 	}
-	recorder.finalized = true
-	// Finalize establishes that the body observation completed, even when a
-	// prior non-observing Snapshot already made the recorder terminal.
-	recorder.captured = true
+	recorder.freeze(true)
 	return recorder.snapshot()
 }
 
+// FinalizeForHandoff makes the recorder terminal without copying its retained
+// prefix. It is for internal handoffs that transfer the finalized recorder's
+// ownership; Snapshot or Finalize should be used when a value is needed.
+func (recorder *BodyRecorder) FinalizeForHandoff() {
+	if recorder == nil {
+		return
+	}
+	recorder.freeze(true)
+}
+
+func (recorder *BodyRecorder) freeze(finalize bool) {
+	if recorder.finalized {
+		return
+	}
+	if finalize {
+		// Finalize establishes that body observation completed, including for
+		// an otherwise untouched recorder. Snapshot intentionally does not.
+		recorder.captured = true
+	}
+	recorder.finalized = true
+	snapshot := BodySnapshot{
+		Kind:         recorder.kind,
+		Bytes:        recorder.bytes,
+		OriginalSize: recorder.original,
+		Truncated:    recorder.original > int64(len(recorder.bytes)),
+		Captured:     recorder.captured,
+	}
+	recorder.frozen = &snapshot
+}
+
 func (recorder *BodyRecorder) snapshot() BodySnapshot {
+	if recorder.frozen != nil {
+		snapshot := *recorder.frozen
+		if len(snapshot.Bytes) != 0 {
+			snapshot.Bytes = make([]byte, len(snapshot.Bytes))
+			copy(snapshot.Bytes, recorder.frozen.Bytes)
+		}
+		return snapshot
+	}
 	var bytes []byte
 	if len(recorder.bytes) != 0 {
 		bytes = make([]byte, len(recorder.bytes))

@@ -101,6 +101,22 @@ func TestT135TransparentCaptureRequiresSuccessfulFlush(t *testing.T) {
 	}
 }
 
+func TestT135TransparentShortWriteCapturesAcceptedFlushedPrefix(t *testing.T) {
+	underlying := &t135ShortWriteWriter{header: make(http.Header), accepted: 3}
+	recorder, err := observability.NewBodyRecorder(observability.BodyKindResponse, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &completionResponseWriter{ResponseWriter: underlying, responseBodyRecorder: recorder, responseBodyAfterFlush: true}
+	if err := streamResponseBody(writer, bytes.NewBufferString("fragment")); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("stream error = %v, want %v", err, io.ErrShortWrite)
+	}
+	snapshot := recorder.Finalize()
+	if !bytes.Equal(snapshot.Bytes, []byte("fra")) || snapshot.OriginalSize != 3 || !snapshot.Captured || underlying.flushes != 1 {
+		t.Fatalf("short-write capture = %s, flushes = %d", snapshot, underlying.flushes)
+	}
+}
+
 type t135FlushErrorWriter struct {
 	header http.Header
 	err    error
@@ -112,3 +128,22 @@ func (writer *t135FlushErrorWriter) Write(body []byte) (int, error) {
 }
 func (writer *t135FlushErrorWriter) WriteHeader(int)   {}
 func (writer *t135FlushErrorWriter) FlushError() error { return writer.err }
+
+type t135ShortWriteWriter struct {
+	header   http.Header
+	accepted int
+	flushes  int
+}
+
+func (writer *t135ShortWriteWriter) Header() http.Header { return writer.header }
+func (writer *t135ShortWriteWriter) Write(body []byte) (int, error) {
+	if writer.accepted > len(body) {
+		return len(body), nil
+	}
+	return writer.accepted, nil
+}
+func (writer *t135ShortWriteWriter) WriteHeader(int) {}
+func (writer *t135ShortWriteWriter) FlushError() error {
+	writer.flushes++
+	return nil
+}

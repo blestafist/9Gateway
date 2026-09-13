@@ -464,22 +464,6 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		} else if request.Body != nil {
 			_ = request.Body.Close()
 		}
-		if clientBodyCapture != nil || upstreamBodyCapture != nil {
-			clientSnapshot := observability.BodySnapshot{}
-			upstreamSnapshot := observability.BodySnapshot{}
-			if clientBodyCapture != nil {
-				clientSnapshot = clientBodyCapture.finalize()
-			}
-			if upstreamBodyCapture != nil {
-				upstreamSnapshot = upstreamBodyCapture.finalize()
-			}
-			if trace != nil {
-				trace.SetRequestBodySnapshots(clientSnapshot, upstreamSnapshot)
-			}
-		}
-		if responseBodyRecorder != nil && trace != nil {
-			trace.SetResponseBodySnapshot(responseBodyRecorder.Finalize())
-		}
 		inspectionLease.Release()
 		if lifecycleLease != nil {
 			switch {
@@ -506,6 +490,26 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 				setTerminal(TerminalOutcomeComplete)
 			} else {
 				setTerminal(TerminalOutcomePreUpstream)
+			}
+		}
+		// Capture handoff is deliberately after resource release. Finalization
+		// freezes metadata without copying the retained prefix; the trace takes
+		// ownership and copies only when a later consumer requests a snapshot.
+		if clientBodyCapture != nil || upstreamBodyCapture != nil {
+			if clientBodyCapture != nil {
+				clientBodyCapture.finalizeForHandoff()
+			}
+			if upstreamBodyCapture != nil {
+				upstreamBodyCapture.finalizeForHandoff()
+			}
+			if trace != nil {
+				trace.SetRequestBodyRecorders(bodyRecorder(clientBodyCapture), bodyRecorder(upstreamBodyCapture))
+			}
+		}
+		if responseBodyRecorder != nil {
+			responseBodyRecorder.FinalizeForHandoff()
+			if trace != nil {
+				trace.SetResponseBodyRecorder(responseBodyRecorder)
 			}
 		}
 	}()
@@ -678,7 +682,7 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 	upstreamRequest.ContentLength = request.ContentLength
 	if upstreamBodyRecorder != nil && requestBody != nil && requestBody != http.NoBody {
-		upstreamBody = newCapturedRequestBody(requestBody, upstreamBodyRecorder)
+		upstreamBody = upstreamBodyCapture.wrap(requestBody)
 		upstreamRequest.Body = upstreamBody
 	}
 	if request.GetBody != nil && (telemetryBody != nil || upstreamBodyCapture != nil) {
@@ -1144,8 +1148,20 @@ func (capture *requestBodyCapture) finalize() observability.BodySnapshot {
 	return capture.recorder.Finalize()
 }
 
-func newCapturedRequestBody(source io.ReadCloser, recorder *observability.BodyRecorder) *capturedRequestBody {
-	return &capturedRequestBody{source: source, capture: &requestBodyCapture{recorder: recorder}}
+func (capture *requestBodyCapture) finalizeForHandoff() {
+	if capture == nil || capture.recorder == nil {
+		return
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	capture.recorder.FinalizeForHandoff()
+}
+
+func bodyRecorder(capture *requestBodyCapture) *observability.BodyRecorder {
+	if capture == nil {
+		return nil
+	}
+	return capture.recorder
 }
 
 func (body *capturedRequestBody) Read(p []byte) (int, error) {
@@ -1503,6 +1519,17 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader, observatio
 				return writeErr
 			}
 			if written != read {
+				if written > 0 && written < read {
+					if flushErr := controller.Flush(); flushErr == nil {
+						if completion != nil {
+							completion.recordResponseBodyAfterFlush(buffer[:written], written)
+						}
+						if observation != nil {
+							observation.record(buffer[:written])
+							observation.checkpoint(written)
+						}
+					}
+				}
 				return io.ErrShortWrite
 			}
 			if flushErr := controller.Flush(); flushErr != nil {

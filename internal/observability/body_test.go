@@ -98,26 +98,62 @@ func TestBodyRecorderKindsAndBounds(t *testing.T) {
 }
 
 func TestBodyRecorderSnapshotOwnershipAndFinalize(t *testing.T) {
-	recorder, err := NewBodyRecorder(BodyKindUpstreamRequest, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := recorder.Snapshot(); got.Captured {
-		t.Fatal("snapshot reported capture before observation")
-	}
-	if got := recorder.Finalize(); !got.Captured || len(got.Bytes) != 0 {
-		t.Fatalf("empty final snapshot = %#v", got)
-	}
-	if _, err := recorder.Write([]byte("late")); !errors.Is(err, ErrFinalized) {
-		t.Fatalf("post-finalize write error = %v", err)
-	}
-	again := recorder.Finalize()
-	again.Bytes = append(again.Bytes, 'x')
-	if got := recorder.Snapshot(); len(got.Bytes) != 0 || got.OriginalSize != 0 {
-		t.Fatalf("final snapshot changed after caller mutation = %#v", got)
+	for _, test := range []struct {
+		name      string
+		bound     int64
+		write     string
+		wantBytes string
+		captured  bool
+		truncated bool
+		size      int64
+	}{
+		{name: "untouched", bound: 4},
+		{name: "empty-write", bound: 4, write: "", captured: true},
+		{name: "under-bound", bound: 4, write: "abc", wantBytes: "abc", captured: true, size: 3},
+		{name: "over-bound", bound: 4, write: "abcde", wantBytes: "abcd", captured: true, truncated: true, size: 5},
+		{name: "zero-bound", bound: 0, write: "abc", captured: true, truncated: true, size: 3},
+	} {
+		for _, firstCall := range []string{"snapshot", "finalize"} {
+			t.Run(test.name+"/"+firstCall, func(t *testing.T) {
+				recorder, err := NewBodyRecorder(BodyKindUpstreamRequest, test.bound)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if test.name != "untouched" {
+					if _, err := recorder.Write([]byte(test.write)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var first BodySnapshot
+				if firstCall == "snapshot" {
+					first = recorder.Snapshot()
+				} else {
+					first = recorder.Finalize()
+				}
+				second := recorder.Finalize()
+				third := recorder.Snapshot()
+				fourth := recorder.Finalize()
+				for name, got := range map[string]BodySnapshot{"finalize": second, "snapshot again": third, "finalize again": fourth} {
+					if !bytes.Equal(got.Bytes, first.Bytes) || got.Kind != first.Kind || got.OriginalSize != first.OriginalSize || got.Truncated != first.Truncated || got.Captured != first.Captured {
+						t.Fatalf("%s = %#v, first = %#v", name, got, first)
+					}
+				}
+				wantCaptured := test.captured || (test.name == "untouched" && firstCall == "finalize")
+				if !bytes.Equal(first.Bytes, []byte(test.wantBytes)) || first.Captured != wantCaptured || first.Truncated != test.truncated || first.OriginalSize != test.size {
+					t.Fatalf("snapshot = %#v", first)
+				}
+				if _, err := recorder.Write([]byte("late")); !errors.Is(err, ErrFinalized) {
+					t.Fatalf("post-finalize write error = %v", err)
+				}
+				fourth.Bytes = append(fourth.Bytes, 'x')
+				if got := recorder.Snapshot(); !bytes.Equal(got.Bytes, first.Bytes) {
+					t.Fatalf("final snapshot changed after caller mutation = %#v", got)
+				}
+			})
+		}
 	}
 
-	recorder, err = NewBodyRecorder(BodyKindResponse, 4)
+	recorder, err := NewBodyRecorder(BodyKindResponse, 4)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -120,12 +120,15 @@ type RequestTraceState struct {
 	enrichmentFrozen bool
 	completion       *completionOwnership
 
-	bodyMu           sync.Mutex
-	clientBody       observability.BodySnapshot
-	upstreamBody     observability.BodySnapshot
-	responseBody     observability.BodySnapshot
-	bodySnapshotsSet bool
-	responseBodySet  bool
+	bodyMu               sync.Mutex
+	clientBody           observability.BodySnapshot
+	upstreamBody         observability.BodySnapshot
+	responseBody         observability.BodySnapshot
+	clientBodyRecorder   *observability.BodyRecorder
+	upstreamBodyRecorder *observability.BodyRecorder
+	responseBodyRecorder *observability.BodyRecorder
+	bodySnapshotsSet     bool
+	responseBodySet      bool
 }
 
 func (state *RequestTraceState) setCompletionOwnership(ownership *completionOwnership) {
@@ -416,6 +419,23 @@ func (state *RequestTraceState) SetRequestBodySnapshots(client, upstream observa
 	return true
 }
 
+// SetRequestBodyRecorders transfers ownership of finalized recorders without
+// copying their bounded prefixes. The prefix is copied only when a consumer
+// asks for RequestBodySnapshots.
+func (state *RequestTraceState) SetRequestBodyRecorders(client, upstream *observability.BodyRecorder) bool {
+	if state == nil {
+		return false
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if state.bodySnapshotsSet {
+		return false
+	}
+	state.clientBodyRecorder, state.upstreamBodyRecorder = client, upstream
+	state.bodySnapshotsSet = true
+	return true
+}
+
 // RequestBodySnapshots returns independent copies of the terminal client and
 // upstream request captures. It is intentionally not part of CompletionRecord
 // or completion logging.
@@ -427,6 +447,16 @@ func (state *RequestTraceState) RequestBodySnapshots() (observability.BodySnapsh
 	defer state.bodyMu.Unlock()
 	if !state.bodySnapshotsSet {
 		return observability.BodySnapshot{}, observability.BodySnapshot{}, false
+	}
+	if state.clientBodyRecorder != nil || state.upstreamBodyRecorder != nil {
+		client, upstream := observability.BodySnapshot{}, observability.BodySnapshot{}
+		if state.clientBodyRecorder != nil {
+			client = state.clientBodyRecorder.Snapshot()
+		}
+		if state.upstreamBodyRecorder != nil {
+			upstream = state.upstreamBodyRecorder.Snapshot()
+		}
+		return client, upstream, true
 	}
 	return copyBodySnapshot(state.clientBody), copyBodySnapshot(state.upstreamBody), true
 }
@@ -453,6 +483,22 @@ func (state *RequestTraceState) SetResponseBodySnapshot(snapshot observability.B
 	return true
 }
 
+// SetResponseBodyRecorder transfers ownership of a finalized response
+// recorder without copying its bounded prefix on the transport path.
+func (state *RequestTraceState) SetResponseBodyRecorder(recorder *observability.BodyRecorder) bool {
+	if state == nil {
+		return false
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if state.responseBodySet {
+		return false
+	}
+	state.responseBodyRecorder = recorder
+	state.responseBodySet = true
+	return true
+}
+
 // ResponseBodySnapshot returns an independent copy of the terminal downstream
 // response capture. It is intentionally not part of CompletionRecord or
 // completion logging.
@@ -464,6 +510,9 @@ func (state *RequestTraceState) ResponseBodySnapshot() (observability.BodySnapsh
 	defer state.bodyMu.Unlock()
 	if !state.responseBodySet {
 		return observability.BodySnapshot{}, false
+	}
+	if state.responseBodyRecorder != nil {
+		return state.responseBodyRecorder.Snapshot(), true
 	}
 	return copyBodySnapshot(state.responseBody), true
 }

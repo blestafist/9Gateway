@@ -28,7 +28,10 @@ T135 adds flushed transparent SSE bytes and accepted generated conversion JSON.
 Client, upstream-request, JSON/opaque, SSE, and converted captures are bounded
 and live on `RequestTraceState` request/response body snapshots for T136-T139.
 
-Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
+Known issues: none. Review fixes after T135 make recorder terminal snapshots
+stable, synchronize the initial upstream body wrapper, preserve accepted
+short-write capture, and hand off finalized captures after resource release
+without transport-path copying. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds
 strict deployment pricing rules with compiled slash-aware selectors and ordered
 immutable accessors. T100 adds the
