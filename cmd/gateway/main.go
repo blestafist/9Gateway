@@ -220,6 +220,7 @@ func run() error {
 
 	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, keyRepository, nil, nil, completionLogger, tokenLimiter, httpserver.TokenAdmissionConfig{
 		MaxInspectedRequestBytes:   cfg.Tokenizer.MaxInspectedRequestBytes,
+		MaxCapturedBodyBytes:       cfg.Observability.MaxCapturedBodyBytes,
 		FallbackUnknownInputTokens: cfg.Tokenizer.FallbackUnknownInputTokens,
 		FallbackMaxOutputTokens:    cfg.Tokenizer.FallbackMaxOutputTokens,
 		PricingResolver:            pricingResolver,

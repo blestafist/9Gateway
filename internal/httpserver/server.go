@@ -22,6 +22,7 @@ import (
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/config"
 	"github.com/pestit/9gateway/internal/limiter"
+	"github.com/pestit/9gateway/internal/observability"
 	"github.com/pestit/9gateway/internal/protocol/openai"
 )
 
@@ -33,7 +34,10 @@ const requestInspectionLimit int64 = config.DefaultMaxInspectedRequestBytes
 // token preflight. The key's effective token mode is already compiled into its
 // authentication policy; these values are intentionally not per-key.
 type TokenAdmissionConfig struct {
-	MaxInspectedRequestBytes   int64
+	MaxInspectedRequestBytes int64
+	// MaxCapturedBodyBytes is the deployment-wide bound for opt-in request
+	// body capture. Zero disables capture without allocating body-sized state.
+	MaxCapturedBodyBytes       int64
 	FallbackUnknownInputTokens int64
 	FallbackMaxOutputTokens    int64
 	// MaxObservedResponseBytes bounds the wire representation retained for
@@ -389,12 +393,6 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	if trace != nil && authenticated {
 		trace.SetAuthentication(principal.ID, principal.Name)
 	}
-	if authenticated && handler.tokenConfig.BudgetLimiter != nil && !handler.tokenConfig.BudgetLimiter.PolicyCurrent(principal.ID, budgetPolicy(principal.Policy)) {
-		setTerminal := terminalMetadataFromContext(request.Context()).set
-		setTerminal(TerminalMetadata{Outcome: TerminalOutcomePreUpstream})
-		writeGatewayError(response, gatewayErrorInvalidAPIKey, "")
-		return
-	}
 	var inspectionLease *limiter.Lease
 	var upstreamResponse *http.Response
 	var lifecycleLease *limiter.ResourceLease
@@ -402,6 +400,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var budgetAdmission bool
 	var responseObservation *responseObservation
 	var telemetryBody *telemetryRequestBody
+	var clientBodyCapture, upstreamBodyCapture *requestBodyCapture
+	var clientBodyRecorder, upstreamBodyRecorder *observability.BodyRecorder
+	var upstreamBody *capturedRequestBody
 	completion := completionOwnershipFromContext(request.Context())
 	var dispatchErr error
 	// client.Do owns the ambiguous boundary. Before it is called, cleanup can
@@ -419,6 +420,28 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			}
 		}
 	}
+	if authenticated && handler.tokenConfig.BudgetLimiter != nil && !handler.tokenConfig.BudgetLimiter.PolicyCurrent(principal.ID, budgetPolicy(principal.Policy)) {
+		setTerminal(TerminalOutcomePreUpstream)
+		writeGatewayError(response, gatewayErrorInvalidAPIKey, "")
+		return
+	}
+	if authenticated && principal.Policy.LogRequestBody() && handler.tokenConfig.MaxCapturedBodyBytes > 0 {
+		var captureErr error
+		clientBodyRecorder, captureErr = observability.NewBodyRecorder(observability.BodyKindClientRequest, handler.tokenConfig.MaxCapturedBodyBytes)
+		if captureErr == nil {
+			upstreamBodyRecorder, captureErr = observability.NewBodyRecorder(observability.BodyKindUpstreamRequest, handler.tokenConfig.MaxCapturedBodyBytes)
+		}
+		if captureErr != nil {
+			setTerminal(TerminalOutcomePreUpstream)
+			writeGatewayError(response, gatewayErrorInternal, "")
+			return
+		}
+		clientBodyCapture = &requestBodyCapture{recorder: clientBodyRecorder}
+		upstreamBodyCapture = &requestBodyCapture{recorder: upstreamBodyRecorder}
+		if request.Body != nil && request.Body != http.NoBody {
+			request.Body = clientBodyCapture.wrap(request.Body)
+		}
+	}
 	proxyContext, cancelUpstream := context.WithCancel(request.Context())
 	// Restricted inspection may block while reading a client body. Reserve a
 	// provisional slot for that phase and promote it into the full lifecycle
@@ -429,7 +452,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		if upstreamResponse != nil && upstreamResponse.Body != nil {
 			_ = upstreamResponse.Body.Close()
 		}
-		if telemetryBody != nil {
+		if upstreamBody != nil {
+			_ = upstreamBody.Close()
+		} else if telemetryBody != nil {
 			// A response may complete before the client upload reaches EOF. Close
 			// publishes the bounded capture's terminal state without waiting for
 			// the upload; the observation worker only consumes that immutable
@@ -437,6 +462,19 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			_ = telemetryBody.Close()
 		} else if request.Body != nil {
 			_ = request.Body.Close()
+		}
+		if clientBodyCapture != nil || upstreamBodyCapture != nil {
+			clientSnapshot := observability.BodySnapshot{}
+			upstreamSnapshot := observability.BodySnapshot{}
+			if clientBodyCapture != nil {
+				clientSnapshot = clientBodyCapture.finalize()
+			}
+			if upstreamBodyCapture != nil {
+				upstreamSnapshot = upstreamBodyCapture.finalize()
+			}
+			if trace != nil {
+				trace.SetRequestBodySnapshots(clientSnapshot, upstreamSnapshot)
+			}
 		}
 		inspectionLease.Release()
 		if lifecycleLease != nil {
@@ -635,13 +673,23 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 	upstreamRequest.ContentLength = request.ContentLength
-	if telemetryBody != nil && request.GetBody != nil {
+	if upstreamBodyRecorder != nil && requestBody != nil && requestBody != http.NoBody {
+		upstreamBody = newCapturedRequestBody(requestBody, upstreamBodyRecorder)
+		upstreamRequest.Body = upstreamBody
+	}
+	if request.GetBody != nil && (telemetryBody != nil || upstreamBodyCapture != nil) {
 		upstreamRequest.GetBody = func() (io.ReadCloser, error) {
 			body, err := request.GetBody()
 			if err != nil {
 				return nil, err
 			}
-			return newTelemetryRequestBody(body, request.ContentLength, handler.tokenConfig.MaxInspectedRequestBytes), nil
+			if telemetryBody != nil {
+				body = newTelemetryRequestBody(body, request.ContentLength, handler.tokenConfig.MaxInspectedRequestBytes)
+			}
+			if upstreamBodyCapture != nil {
+				return upstreamBodyCapture.wrap(body), nil
+			}
+			return body, nil
 		}
 	}
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
@@ -1045,6 +1093,59 @@ type replayedRequestBody struct {
 
 func (body *replayedRequestBody) Close() error {
 	if body.source == nil {
+		return nil
+	}
+	return body.source.Close()
+}
+
+// capturedRequestBody observes bytes returned by an existing request-body
+// reader without reading ahead or changing its transport-visible result. It
+// is layered first around the client body and then around the final replay
+// reader, so inspected prefixes are represented in both streams exactly once.
+type capturedRequestBody struct {
+	source  io.ReadCloser
+	capture *requestBodyCapture
+}
+
+type requestBodyCapture struct {
+	mu       sync.Mutex
+	recorder *observability.BodyRecorder
+}
+
+func (capture *requestBodyCapture) wrap(source io.ReadCloser) *capturedRequestBody {
+	return &capturedRequestBody{source: source, capture: capture}
+}
+
+func (capture *requestBodyCapture) finalize() observability.BodySnapshot {
+	if capture == nil || capture.recorder == nil {
+		return observability.BodySnapshot{}
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return capture.recorder.Finalize()
+}
+
+func newCapturedRequestBody(source io.ReadCloser, recorder *observability.BodyRecorder) *capturedRequestBody {
+	return &capturedRequestBody{source: source, capture: &requestBodyCapture{recorder: recorder}}
+}
+
+func (body *capturedRequestBody) Read(p []byte) (int, error) {
+	if body == nil || body.source == nil {
+		return 0, io.EOF
+	}
+	n, err := body.source.Read(p)
+	if body.capture != nil && body.capture.recorder != nil && n > 0 {
+		// Capture bookkeeping is best effort and must never alter transport
+		// errors or short-read semantics.
+		body.capture.mu.Lock()
+		_ = body.capture.recorder.WriteObserved(p, n)
+		body.capture.mu.Unlock()
+	}
+	return n, err
+}
+
+func (body *capturedRequestBody) Close() error {
+	if body == nil || body.source == nil {
 		return nil
 	}
 	return body.source.Close()

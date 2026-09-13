@@ -3,11 +3,11 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T132`.
+Done: `T001`-`T133`.
 
-Current: `T133` - capture client and upstream request bodies.
+Current: `T134` - capture JSON and opaque responses.
 
-Queued: `T133`-`T140` in dependency order from `TASKS.md`.
+Queued: `T134`-`T140` in dependency order from `TASKS.md`.
 
 T131 established strict per-key request/response body-capture opt-ins in the
 immutable effective policy and atomic admin replacement/reopen path. T132 adds
@@ -16,6 +16,11 @@ prefix, checked `int64` original size, strict body kind, and immutable snapshots
 zero bound allocates nothing, and `Snapshot`/`Finalize` are terminal: later
 writes reject with `ErrFinalized`. T133-T135 must copy each snapshot only at
 their handoff.
+
+T133 stores finalized client/upstream request snapshots alongside request-local
+trace state, reachable through `RequestBodySnapshots`; capture wraps the
+authenticated client body before inspection and the final replay body before
+`client.Do`, without entering completion records or logs.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

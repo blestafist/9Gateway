@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
+	"github.com/pestit/9gateway/internal/observability"
 )
 
 // TraceClock is the small clock boundary used by request traces. Wall and
@@ -118,6 +119,11 @@ type RequestTraceState struct {
 	enrichmentSnap   RequestTraceEnrichment
 	enrichmentFrozen bool
 	completion       *completionOwnership
+
+	bodyMu           sync.Mutex
+	clientBody       observability.BodySnapshot
+	upstreamBody     observability.BodySnapshot
+	bodySnapshotsSet bool
 }
 
 func (state *RequestTraceState) setCompletionOwnership(ownership *completionOwnership) {
@@ -390,6 +396,42 @@ func (state *RequestTraceState) SetClientBytes(count ByteCount) bool {
 		return false
 	}
 	return state.setByteCount(&state.input.ClientBytes, count)
+}
+
+// SetRequestBodySnapshots stores the terminal request-body observations
+// separately from CompletionRecord. The retained bytes are copied at this
+// lifecycle handoff so the trace owns immutable snapshot values.
+func (state *RequestTraceState) SetRequestBodySnapshots(client, upstream observability.BodySnapshot) bool {
+	if state == nil {
+		return false
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if state.bodySnapshotsSet {
+		return false
+	}
+	state.clientBody, state.upstreamBody, state.bodySnapshotsSet = client, upstream, true
+	return true
+}
+
+// RequestBodySnapshots returns independent copies of the terminal client and
+// upstream request captures. It is intentionally not part of CompletionRecord
+// or completion logging.
+func (state *RequestTraceState) RequestBodySnapshots() (observability.BodySnapshot, observability.BodySnapshot, bool) {
+	if state == nil {
+		return observability.BodySnapshot{}, observability.BodySnapshot{}, false
+	}
+	state.bodyMu.Lock()
+	defer state.bodyMu.Unlock()
+	if !state.bodySnapshotsSet {
+		return observability.BodySnapshot{}, observability.BodySnapshot{}, false
+	}
+	return copyBodySnapshot(state.clientBody), copyBodySnapshot(state.upstreamBody), true
+}
+
+func copyBodySnapshot(snapshot observability.BodySnapshot) observability.BodySnapshot {
+	snapshot.Bytes = append([]byte(nil), snapshot.Bytes...)
+	return snapshot
 }
 
 func (state *RequestTraceState) SetUpstreamBytes(count ByteCount) bool {
