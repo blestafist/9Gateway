@@ -720,6 +720,10 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	} else if request.GetBody != nil && upstreamBodyCapture == nil {
 		// Preserve GetBody when no capture is active.
 		upstreamRequest.GetBody = request.GetBody
+	} else if request.GetBody != nil {
+		// Body capture is active but telemetry is not. Preserve GetBody for redirects
+		// without any wrapper; only the first body (already wrapped above) is captured.
+		upstreamRequest.GetBody = request.GetBody
 	}
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
