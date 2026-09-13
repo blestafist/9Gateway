@@ -39,6 +39,12 @@ type BodySnapshot struct {
 	Captured     bool
 }
 
+// String intentionally reports metadata only. Body payloads must not appear
+// in debug output, including output produced while inspecting a snapshot.
+func (snapshot BodySnapshot) String() string {
+	return fmt.Sprintf("body snapshot{kind=%s bytes=%d original_size=%d truncated=%t captured=%t}", snapshot.Kind, len(snapshot.Bytes), snapshot.OriginalSize, snapshot.Truncated, snapshot.Captured)
+}
+
 // BodyRecorder retains a prefix of an observed body without interpreting it.
 // It is deliberately not safe for concurrent use; callers must provide any
 // needed synchronization at the observation boundary.
@@ -115,11 +121,14 @@ func (recorder *BodyRecorder) writeObserved(p []byte, accepted int) error {
 	return nil
 }
 
-// Snapshot returns the current capture. It does not finalize the recorder.
+// Snapshot returns the current capture and finalizes the recorder. This makes
+// every snapshot a terminal handoff: later writes return ErrFinalized and
+// cannot change the captured bytes. Repeated snapshots remain safe.
 func (recorder *BodyRecorder) Snapshot() BodySnapshot {
 	if recorder == nil {
 		return BodySnapshot{}
 	}
+	recorder.finalized = true
 	return recorder.snapshot()
 }
 
@@ -130,16 +139,19 @@ func (recorder *BodyRecorder) Finalize() BodySnapshot {
 	if recorder == nil {
 		return BodySnapshot{}
 	}
-	if !recorder.finalized {
-		recorder.finalized = true
-		recorder.captured = true
-	}
+	recorder.finalized = true
+	// Finalize establishes that the body observation completed, even when a
+	// prior non-observing Snapshot already made the recorder terminal.
+	recorder.captured = true
 	return recorder.snapshot()
 }
 
 func (recorder *BodyRecorder) snapshot() BodySnapshot {
-	bytes := make([]byte, len(recorder.bytes))
-	copy(bytes, recorder.bytes)
+	var bytes []byte
+	if len(recorder.bytes) != 0 {
+		bytes = make([]byte, len(recorder.bytes))
+		copy(bytes, recorder.bytes)
+	}
 	return BodySnapshot{
 		Kind:         recorder.kind,
 		Bytes:        bytes,
@@ -147,6 +159,15 @@ func (recorder *BodyRecorder) snapshot() BodySnapshot {
 		Truncated:    recorder.original > int64(len(recorder.bytes)),
 		Captured:     recorder.captured,
 	}
+}
+
+// String intentionally reports metadata only and never formats retained body
+// bytes. It is safe to use in errors and debug logs.
+func (recorder *BodyRecorder) String() string {
+	if recorder == nil {
+		return "body recorder{nil}"
+	}
+	return fmt.Sprintf("body recorder{kind=%s bytes=%d original_size=%d truncated=%t captured=%t finalized=%t}", recorder.kind, len(recorder.bytes), recorder.original, recorder.original > int64(len(recorder.bytes)), recorder.captured, recorder.finalized)
 }
 
 func validBodyKind(kind BodyKind) bool {

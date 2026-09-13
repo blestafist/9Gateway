@@ -13,8 +13,9 @@ T131 established strict per-key request/response body-capture opt-ins in the
 immutable effective policy and atomic admin replacement/reopen path. T132 adds
 the protocol-independent `observability.BodyRecorder`: it retains a bounded
 prefix, checked `int64` original size, strict body kind, and immutable snapshots;
-zero bound allocates nothing, and finalized recorders reject later writes with
-`ErrFinalized`. T133-T135 must copy each snapshot only at their handoff.
+zero bound allocates nothing, and `Snapshot`/`Finalize` are terminal: later
+writes reject with `ErrFinalized`. T133-T135 must copy each snapshot only at
+their handoff.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

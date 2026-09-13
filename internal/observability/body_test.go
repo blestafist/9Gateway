@@ -3,6 +3,7 @@ package observability
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 )
@@ -62,8 +63,19 @@ func TestBodyRecorderShortObservedCount(t *testing.T) {
 	if got.Bytes[0] != 'a' {
 		t.Fatal("recorder retained caller input")
 	}
-	if err := recorder.WriteObserved(input, 7); !errors.Is(err, ErrInvalidObservedCount) {
+	other := []byte("xy")
+	recorder, err = NewBodyRecorder(BodyKindClientRequest, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.WriteObserved(other, 3); !errors.Is(err, ErrInvalidObservedCount) {
 		t.Fatalf("invalid short count error = %v", err)
+	}
+	if got := recorder.Snapshot(); got.Captured || got.OriginalSize != 0 {
+		t.Fatalf("invalid short count mutated recorder = %#v", got)
+	}
+	if _, err := recorder.Write(input); !errors.Is(err, ErrFinalized) {
+		t.Fatalf("post-snapshot write error = %v", err)
 	}
 }
 
@@ -117,6 +129,25 @@ func TestBodyRecorderSnapshotOwnershipAndFinalize(t *testing.T) {
 	two := recorder.Snapshot()
 	if !bytes.Equal(two.Bytes, []byte("abcd")) || cap(two.Bytes) != len(two.Bytes) {
 		t.Fatalf("snapshot ownership/capacity = %q cap %d", two.Bytes, cap(two.Bytes))
+	}
+}
+
+func TestBodyRecorderDebugFormattingDoesNotContainPayload(t *testing.T) {
+	recorder, err := NewBodyRecorder(BodyKindResponse, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recorder.Write([]byte("secret\x00")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := recorder.Snapshot()
+	for name, formatted := range map[string]string{
+		"recorder": fmt.Sprintf("%v", recorder),
+		"snapshot": fmt.Sprintf("%v", snapshot),
+	} {
+		if bytes.Contains([]byte(formatted), []byte("secret")) {
+			t.Fatalf("%s formatting leaked payload: %q", name, formatted)
+		}
 	}
 }
 
