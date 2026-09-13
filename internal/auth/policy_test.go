@@ -21,7 +21,7 @@ func TestParsePolicy(t *testing.T) {
 			name: "empty",
 			json: `{}`,
 			check: func(t *testing.T, policy EffectivePolicy) {
-				if !policy.AllowsModel("anything") || policy.MaxConcurrency() != 0 || len(policy.RequestWindows()) != 0 {
+				if !policy.AllowsModel("anything") || policy.MaxConcurrency() != 0 || len(policy.RequestWindows()) != 0 || policy.LogRequestBody() || policy.LogResponseBody() {
 					t.Fatal("empty policy is not unrestricted")
 				}
 			},
@@ -60,6 +60,24 @@ func TestParsePolicy(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "body capture opt-ins",
+			json: `{"log_request_body":true,"log_response_body":false}`,
+			check: func(t *testing.T, policy EffectivePolicy) {
+				if !policy.LogRequestBody() || policy.LogResponseBody() {
+					t.Fatalf("body capture policy = request %t/response %t", policy.LogRequestBody(), policy.LogResponseBody())
+				}
+			},
+		},
+		{
+			name: "body capture absent and false",
+			json: `{"log_request_body":false,"log_response_body":false}`,
+			check: func(t *testing.T, policy EffectivePolicy) {
+				if policy.LogRequestBody() || policy.LogResponseBody() {
+					t.Fatal("false body capture policy was enabled")
+				}
+			},
+		},
 		{name: "unknown field", json: `{"future":true}`, wantErr: true},
 		{name: "malformed pattern", json: `{"allowed_models":["gpt-["]}`, wantErr: true},
 		{name: "invalid window", json: `{"request_windows":[{"amount":0,"duration":"1m"}]}`, wantErr: true},
@@ -89,6 +107,15 @@ func TestParsePolicy(t *testing.T) {
 		{name: "budget object shape", json: `{"budget_limits":{}}`, wantErr: true},
 		{name: "budget list null entry", json: `{"budget_limits":[null]}`, wantErr: true},
 		{name: "null token mode", json: `{"token_mode":null}`, wantErr: true},
+		{name: "null request body capture", json: `{"log_request_body":null}`, wantErr: true},
+		{name: "null response body capture", json: `{"log_response_body":null}`, wantErr: true},
+		{name: "string request body capture", json: `{"log_request_body":"true"}`, wantErr: true},
+		{name: "number response body capture", json: `{"log_response_body":1}`, wantErr: true},
+		{name: "duplicate request body capture", json: `{"log_request_body":true,"log_request_body":false}`, wantErr: true},
+		{name: "duplicate response body capture", json: `{"log_response_body":true,"log_response_body":false}`, wantErr: true},
+		{name: "nested request body capture", json: `{"log_request_body":{"enabled":true}}`, wantErr: true},
+		{name: "nested response body capture", json: `{"log_response_body":[]}`, wantErr: true},
+		{name: "unknown policy field near body capture", json: `{"log_request_body":true,"body_capture":{}}`, wantErr: true},
 		{name: "invalid token mode", json: `{"token_mode":"other"}`, wantErr: true},
 		{name: "invalid token window amount", json: `{"token_windows":[{"amount":0,"duration":"1m"}]}`, wantErr: true},
 		{name: "negative token window amount", json: `{"token_windows":[{"amount":-1,"duration":"1m"}]}`, wantErr: true},

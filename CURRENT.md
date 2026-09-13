@@ -3,11 +3,15 @@
 Current milestone: persistent request observability and bounded body inspection
 (`T121`-`T140`).
 
-Done: `T001`-`T130`.
+Done: `T001`-`T131`.
 
-Current: `T131` - add per-key body capture policy.
+Current: `T132` - implement bounded binary body recording.
 
-Queued: `T131`-`T140` in dependency order from `TASKS.md`.
+Queued: `T132`-`T140` in dependency order from `TASKS.md`.
+
+T131 established strict per-key request/response body-capture opt-ins in the
+immutable effective policy and atomic admin replacement/reopen path; T132 must
+consume those snapshots without changing transport behavior.
 
 Known issues: none. T101 adds exact, unknown-aware integer-USD-micros money
 values with checked arithmetic and canonical decimal conversion. T102 adds

@@ -69,13 +69,15 @@ type BudgetLimit struct {
 // JSON policy compiler.
 
 type policyDocument struct {
-	AllowedModels  []string                `json:"allowed_models"`
-	DeniedModels   []string                `json:"denied_models"`
-	RequestWindows []requestWindowDocument `json:"request_windows"`
-	TokenWindows   []tokenWindowDocument   `json:"token_windows"`
-	BudgetLimits   json.RawMessage         `json:"budget_limits"`
-	TokenMode      *TokenMode              `json:"token_mode"`
-	MaxConcurrency *int                    `json:"max_concurrent_requests"`
+	AllowedModels   []string                `json:"allowed_models"`
+	DeniedModels    []string                `json:"denied_models"`
+	RequestWindows  []requestWindowDocument `json:"request_windows"`
+	TokenWindows    []tokenWindowDocument   `json:"token_windows"`
+	BudgetLimits    json.RawMessage         `json:"budget_limits"`
+	TokenMode       *TokenMode              `json:"token_mode"`
+	MaxConcurrency  *int                    `json:"max_concurrent_requests"`
+	LogRequestBody  *bool                   `json:"log_request_body"`
+	LogResponseBody *bool                   `json:"log_response_body"`
 }
 
 type requestWindowDocument struct {
@@ -92,19 +94,21 @@ type tokenWindowDocument struct {
 // gateway. Its state is private; accessors return copies where a slice is
 // involved, so callers cannot mutate a published snapshot.
 type EffectivePolicy struct {
-	allowedModels  []modelmatch.Pattern
-	deniedModels   []modelmatch.Pattern
-	requestWindows []RequestWindow
-	tokenWindows   []TokenWindow
-	tokenMode      TokenMode
-	tokenModeSet   bool
-	maxConcurrency int
-	totalBudget    accounting.Money
-	totalBudgetSet bool
-	dayBudget      accounting.Money
-	dayBudgetSet   bool
-	monthBudget    accounting.Money
-	monthBudgetSet bool
+	allowedModels   []modelmatch.Pattern
+	deniedModels    []modelmatch.Pattern
+	requestWindows  []RequestWindow
+	tokenWindows    []TokenWindow
+	tokenMode       TokenMode
+	tokenModeSet    bool
+	maxConcurrency  int
+	totalBudget     accounting.Money
+	totalBudgetSet  bool
+	dayBudget       accounting.Money
+	dayBudgetSet    bool
+	monthBudget     accounting.Money
+	monthBudgetSet  bool
+	logRequestBody  bool
+	logResponseBody bool
 }
 
 // ParsePolicy strictly validates and compiles one stored policy document.
@@ -145,7 +149,7 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return EffectivePolicy{}, ErrInvalidPolicy
 	}
-	for _, field := range []string{"allowed_models", "denied_models", "request_windows", "token_windows", "budget_limits", "token_mode", "max_concurrent_requests"} {
+	for _, field := range []string{"allowed_models", "denied_models", "request_windows", "token_windows", "budget_limits", "token_mode", "max_concurrent_requests", "log_request_body", "log_response_body"} {
 		if value, present := fields[field]; present && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return EffectivePolicy{}, ErrInvalidPolicy
 		}
@@ -256,6 +260,12 @@ func parsePolicy(data []byte, defaultMode TokenMode) (EffectivePolicy, error) {
 		}
 		policy.maxConcurrency = *document.MaxConcurrency
 	}
+	if document.LogRequestBody != nil {
+		policy.logRequestBody = *document.LogRequestBody
+	}
+	if document.LogResponseBody != nil {
+		policy.logResponseBody = *document.LogResponseBody
+	}
 	return policy, nil
 }
 
@@ -321,6 +331,19 @@ func (policy EffectivePolicy) TokenModeOverride() (TokenMode, bool) {
 // MaxConcurrency returns zero when concurrency is unrestricted.
 func (policy EffectivePolicy) MaxConcurrency() int {
 	return policy.maxConcurrency
+}
+
+// LogRequestBody reports whether this key opted in to bounded request-body
+// capture. The deployment-wide capture bound remains authoritative; this
+// policy value only enables the per-key opt-in.
+func (policy EffectivePolicy) LogRequestBody() bool {
+	return policy.logRequestBody
+}
+
+// LogResponseBody reports whether this key opted in to bounded response-body
+// capture. Response capture is limited to bytes delivered downstream.
+func (policy EffectivePolicy) LogResponseBody() bool {
+	return policy.logResponseBody
 }
 
 // TotalBudget returns the configured lifetime budget and whether one was

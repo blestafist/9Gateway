@@ -44,14 +44,15 @@ func TestAdminCreateKeyHTTPPersistsAndNeverCallsUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	var created struct {
-		ID        string     `json:"id"`
-		Name      string     `json:"name"`
-		Prefix    string     `json:"prefix"`
-		Key       string     `json:"key"`
-		ExpiresAt *time.Time `json:"expires_at"`
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Prefix    string          `json:"prefix"`
+		Key       string          `json:"key"`
+		Policy    json.RawMessage `json:"policy"`
+		ExpiresAt *time.Time      `json:"expires_at"`
 	}
 	decodeResponse(t, response, &created)
-	if response.StatusCode != http.StatusCreated || created.ID == "" || created.Name != "bootstrap" || created.Key == "" || created.ExpiresAt == nil {
+	if response.StatusCode != http.StatusCreated || created.ID == "" || created.Name != "bootstrap" || created.Key == "" || created.ExpiresAt == nil || string(created.Policy) != `{}` {
 		t.Fatalf("creation response = %#v, status %d", created, response.StatusCode)
 	}
 	if !strings.HasPrefix(created.Key, auth.GatewayKeyNamespace) || !strings.HasPrefix(created.Key, created.Prefix) {

@@ -128,6 +128,7 @@ type createdAdminKey struct {
 	Name      string
 	Prefix    string
 	Enabled   bool
+	Policy    json.RawMessage
 	ExpiresAt *time.Time
 	CreatedAt time.Time
 	RawKey    string
@@ -216,6 +217,7 @@ func (service *adminKeyService) create(ctx context.Context, name string, expires
 			Name:      name,
 			Prefix:    prefix,
 			Enabled:   true,
+			Policy:    json.RawMessage(`{}`),
 			ExpiresAt: expiresAt,
 			CreatedAt: now,
 			RawKey:    generated.RawKey,
@@ -406,14 +408,15 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 
 	responseBody := struct {
-		ID        string     `json:"id"`
-		Name      string     `json:"name"`
-		Prefix    string     `json:"prefix"`
-		Enabled   bool       `json:"enabled"`
-		ExpiresAt *time.Time `json:"expires_at,omitempty"`
-		CreatedAt time.Time  `json:"created_at"`
-		Key       string     `json:"key"`
-	}{created.ID, created.Name, created.Prefix, created.Enabled, created.ExpiresAt, created.CreatedAt, created.RawKey}
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Prefix    string          `json:"prefix"`
+		Enabled   bool            `json:"enabled"`
+		ExpiresAt *time.Time      `json:"expires_at,omitempty"`
+		CreatedAt time.Time       `json:"created_at"`
+		Key       string          `json:"key"`
+		Policy    json.RawMessage `json:"policy"`
+	}{created.ID, created.Name, created.Prefix, created.Enabled, created.ExpiresAt, created.CreatedAt, created.RawKey, created.Policy}
 	writeAdminJSON(response, http.StatusCreated, responseBody)
 }
 
