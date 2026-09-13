@@ -30,8 +30,14 @@ const (
 	fileMaxOpenConnections  = 4
 	fileMaxIdleConnections  = 4
 
+	// RequestBodySchemaSafetyMaxBytes is the largest captured body that the
+	// request_bodies schema permits. It matches the deployment-wide T130 body
+	// capture maximum; the literal is repeated in migration 008 because SQLite
+	// migrations cannot reference Go constants.
+	RequestBodySchemaSafetyMaxBytes int64 = 1 * 1024 * 1024
+
 	// CurrentSchemaVersion is the newest schema understood by this binary.
-	CurrentSchemaVersion = 7
+	CurrentSchemaVersion = 8
 )
 
 // migrationFiles is embedded in the binary so startup does not depend on an

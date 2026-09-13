@@ -15,7 +15,7 @@ func TestT136RequestsSchemaAndRoundTrip(t *testing.T) {
 	}
 	defer database.Close()
 
-	assertSchemaVersion(t, database.DB, 7)
+	assertSchemaVersion(t, database.DB, CurrentSchemaVersion)
 	wantColumns := []struct {
 		name   string
 		notnil int
@@ -130,7 +130,7 @@ func TestT136MigrationUpgradesFromVersionSix(t *testing.T) {
 		t.Fatalf("create version six schema: %v", err)
 	}
 	assertSchemaVersion(t, database, 6)
-	if err := runMigrations(context.Background(), database, migrations); err != nil {
+	if err := runMigrations(context.Background(), database, migrations[:7]); err != nil {
 		t.Fatalf("apply migration 007: %v", err)
 	}
 	assertSchemaVersion(t, database, 7)
@@ -141,6 +141,10 @@ func TestT136MigrationUpgradesFromVersionSix(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("requests table count = %d, want 1", count)
 	}
+	if err := runMigrations(context.Background(), database, migrations); err != nil {
+		t.Fatalf("apply migration 008: %v", err)
+	}
+	assertSchemaVersion(t, database, CurrentSchemaVersion)
 }
 
 func TestT136MigrationRollsBackOnIndexConflict(t *testing.T) {
