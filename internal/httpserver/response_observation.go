@@ -175,6 +175,10 @@ type observedResponseWriter struct {
 	observation *responseObservation
 }
 
+func (writer *observedResponseWriter) completionWriter() *completionResponseWriter {
+	return completionWriterFor(writer.ResponseWriter)
+}
+
 func (writer *observedResponseWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
 }

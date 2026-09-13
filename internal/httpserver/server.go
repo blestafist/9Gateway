@@ -745,14 +745,18 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		handler.responseDispatch(response, upstreamResponse, metadata)
 		return
 	}
-	if authenticated && principal.Policy.LogResponseBody() && handler.tokenConfig.MaxCapturedBodyBytes > 0 && (responseMode == ResponseModeJSON || responseMode == ResponseModeOpaque) {
+	if authenticated && principal.Policy.LogResponseBody() && handler.tokenConfig.MaxCapturedBodyBytes > 0 {
 		// Response capture is installed at the sole downstream writer boundary.
 		// Its bound and enablement are independent from responseObservation, which
-		// exists only for accounting and usage reconciliation.
+		// exists only for accounting and usage reconciliation. Transparent SSE
+		// capture is completed explicitly by streamResponseBody after its flush;
+		// conversion still uses the ordinary post-write hook because its generated
+		// JSON is not flushed.
 		if recorder, err := observability.NewBodyRecorder(observability.BodyKindResponse, handler.tokenConfig.MaxCapturedBodyBytes); err == nil {
 			responseBodyRecorder = recorder
 			if completion := completionWriterFor(response); completion != nil {
 				completion.responseBodyRecorder = recorder
+				completion.responseBodyAfterFlush = responseMode == ResponseModeSSE && !shouldAggregateSSE(request, metadata, responseMode)
 			}
 		}
 	}
@@ -1485,6 +1489,7 @@ func closeReaders(closers []io.Closer) {
 
 func streamResponseBody(response http.ResponseWriter, body io.Reader, observations ...*responseObservation) error {
 	controller := http.NewResponseController(response)
+	completion := completionWriterFor(response)
 	buffer := make([]byte, 32*1024)
 	var observation *responseObservation
 	if len(observations) != 0 {
@@ -1502,6 +1507,9 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader, observatio
 			}
 			if flushErr := controller.Flush(); flushErr != nil {
 				return flushErr
+			}
+			if completion != nil {
+				completion.recordResponseBodyAfterFlush(buffer[:read], written)
 			}
 			// Capture only after both the downstream write and its flush have
 			// succeeded. The read buffer is reused on the next iteration, so
@@ -1782,10 +1790,11 @@ func requestIDFromContext(ctx context.Context) string {
 
 type completionResponseWriter struct {
 	http.ResponseWriter
-	status               int
-	trace                *RequestTraceState
-	terminal             *terminalMetadataState
-	responseBodyRecorder *observability.BodyRecorder
+	status                 int
+	trace                  *RequestTraceState
+	terminal               *terminalMetadataState
+	responseBodyRecorder   *observability.BodyRecorder
+	responseBodyAfterFlush bool
 }
 
 // Bifrost provenance review: commit 03ab391865710462302bbcf52dca2f32682b91b5,
@@ -1912,7 +1921,7 @@ func (writer *completionResponseWriter) Write(body []byte) (int, error) {
 		writer.WriteHeader(http.StatusOK)
 	}
 	written, err := writer.ResponseWriter.Write(body)
-	if writer.responseBodyRecorder != nil && written >= 0 && written <= len(body) {
+	if writer.responseBodyRecorder != nil && !writer.responseBodyAfterFlush && written >= 0 && written <= len(body) {
 		// n is the number accepted by the downstream writer, including a short
 		// write accompanied by an error. Recorder failures are deliberately
 		// ignored: capture is best effort and must not affect transport.
@@ -1926,6 +1935,17 @@ func (writer *completionResponseWriter) Write(body []byte) (int, error) {
 		}
 	}
 	return written, err
+}
+
+// recordResponseBodyAfterFlush completes one transparent-SSE capture only
+// after the corresponding downstream write and flush have both succeeded.
+// The stream buffer is reused by the caller, so BodyRecorder copies the
+// accepted prefix synchronously at this handoff.
+func (writer *completionResponseWriter) recordResponseBodyAfterFlush(body []byte, accepted int) {
+	if writer == nil || writer.responseBodyRecorder == nil || accepted < 0 || accepted > len(body) {
+		return
+	}
+	_ = writer.responseBodyRecorder.WriteObserved(body, accepted)
 }
 
 func (writer *completionResponseWriter) statusCode() int {
