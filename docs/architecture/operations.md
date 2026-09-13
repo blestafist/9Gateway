@@ -22,9 +22,10 @@ pass; it is not a deployment knob.
 
 Startup loads and validates configuration, opens SQLite, applies migrations,
 loads key/policy caches, initializes limiter state, transport and telemetry, then
-starts HTTP and marks readiness. Graceful shutdown stops new work, waits a
-bounded period, cancels remaining requests, flushes critical accounting and
-bounded telemetry, closes SQLite, and exits.
+starts HTTP. Graceful shutdown stops new HTTP work, waits a bounded period and
+cancels remaining handlers, finishes accounting observation and critical
+accumulators, then stops and bounded-drains completion logs and request history
+before closing SQLite.
 
 ## Health
 

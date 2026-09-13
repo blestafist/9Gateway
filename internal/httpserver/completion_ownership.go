@@ -6,15 +6,17 @@ import (
 	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
+	"github.com/pestit/9gateway/internal/observability"
 )
 
 // completionOwnership is the one-shot boundary between the request handler and
 // deferred response observation. It deliberately has no accounting state: a
 // dropped observation can only affect the enrichment, never lease settlement.
 type completionOwnership struct {
-	mu     sync.Mutex
-	trace  *RequestTraceState
-	logger *CompletionLogger
+	mu      sync.Mutex
+	trace   *RequestTraceState
+	logger  *CompletionLogger
+	history *HistoryPersistenceWorker
 
 	completed          bool
 	transferred        bool
@@ -27,8 +29,12 @@ type completionOwnership struct {
 	timingInvalid      bool
 }
 
-func newCompletionOwnership(trace *RequestTraceState, logger *CompletionLogger) *completionOwnership {
-	return &completionOwnership{trace: trace, logger: logger}
+func newCompletionOwnership(trace *RequestTraceState, logger *CompletionLogger, history ...*HistoryPersistenceWorker) *completionOwnership {
+	var persistence *HistoryPersistenceWorker
+	if len(history) != 0 {
+		persistence = history[0]
+	}
+	return &completionOwnership{trace: trace, logger: logger, history: persistence}
 }
 
 func (ownership *completionOwnership) transfer() bool {
@@ -103,10 +109,27 @@ func (ownership *completionOwnership) emit(trace *RequestTraceState, logger *Com
 		trace.SetTimingEnrichment(CompletionTiming{StreamCloseDelay: delay})
 	}
 	record, err := trace.Final()
-	if err != nil || logger == nil {
+	if err != nil {
 		return
 	}
-	logger.Enqueue(record)
+	if logger != nil {
+		logger.Enqueue(record)
+	}
+	if ownership.history != nil {
+		bodies := make([]observability.BodySnapshot, 0, 3)
+		if client, upstream, ok := trace.RequestBodySnapshots(); ok {
+			if client.Captured {
+				bodies = append(bodies, client)
+			}
+			if upstream.Captured {
+				bodies = append(bodies, upstream)
+			}
+		}
+		if response, ok := trace.ResponseBodySnapshot(); ok && response.Captured {
+			bodies = append(bodies, response)
+		}
+		ownership.history.SubmitRecord(record, bodies...)
+	}
 }
 
 func (ownership *completionOwnership) complete() {

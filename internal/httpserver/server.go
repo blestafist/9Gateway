@@ -136,6 +136,17 @@ func NewHandlerWithAdminAndLimitersAndTokenConfigAndUsageObservationWorker(upstr
 // NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker
 // is the process-wiring form used when startup restores committed token state.
 func NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, concurrencyLimiter, completionLogger, tokenLimiter, tokenConfig, usageWorker, nil, tokenModes...)
+}
+
+// NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorkerAndHistory
+// is the fully wired process constructor. The history worker is caller-owned
+// and is never shut down by the handler.
+func NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorkerAndHistory(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, historyWorker *HistoryPersistenceWorker, tokenModes ...auth.TokenMode) (http.Handler, error) {
+	return newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper, repository, requestLimiter, concurrencyLimiter, completionLogger, tokenLimiter, tokenConfig, usageWorker, historyWorker, tokenModes...)
+}
+
+func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey, adminCredential, authPepper string, repository apiKeyRepository, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, historyWorker *HistoryPersistenceWorker, tokenModes ...auth.TokenMode) (http.Handler, error) {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
@@ -196,7 +207,7 @@ func NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	}
 	admin := &adminHandler{credential: adminCredential, service: service}
 	router := routeWithAdmin(proxy, admin, service.auth)
-	return newHandlerWithCompletionLogger(completionLogger, router), nil
+	return newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router), nil
 }
 
 // NewHandlerWithAuthenticator builds a handler whose public /v1/* routes
@@ -243,6 +254,16 @@ func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiter(upstreamClient *http.
 // is the fully injectable public constructor. The token limiter and usage
 // worker are both process-owned by the caller.
 func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker) http.Handler {
+	return newHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, tokenLimiter, tokenConfig, usageWorker, nil)
+}
+
+// NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorkerAndHistory
+// wires the caller-owned bounded history worker into completion ownership.
+func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorkerAndHistory(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, historyWorker *HistoryPersistenceWorker) http.Handler {
+	return newHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(upstreamClient, upstreamBaseURL, upstreamAPIKey, authenticator, requestLimiter, concurrencyLimiter, completionLogger, tokenLimiter, tokenConfig, usageWorker, historyWorker)
+}
+
+func newHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWorker(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticator *auth.Authenticator, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, completionLogger *CompletionLogger, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig, usageWorker *UsageObservationWorker, historyWorker *HistoryPersistenceWorker) http.Handler {
 	if requestLimiter == nil {
 		requestLimiter = limiter.NewRequestLimiter(nil)
 	}
@@ -252,7 +273,7 @@ func NewHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWor
 	proxy := newProxyHandlerWithLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenLimiter, tokenConfig)
 	proxy.usageObservationWorker = usageWorker
 	router := routeWithAuthenticator(proxy, nil, authenticator)
-	return newHandlerWithCompletionLogger(completionLogger, router)
+	return newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router)
 }
 
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
@@ -1664,13 +1685,40 @@ func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
+	return newHandlerWithCompletionLoggerAndHistory(completionLogger, nil, next)
+}
+
+func newHandlerWithCompletionLoggerAndHistory(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, next http.Handler) http.Handler {
 	if completionLogger == nil {
 		// The convenience constructor does not own a completion logger. In
 		// particular, do not fall back to synchronous slog logging: a blocked
 		// handler must never delay normal or streaming response completion.
-		return withRequestID(next)
+		if historyWorker == nil {
+			return withRequestID(next)
+		}
 	}
-	return withRequestID(withCompletionLogger(completionLogger, next))
+	return withRequestID(withCompletionOwnership(completionLogger, historyWorker, next))
+}
+
+func withCompletionOwnership(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		terminal := newTerminalMetadataState()
+		if existing := terminalMetadataFromContext(request.Context()); existing != nil {
+			terminal = existing
+		}
+		request = request.WithContext(context.WithValue(request.Context(), terminalMetadataContextKey{}, terminal))
+		if trace := TraceFromContext(request.Context()); trace != nil {
+			ownership := newCompletionOwnership(trace, completionLogger, historyWorker)
+			trace.setCompletionOwnership(ownership)
+			request = request.WithContext(context.WithValue(request.Context(), completionOwnershipContextKey{}, ownership))
+		}
+		writer, wrapped := completionWriter(response, TraceFromContext(request.Context()), terminal)
+		next.ServeHTTP(wrapped, request)
+		if trace := TraceFromContext(request.Context()); trace != nil {
+			trace.SetTerminalMetadata(terminal.get())
+		}
+		writer.complete()
+	})
 }
 
 func health(response http.ResponseWriter, request *http.Request) {

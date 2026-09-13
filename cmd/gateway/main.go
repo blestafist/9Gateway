@@ -49,6 +49,7 @@ func run() error {
 		}
 	}()
 	keyRepository := storage.NewAPIKeyRepository(database)
+	historyRepository := storage.NewRequestHistoryRepository(database)
 	keyRecords, err := keyRepository.List(context.Background())
 	if err != nil {
 		return err
@@ -183,49 +184,44 @@ func run() error {
 	defer processCancel()
 	aggregateAccumulator := storage.NewUsageAggregateAccumulatorWithContext(processContext, usageRepository)
 	tokenLimiter.SetCommittedDeltaSink(aggregateAccumulator.Sink)
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := aggregateAccumulator.Shutdown(ctx); err != nil {
-			log.Printf("token aggregate shutdown: %v", err)
-		}
-	}()
 	budgetAccumulator := storage.NewBudgetAccumulatorWithContext(processContext, budgetRepository)
 	budgetLimiter.SetCommittedDeltaSink(budgetAccumulator.Sink)
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := budgetAccumulator.Shutdown(ctx); err != nil {
-			log.Printf("budget aggregate shutdown: %v", err)
-		}
-	}()
 
 	upstreamClient := transport.NewClient()
 	completionLogger := httpserver.NewCompletionLogger(slog.Default(), cfg.Observability.TelemetryQueueCapacity)
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := completionLogger.Shutdown(ctx); err != nil {
-			log.Printf("completion logger shutdown: %v", err)
-		}
-	}()
 	usageObservationWorker := httpserver.NewUsageObservationWorker(httpserver.UsageObservationWorkerOptions{Capacity: cfg.Observability.TelemetryQueueCapacity})
+	historyWorker := httpserver.NewHistoryPersistenceWorker(httpserver.HistoryPersistenceWorkerOptions{
+		Repository:       historyRepository,
+		Capacity:         cfg.Observability.TelemetryQueueCapacity,
+		RequestRetention: time.Duration(cfg.Observability.RequestRetentionSeconds) * time.Second,
+		BodyRetention:    time.Duration(cfg.Observability.BodyRetentionSeconds) * time.Second,
+	})
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := usageObservationWorker.Shutdown(ctx); err != nil {
-			log.Printf("usage observation worker shutdown: %v", err)
+		// Accounting observation may own deferred token/budget adjustments, so it
+		// must finish before the critical accumulator sinks are stopped. Only then
+		// do detailed log/history submissions stop and drain.
+		shutdownWorker := func(name string, shutdown func(context.Context) error) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := shutdown(ctx); err != nil {
+				log.Printf("%s shutdown: %v", name, err)
+			}
 		}
+		shutdownWorker("usage observation worker", usageObservationWorker.Shutdown)
+		shutdownWorker("budget aggregate", budgetAccumulator.Shutdown)
+		shutdownWorker("token aggregate", aggregateAccumulator.Shutdown)
+		shutdownWorker("completion logger", completionLogger.Shutdown)
+		shutdownWorker("history persistence", historyWorker.Shutdown)
 	}()
 
-	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorker(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, keyRepository, nil, nil, completionLogger, tokenLimiter, httpserver.TokenAdmissionConfig{
+	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorkerAndHistory(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, keyRepository, nil, nil, completionLogger, tokenLimiter, httpserver.TokenAdmissionConfig{
 		MaxInspectedRequestBytes:   cfg.Tokenizer.MaxInspectedRequestBytes,
 		MaxCapturedBodyBytes:       cfg.Observability.MaxCapturedBodyBytes,
 		FallbackUnknownInputTokens: cfg.Tokenizer.FallbackUnknownInputTokens,
 		FallbackMaxOutputTokens:    cfg.Tokenizer.FallbackMaxOutputTokens,
 		PricingResolver:            pricingResolver,
 		BudgetLimiter:              budgetLimiter,
-	}, usageObservationWorker, auth.TokenMode(cfg.Tokenizer.Mode))
+	}, usageObservationWorker, historyWorker, auth.TokenMode(cfg.Tokenizer.Mode))
 	if err != nil {
 		return err
 	}

@@ -36,10 +36,13 @@ bounded to 1000 body deletions, then 1000 metadata deletions.
 
 ## Telemetry
 
-Create an immutable completion record and send it to a bounded writer queue.
-Slow or failed detailed telemetry cannot stall proxying. Track dropped records.
-Usage needed for enforcement is reconciled independently before best-effort
-history persistence.
+Create one immutable completion record after handler cleanup and hand that same
+record, without waiting, to both the bounded structured-log writer and the
+bounded history writer. Slow, failed, or saturated detailed telemetry cannot
+stall proxying; each sink may drop independently. Usage needed for enforcement
+is reconciled independently before best-effort history persistence. During
+shutdown, stop request admission and accounting observation first, then stop
+telemetry admission and drain both detailed sinks before SQLite closes.
 
 ## Metrics
 

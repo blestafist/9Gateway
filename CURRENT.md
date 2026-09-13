@@ -1,173 +1,18 @@
 # Current Work
 
-Current milestone: persistent request observability and bounded body inspection
-(`T121`-`T140`).
+Current milestone: complete (`T121`-`T140` observability).
 
-Done: `T001`-`T139`.
+Done: `T001`-`T140`.
 
-Current: `T140` - complete the observability milestone.
+Current: unset.
 
 Queued: none.
 
-T139 adds `HistoryPersistenceWorker`: nonblocking immutable record/body
-handoff, accepted/processed/persisted/failed/dropped counters, startup and
-every-1024-job bounded retention passes, and deadline-bounded shutdown that
-drains or deterministically drops without closing SQLite. T140 must construct
-it with the request-history repository and observability retention settings,
-submit each T127 final record plus finalized T132 snapshots, and shut it down
-before storage closes.
-
-T138 adds synchronous `RequestHistoryRepository.Persist`/`Insert` for one
-validated scalar history record plus optional immutable body snapshots, and
-separate bounded body/metadata deletion methods. Retention is deterministic
-and deletes rows with `finished_at < cutoff` (the exact cutoff is retained),
-with body cleanup preceding metadata cascade.
-
-T136 advances SQLite schema version 7 with the `requests` history table. T137
-advances it to version 8 with separate `request_bodies`; body rows cascade on
-request deletion, while a zero-length row means known empty capture and an
-absent row means capture was not requested. Key deletion sets `api_key_id` to
-NULL; unknown canonical values are NULL and known zero values are integer 0.
-
-T131 established strict per-key request/response body-capture opt-ins in the
-immutable effective policy and atomic admin replacement/reopen path. T132 adds
-the protocol-independent `observability.BodyRecorder`: it retains a bounded
-prefix, checked `int64` original size, strict body kind, and immutable snapshots;
-zero bound allocates nothing, and `Snapshot`/`Finalize` are terminal: later
-writes reject with `ErrFinalized`. T133-T135 must copy each snapshot only at
-their handoff.
-
-T133 stores finalized client/upstream request snapshots alongside request-local
-trace state, reachable through `RequestBodySnapshots`; capture wraps the
-authenticated client body before inspection and the final replay body before
-`client.Do`, without entering completion records or logs.
-
-T134 attaches the bounded response recorder to the sole completion response
-writer after dispatch is selected, recording only downstream-accepted bytes;
-T135 adds flushed transparent SSE bytes and accepted generated conversion JSON.
-Client, upstream-request, JSON/opaque, SSE, and converted captures are bounded
-and live on `RequestTraceState` request/response body snapshots for T136-T139.
-
-Known issues: none. Review fixes after T135 make recorder terminal snapshots
-stable, synchronize the initial upstream body wrapper, preserve accepted
-short-write capture, and hand off finalized captures after resource release
-without transport-path copying. T101 adds exact, unknown-aware integer-USD-micros money
-values with checked arithmetic and canonical decimal conversion. T102 adds
-strict deployment pricing rules with compiled slash-aware selectors and ordered
-immutable accessors. T100 adds the
-complete persistent token-accounting lifecycle
-scenario, including process restart restoration, reconciliation, reset admission,
-transport/error/cancellation coverage, request/concurrency saturation, policy
-replacement, and structured-log redaction checks.
-
-Important: T096 makes lease cleanup deterministic at the upstream-start
-boundary: pre-start exits release zero usage, while every post-start ambiguity
-conservatively settles exactly once. Compatibility conversion commits a valid
-already-observed total even when later downstream/drain work fails; transparent
-JSON/SSE observation remains conservative-first and asynchronous. T095 observes
-transparent SSE only from successfully written and
-flushed wire bytes, then hands a bounded immutable copy to the T092 worker at
-physical EOF. T094 now carries canonical usage directly from bounded SSE-to-JSON
-conversion into synchronous lease finalization, without reparsing the rendered
-response. T093 attaches bounded transparent JSON response observation to
-the T092 process handoff: transport
-can settle deferred conservative accounting before a non-blocking immutable job
-submission, while queue drops and bounded shutdown invalidate tickets safely.
-T091 performs bounded token preflight for configured keys,
-conservatively completing admitted reservations after transport; response usage
-observation remains for T093-T095. Transparent SSE remains byte-preserving and independent from the
-bounded generic parser. T061-T080 completed transport hardening, SQLite-backed
-gateway keys, minimal admin bootstrap, hot-path authentication, model policy,
-generic request windows, and per-key concurrency. T081-T100 add token usage,
-bounded estimation, reservation/reconciliation, token-window enforcement, and
-persistent token aggregates while keeping parsing and SQLite off the transport
-critical path. T107-T120 implement budget reservation/reconciliation,
-persistent spend, and UTC day/calendar-month
-enforcement. T118 adds exact UTC calendar-month bucket identities, restart
-restoration, cross-month settlement, and boundary-based Retry-After behavior;
-T119 replacement admission scopes active reservations to their captured
-total/day/month identities, so replacement cannot import unrelated active
-capacity while finalization remains on the admitting buckets;
-the optional Bifrost review and Apache-2.0/no-copy provenance are recorded in
-the budget implementation comments. T121-T140 add one canonical request trace,
-safe structured completion fields, optional per-key bounded
-client/upstream/response body capture, SQLite request history, independent body
-retention, and a bounded best-effort history writer. Detailed telemetry may be
-dropped and must never control transport or accounting. `/metrics`, `/ready`, CLI,
-request-history admin APIs, tool-call execution/validation, and Web UI remain out
-of scope.
-Upstream EOF, not `[DONE]` or `finish_reason`, controls normal transparent stream
-completion; exact `[DONE]` may complete only the explicit SSE-to-JSON conversion.
-
-Review fix after T130: priced unrestricted known-generation telemetry uses one
-bounded metadata replay, completed observation captures transfer immutable
-ownership without a response-path copy, and SSE timing separates meaningful
-framing from usage availability while rejecting clock regressions and metadata
-heartbeats. Optional response-writer capabilities remain conditional,
-bounded text uses Unicode code points with control rejection, and trace record
-round trips retain escaped paths. T129 projects only frozen canonical final
-records into bounded, nonblocking structured completion logs; unknown optional
-values are omitted and known costs/durations are integer micros.
-
-T126 records the exact pre-`client.Do` boundary and response-header boundary,
-including upstream-header latency, independent upstream status, and actual
-header-derived response mode. Malformed or ambiguous content types remain
-unknown in telemetry while transport keeps its opaque fallback; delivered mode
-is selected separately before dispatch, including SSE-to-JSON conversion.
-
-The focused T091-T100 review fixes independently bound compressed wire bytes
-during gzip SSE-to-JSON conversion, prevent legacy token checkpoint promotion
-from double-counting after restart, serialize token-policy replacement against
-admission, and make observation timeout invalidation terminal.
-
-T109 composes concurrency, token, and optional lifetime-budget ownership in one
-idempotent lease. Admission is ordered concurrency -> tokens -> budget, with
-reverse rollback on later rejection; known, conservative, pre-upstream, and
-deferred terminal paths settle token and budget independently. Deferred cleanup
-returns separate adjustment tickets and releases concurrency before returning.
-
-T111 carries immutable selected pricing and independent token/budget adjustment
-ownership through the bounded response-observation worker. Canonical JSON/SSE
-usage is parsed off the response path and actual integer-micros cost replaces
-the conservative budget charge only when differentiated usage and pricing are
-known; unknown, overflow, malformed, truncated, dropped, and shutdown paths
-retain conservative charges. Transparent response bytes, status, headers, and
-completion timing remain unchanged.
-
-T112 carries selected pricing into the explicit stream:false/SSE compatibility
-path and settles its composite lease synchronously from the canonical usage
-produced during aggregation. Actual integer-micros cost replaces the
-conservative budget charge before bounded trailer drain or generated-response
-write; known token totals still reconcile when differentiated cost is unknown,
-while conversion failure remains conservative. No rendered JSON reparsing,
-queue, SQL, logging, or extra pre-write parsing was added.
-
-T113 reconciles transparent SSE budget cost from a bounded immutable copy of
-only successfully written and flushed wire bytes. Physical upstream EOF closes
-the stream without waiting for `[DONE]` or `finish_reason`, then releases
-concurrency and settles conservative token/budget charges before one
-nonblocking worker handoff. Canonical SSE observation adjusts actual budget
-only when differentiated input/output usage and immutable selected pricing are
-known; overflow, malformed/incomplete data, unsupported coding, cancellation,
-downstream failure, saturation, and shutdown remain conservative.
-
-T110 wires one startup-built immutable pricing resolver and one process budget
-limiter into authenticated generation admission. Known chat-completions and
-Responses bodies are bounded-inspected once and replayed byte-for-byte; budget
-planning and reservation follow token planning in the composite lease. Total
-budget rejection is `429 budget_exceeded` without `Retry-After`; metadata,
-pricing, and planning failures fail closed before upstream. Admission remains
-conservative at the upstream-start boundary; actual monetary reconciliation is
-reserved for T111-T114. `/v1/models` and unrestricted generic traffic retain
-their budget-free transparent paths.
-
-T114 audits the complete lease lifecycle at the exact `client.Do` boundary:
-pre-start exits release zero, while connection/upload/header/read, response
-write/flush, conversion, cancellation, unsupported-response, custom-dispatch,
-and internal post-start ambiguity paths conservatively settle exactly once.
-Cancellation is issued before deferred body and lease cleanup; concurrency is
-released before any best-effort reconciliation handoff. Completion records carry
-only typed terminal outcome metadata, never prices, reservations, usage, or
-headers. Real HTTP and focused race tests cover immediate pre-start reuse,
-conservative post-start charging, cancellation, repeated cleanup, and key
-isolation without changing transport transparency or token accounting.
+The gateway now provides transparent policy enforcement, token and budget
+accounting, bounded safe request tracing, optional per-key body capture,
+structured completion logging, persistent request history with independent
+retention, and ordered lifecycle shutdown. Detailed telemetry is best effort
+and droppable; transport and critical accounting remain independent of its
+queues and sinks. `/metrics`, `/ready`, CLI, request-history admin APIs,
+provider routing/translation, tool-call execution/validation, Redis,
+PostgreSQL, and Web UI remain out of scope.
