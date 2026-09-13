@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pestit/9gateway/internal/storage/schema"
 )
 
 // TokenizerMode selects how preflight input-token information is obtained.
@@ -40,7 +42,7 @@ const (
 	DefaultTelemetryQueueCapacity  int   = 128
 	MaxTelemetryQueueCapacity      int   = 4096
 	DefaultMaxCapturedBodyBytes    int64 = 0
-	MaxMaxCapturedBodyBytes        int64 = 1 * 1024 * 1024
+	MaxMaxCapturedBodyBytes              = schema.RequestBodySchemaSafetyMaxBytes
 	DefaultRequestRetentionSeconds int64 = 30 * 24 * 60 * 60
 	DefaultBodyRetentionSeconds    int64 = 7 * 24 * 60 * 60
 	MaxRequestRetentionSeconds     int64 = 365 * 24 * 60 * 60
@@ -103,8 +105,8 @@ func (c ObservabilityConfig) validate() error {
 	if c.MaxCapturedBodyBytes < 0 {
 		return fmt.Errorf("max_captured_body_bytes must not be negative")
 	}
-	if c.MaxCapturedBodyBytes > MaxMaxCapturedBodyBytes {
-		return fmt.Errorf("max_captured_body_bytes exceeds maximum %d", MaxMaxCapturedBodyBytes)
+	if c.MaxCapturedBodyBytes > schema.RequestBodySchemaSafetyMaxBytes {
+		return fmt.Errorf("max_captured_body_bytes exceeds maximum %d", schema.RequestBodySchemaSafetyMaxBytes)
 	}
 	if c.RequestRetentionSeconds <= 0 {
 		return fmt.Errorf("request_retention_seconds must be positive")

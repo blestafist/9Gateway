@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/pestit/9gateway/internal/storage/schema"
 	_ "modernc.org/sqlite"
 )
 
@@ -34,10 +35,10 @@ const (
 	// request_bodies schema permits. It matches the deployment-wide T130 body
 	// capture maximum; the literal is repeated in migration 008 because SQLite
 	// migrations cannot reference Go constants.
-	RequestBodySchemaSafetyMaxBytes int64 = 1 * 1024 * 1024
+	RequestBodySchemaSafetyMaxBytes = schema.RequestBodySchemaSafetyMaxBytes
 
 	// CurrentSchemaVersion is the newest schema understood by this binary.
-	CurrentSchemaVersion = 8
+	CurrentSchemaVersion = 9
 )
 
 // migrationFiles is embedded in the binary so startup does not depend on an

@@ -45,7 +45,7 @@ func TestT136RequestsSchemaAndRoundTrip(t *testing.T) {
 	if count != len(wantColumns) {
 		t.Fatalf("requests column count = %d, want %d", count, len(wantColumns))
 	}
-	for _, index := range []string{"idx_requests_recent", "idx_requests_key_time"} {
+	for _, index := range []string{"idx_requests_recent", "idx_requests_finished"} {
 		if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?`, index).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +54,13 @@ func TestT136RequestsSchemaAndRoundTrip(t *testing.T) {
 		}
 	}
 	assertIndexColumns(t, database.DB, "idx_requests_recent", []string{"started_at", "request_id"})
-	assertIndexColumns(t, database.DB, "idx_requests_key_time", []string{"api_key_id", "started_at", "request_id"})
+	assertIndexColumns(t, database.DB, "idx_requests_finished", []string{"finished_at", "request_id"})
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_requests_key_time'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("unused request key/time index exists")
+	}
 	var tableSQL string
 	if err := database.QueryRow(`SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'requests'`).Scan(&tableSQL); err != nil {
 		t.Fatal(err)
@@ -206,6 +212,10 @@ func TestT136RequestsRejectInvalidValues(t *testing.T) {
 		{"negative duration", `UPDATE requests SET total_micros=-1 WHERE request_id='0123456789abcdef0123456789abcdef'`},
 		{"fractional status", `UPDATE requests SET downstream_status=200.5 WHERE request_id='0123456789abcdef0123456789abcdef'`},
 		{"finish before start", `UPDATE requests SET started_at=2,finished_at=1 WHERE request_id='0123456789abcdef0123456789abcdef'`},
+		{"upstream starts before request", `UPDATE requests SET started_at=2,upstream_started_at=1 WHERE request_id='0123456789abcdef0123456789abcdef'`},
+		{"headers before upstream starts", `UPDATE requests SET upstream_started_at=2,upstream_headers_at=1 WHERE request_id='0123456789abcdef0123456789abcdef'`},
+		{"first byte before headers", `UPDATE requests SET upstream_headers_at=2,first_byte_at=1 WHERE request_id='0123456789abcdef0123456789abcdef'`},
+		{"finish before first byte", `UPDATE requests SET first_byte_at=2,finished_at=1 WHERE request_id='0123456789abcdef0123456789abcdef'`},
 		{"SSE delivery without SSE upstream", `UPDATE requests SET delivered_mode='sse' WHERE request_id='0123456789abcdef0123456789abcdef'`},
 		{"opaque upstream transformed", `UPDATE requests SET upstream_mode='opaque',delivered_mode='json' WHERE request_id='0123456789abcdef0123456789abcdef'`},
 		{"requested and delivered conflict", `UPDATE requests SET requested_mode='sse',delivered_mode='json' WHERE request_id='0123456789abcdef0123456789abcdef'`},
@@ -223,5 +233,42 @@ func TestT136RequestsRejectInvalidValues(t *testing.T) {
 				t.Fatalf("invalid value unexpectedly accepted: %s", test.name)
 			}
 		})
+	}
+}
+
+func TestT136RequestsAcceptSparseLifecycleTimestamps(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	const insert = `INSERT INTO requests (request_id, terminal_outcome, upstream_started, started_at, upstream_started_at, upstream_headers_at, first_byte_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	shapes := []struct {
+		name     string
+		outcome  any
+		upstream int
+	}{
+		{name: "unknown", upstream: 0},
+		{name: "pre-upstream rejected", outcome: "pre_upstream", upstream: 0},
+		{name: "cancelled", outcome: "cancelled", upstream: 1},
+		{name: "completed", outcome: "complete", upstream: 1},
+	}
+	for shapeIndex, shape := range shapes {
+		for mask := 0; mask < 1<<5; mask++ {
+			mask := mask
+			t.Run(fmt.Sprintf("%s-timestamps-%02d", shape.name, mask), func(t *testing.T) {
+				values := make([]any, 5)
+				for index := range values {
+					if mask&(1<<index) != 0 {
+						values[index] = int64(10 + index)
+					}
+				}
+				requestID := fmt.Sprintf("%032x", shapeIndex*(1<<5)+mask+1)
+				if _, err := database.Exec(insert, requestID, shape.outcome, shape.upstream, values[0], values[1], values[2], values[3], values[4]); err != nil {
+					t.Fatalf("sparse lifecycle rejected: %v", err)
+				}
+			})
+		}
 	}
 }

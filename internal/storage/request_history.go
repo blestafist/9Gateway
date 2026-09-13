@@ -215,7 +215,8 @@ func (repository *RequestHistoryRepository) DeleteBodiesBefore(ctx context.Conte
 		DELETE FROM request_bodies
 		WHERE rowid IN (
 			SELECT request_bodies.rowid
-			FROM request_bodies JOIN requests ON requests.request_id = request_bodies.request_id
+			FROM requests
+			JOIN request_bodies ON requests.request_id = request_bodies.request_id
 			WHERE requests.finished_at IS NOT NULL AND requests.finished_at < ?
 			ORDER BY requests.finished_at ASC, request_bodies.request_id ASC, request_bodies.body_kind ASC
 			LIMIT ?

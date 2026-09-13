@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,5 +112,60 @@ func TestRequestHistoryRepositoryRejectsCancellationBeforeSQL(t *testing.T) {
 	err = NewRequestHistoryRepository(database).Persist(ctx, historyTestRecord("0123456789abcdef0123456789abcdef", 10), nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
+	}
+}
+
+func TestRequestHistoryRetentionPlansUseCompletionIndex(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	plans := []string{
+		`EXPLAIN QUERY PLAN DELETE FROM request_bodies
+			WHERE rowid IN (
+				SELECT request_bodies.rowid
+				FROM requests
+				JOIN request_bodies ON requests.request_id = request_bodies.request_id
+				WHERE requests.finished_at IS NOT NULL AND requests.finished_at < ?
+				ORDER BY requests.finished_at ASC, request_bodies.request_id ASC, request_bodies.body_kind ASC
+				LIMIT ?
+			)`,
+		`EXPLAIN QUERY PLAN DELETE FROM requests
+			WHERE request_id IN (
+				SELECT request_id FROM requests
+				WHERE finished_at IS NOT NULL AND finished_at < ?
+				ORDER BY finished_at ASC, request_id ASC
+				LIMIT ?
+			)`,
+	}
+	for index, query := range plans {
+		t.Run(fmt.Sprintf("retention-%d", index), func(t *testing.T) {
+			rows, err := database.Query(query, 0, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var details []string
+			for rows.Next() {
+				var id, parent, notUsed int
+				var detail string
+				if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+					t.Fatal(err)
+				}
+				details = append(details, detail)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(details, " | ")
+			if !strings.Contains(joined, "idx_requests_finished") {
+				t.Fatalf("retention plan does not use completion index: %s", joined)
+			}
+			if strings.Contains(joined, "SCAN requests") {
+				t.Fatalf("retention plan scans requests: %s", joined)
+			}
+		})
 	}
 }

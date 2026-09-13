@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/pestit/9gateway/internal/storage/schema"
 )
 
 func minimalConfig(databasePath string) Config {
@@ -275,6 +277,18 @@ func TestObservabilityConfigDefaultsAndBounds(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want field %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestObservabilityBodyLimitMatchesStorageSchemaSafetyCap(t *testing.T) {
+	if MaxMaxCapturedBodyBytes != schema.RequestBodySchemaSafetyMaxBytes {
+		t.Fatalf("config body maximum = %d, storage schema maximum = %d", MaxMaxCapturedBodyBytes, schema.RequestBodySchemaSafetyMaxBytes)
+	}
+	config := minimalConfig(":memory:")
+	config.ApplyDefaults()
+	config.Observability.MaxCapturedBodyBytes = schema.RequestBodySchemaSafetyMaxBytes + 1
+	if err := config.Validate(); err == nil || !contains(err.Error(), "max_captured_body_bytes") {
+		t.Fatalf("Validate() error = %v, want schema safety cap rejection", err)
 	}
 }
 

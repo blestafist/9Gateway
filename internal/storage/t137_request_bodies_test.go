@@ -21,7 +21,7 @@ func TestT137RequestBodiesSchemaRoundTripAndCascade(t *testing.T) {
 	}
 	defer database.Close()
 
-	assertSchemaVersion(t, database.DB, 8)
+	assertSchemaVersion(t, database.DB, CurrentSchemaVersion)
 	if RequestBodySchemaSafetyMaxBytes != config.MaxMaxCapturedBodyBytes {
 		t.Fatalf("body safety maximum = %d, T130 maximum = %d", RequestBodySchemaSafetyMaxBytes, config.MaxMaxCapturedBodyBytes)
 	}
@@ -232,7 +232,7 @@ func TestT137RequestBodiesUpgradeAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	assertSchemaVersion(t, reopened.DB, 8)
+	assertSchemaVersion(t, reopened.DB, CurrentSchemaVersion)
 	for _, kind := range []string{"client_request", "upstream_request", "response"} {
 		var body []byte
 		if err := reopened.QueryRow(`SELECT body FROM request_bodies WHERE request_id = ? AND body_kind = ?`, t137RequestID, kind).Scan(&body); err != nil {
@@ -244,6 +244,80 @@ func TestT137RequestBodiesUpgradeAndReopen(t *testing.T) {
 		if kind != "response" && len(body) != 0 {
 			t.Fatalf("reopened %s body = %v, want empty", kind, body)
 		}
+	}
+}
+
+func TestT137Migration009PreservesVersionEightRows(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	migrations := mustEmbeddedMigrations(t)
+	if err := runMigrations(context.Background(), database, migrations[:8]); err != nil {
+		t.Fatalf("create version eight schema: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO requests (request_id, upstream_started, started_at, upstream_started_at, finished_at) VALUES (?, 1, 10, 11, 12)`, t137RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO request_bodies (request_id, body_kind, body, original_size, truncated) VALUES (?, 'response', ?, 3, 0)`, t137RequestID, []byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(context.Background(), database, migrations); err != nil {
+		t.Fatalf("apply migration 009: %v", err)
+	}
+	assertSchemaVersion(t, database, CurrentSchemaVersion)
+	var started, upstreamStarted, finished int64
+	if err := database.QueryRow(`SELECT started_at, upstream_started_at, finished_at FROM requests WHERE request_id = ?`, t137RequestID).Scan(&started, &upstreamStarted, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if started != 10 || upstreamStarted != 11 || finished != 12 {
+		t.Fatalf("preserved lifecycle = %d, %d, %d", started, upstreamStarted, finished)
+	}
+	var body []byte
+	if err := database.QueryRow(`SELECT body FROM request_bodies WHERE request_id = ? AND body_kind = 'response'`, t137RequestID).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "abc" {
+		t.Fatalf("preserved body = %q", body)
+	}
+}
+
+func TestT137Migration009RollsBackWithoutChangingVersionEightSchema(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	migrations := mustEmbeddedMigrations(t)
+	if err := runMigrations(context.Background(), database, migrations[:8]); err != nil {
+		t.Fatalf("create version eight schema: %v", err)
+	}
+	if _, err := database.Exec(`CREATE TABLE index_conflict (id INTEGER); CREATE INDEX idx_requests_finished ON index_conflict(id)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(context.Background(), database, migrations); err == nil {
+		t.Fatal("migration 009 unexpectedly succeeded with index conflict")
+	}
+	assertSchemaVersion(t, database, 8)
+	var count int
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'requests'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("requests table count after rollback = %d, want 1", count)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'request_bodies'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("request_bodies table count after rollback = %d, want 1", count)
 	}
 }
 
