@@ -33,7 +33,6 @@ const (
 	maxResponseBytes      = 1 << 20
 	keyPageSize           = 50
 	requestPageSize       = 50
-	maxRequestPages       = 50
 	maxKeysLimit          = 100000
 )
 

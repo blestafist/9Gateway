@@ -95,7 +95,9 @@ type HistoryPersistenceWorker struct {
 	persistFailed   atomic.Uint64
 	retentionFailed atomic.Uint64
 	dropped         atomic.Uint64
-	metrics         *gatewayMetrics
+	metrics         atomic.Pointer[gatewayMetrics]
+	metricsQueueID  uint64
+	metricsMu       sync.Mutex
 }
 
 // NewHistoryPersistenceWorker starts one bounded history writer.
@@ -156,9 +158,18 @@ func (worker *HistoryPersistenceWorker) metricsQueueSource() func() int {
 }
 
 func (worker *HistoryPersistenceWorker) setMetrics(metrics *gatewayMetrics) {
-	worker.metrics = metrics
+	worker.metricsMu.Lock()
+	defer worker.metricsMu.Unlock()
+	previous := worker.metrics.Load()
+	if previous == metrics && (metrics == nil || worker.metricsQueueID != 0) {
+		return
+	}
+	if previous != nil && previous != metrics {
+		previous.unregisterQueue(worker.metricsQueueID)
+	}
+	worker.metrics.Store(metrics)
 	if metrics != nil {
-		metrics.registerQueue(worker.metricsQueueSource())
+		worker.metricsQueueID = metrics.registerQueue(worker.metricsQueueSource())
 	}
 }
 
@@ -196,8 +207,8 @@ func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			worker.persistFailed.Add(1)
-			if worker.metrics != nil {
-				worker.metrics.telemetryResult("failed")
+			if metrics := worker.metrics.Load(); metrics != nil {
+				metrics.telemetryResult("failed")
 			}
 			clearHistoryJob(&job)
 		}
@@ -225,13 +236,13 @@ func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
 	}
 	if err != nil {
 		worker.persistFailed.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("failed")
+		if metrics := worker.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("failed")
 		}
 	} else {
 		worker.persisted.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("persisted")
+		if metrics := worker.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("persisted")
 		}
 	}
 
@@ -301,8 +312,8 @@ func (worker *HistoryPersistenceWorker) Enqueue(job HistoryPersistenceJob) bool 
 func (worker *HistoryPersistenceWorker) drop(job HistoryPersistenceJob) {
 	clearHistoryJob(&job)
 	worker.dropped.Add(1)
-	if worker.metrics != nil {
-		worker.metrics.telemetryResult("dropped")
+	if metrics := worker.metrics.Load(); metrics != nil {
+		metrics.telemetryResult("dropped")
 	}
 }
 

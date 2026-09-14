@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,24 +17,17 @@ var metricBuckets = [...]float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5
 // Series are created only from bounded vocabularies and updates are atomic;
 // metric collection never takes a request-path lock or touches transport data.
 type gatewayMetrics struct {
-	requests      metricCounterVec
-	requestErrors metricCounterVec
-	upstream      metricCounterVec
-	telemetry     metricCounterVec
+	requests      fixedRequestCounter
+	requestErrors metricCounterSeries20
+	upstream      metricCounterSeries601
+	telemetry     metricCounterSeries3
 	active        atomic.Int64
-	queueSources  []func() int
-	durations     metricHistogramVec
-	upstreamDur   metricHistogramVec
-	ttfb          metricHistogramVec
+	queueSources  map[uint64]func() int
+	queueNextID   uint64
+	durations     fixedRequestHistogram
+	upstreamDur   fixedHistogramSeries
+	ttfb          fixedHistogramSeries
 	queueMu       sync.RWMutex
-}
-
-type metricCounter struct{ value atomic.Uint64 }
-type metricCounterVec struct{ series sync.Map }
-
-func (vec *metricCounterVec) add(key string, value uint64) {
-	entry, _ := vec.series.LoadOrStore(key, new(metricCounter))
-	entry.(*metricCounter).value.Add(value)
 }
 
 type metricHistogram struct {
@@ -43,14 +35,22 @@ type metricHistogram struct {
 	count   atomic.Uint64
 	sum     atomic.Uint64 // math.Float64bits
 }
-type metricHistogramVec struct{ series sync.Map }
 
-func (vec *metricHistogramVec) observe(key string, value float64) {
+type metricCounterSeries20 struct{ values [20]atomic.Uint64 }
+type metricCounterSeries601 struct{ values [601]atomic.Uint64 }
+type metricCounterSeries3 struct{ values [3]atomic.Uint64 }
+type fixedHistogramSeries struct {
+	values [1]metricHistogram
+}
+type fixedRequestCounter struct{ values [7][8][600][7]atomic.Uint64 }
+type fixedRequestHistogram struct {
+	values [7][8][600][7]metricHistogram
+}
+
+func (hist *metricHistogram) observe(value float64) {
 	if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
 		return
 	}
-	entry, _ := vec.series.LoadOrStore(key, new(metricHistogram))
-	hist := entry.(*metricHistogram)
 	for index, bucket := range metricBuckets {
 		if value <= bucket {
 			hist.buckets[index].Add(1)
@@ -66,14 +66,28 @@ func (vec *metricHistogramVec) observe(key string, value float64) {
 	}
 }
 
-func newGatewayMetrics() *gatewayMetrics { return &gatewayMetrics{} }
+func newGatewayMetrics() *gatewayMetrics {
+	return &gatewayMetrics{queueSources: make(map[uint64]func() int)}
+}
 
-func (metrics *gatewayMetrics) registerQueue(source func() int) {
+func (metrics *gatewayMetrics) registerQueue(source func() int) uint64 {
 	if metrics == nil || source == nil {
+		return 0
+	}
+	metrics.queueMu.Lock()
+	metrics.queueNextID++
+	metrics.queueSources[metrics.queueNextID] = source
+	id := metrics.queueNextID
+	metrics.queueMu.Unlock()
+	return id
+}
+
+func (metrics *gatewayMetrics) unregisterQueue(id uint64) {
+	if metrics == nil || id == 0 {
 		return
 	}
 	metrics.queueMu.Lock()
-	metrics.queueSources = append(metrics.queueSources, source)
+	delete(metrics.queueSources, id)
 	metrics.queueMu.Unlock()
 }
 
@@ -92,36 +106,37 @@ func (metrics *gatewayMetrics) observe(record CompletionRecord) {
 	if metrics == nil {
 		return
 	}
-	method := normalizeMetricMethod(record.Method)
-	route := record.Route.String()
-	status := metricStatus(record.DownstreamStatus)
-	outcome := normalizeMetricOutcome(record.Terminal.Outcome)
-	key := strings.Join([]string{route, method, status, outcome}, "\x00")
-	metrics.requests.add(key, 1)
+	method := metricMethodIndex(record.Method)
+	route := metricRouteIndex(record.Route)
+	status := metricStatusIndex(record.DownstreamStatus)
+	outcome := metricOutcomeIndex(record.Terminal.Outcome)
+	metrics.requests.values[route][method][status][outcome].Add(1)
 	if record.ErrorCode != ErrorCodeUnknown && validErrorCode(record.ErrorCode) {
-		metrics.requestErrors.add(record.ErrorCode.String(), 1)
+		metrics.requestErrors.values[metricErrorIndex(record.ErrorCode)].Add(1)
 	}
 	if record.Terminal.UpstreamStarted {
-		upstreamStatus := metricStatus(record.UpstreamStatus)
-		if upstreamStatus == "unknown" {
-			upstreamStatus = "error"
+		upstreamStatus := metricStatusIndex(record.UpstreamStatus)
+		if upstreamStatus == 0 {
+			upstreamStatus = 500
 		}
-		metrics.upstream.add(upstreamStatus, 1)
+		metrics.upstream.values[upstreamStatus].Add(1)
 	}
 	if value, known := record.Timing.Total.Value(); known {
-		metrics.durations.observe(key, float64(value)/1e6)
+		metrics.durations.values[route][method][status][outcome].observe(float64(value) / 1e6)
 	}
 	if value, known := record.Timing.TimeToUpstreamHeaders.Value(); known {
-		metrics.upstreamDur.observe("", float64(value)/1e6)
+		metrics.upstreamDur.values[0].observe(float64(value) / 1e6)
 	}
 	if value, known := record.Timing.TimeToFirstByte.Value(); known {
-		metrics.ttfb.observe("", float64(value)/1e6)
+		metrics.ttfb.values[0].observe(float64(value) / 1e6)
 	}
 }
 
 func (metrics *gatewayMetrics) telemetryResult(result string) {
 	if metrics != nil {
-		metrics.telemetry.add(result, 1)
+		if index, ok := telemetryIndex(result); ok {
+			metrics.telemetry.values[index].Add(1)
+		}
 	}
 }
 
@@ -135,7 +150,10 @@ func (metrics *gatewayMetrics) queueDepth() int {
 	}
 	depth := 0
 	metrics.queueMu.RLock()
-	sources := append([]func() int(nil), metrics.queueSources...)
+	sources := make([]func() int, 0, len(metrics.queueSources))
+	for _, source := range metrics.queueSources {
+		sources = append(sources, source)
+	}
 	metrics.queueMu.RUnlock()
 	for _, source := range sources {
 		depth += source()
@@ -176,16 +194,14 @@ func withMetrics(metrics *gatewayMetrics, next http.Handler) http.Handler {
 			serveMetrics(response, metrics)
 			return
 		}
-		if metrics != nil {
-			metrics.begin()
-			defer metrics.end()
-			request = request.WithContext(withGatewayMetricsContext(request.Context(), metrics))
-			defer func() {
-				if trace := TraceFromContext(request.Context()); trace != nil && completionOwnershipFromContext(request.Context()) == nil {
-					trace.observeMetrics(metrics)
-				}
-			}()
-		}
+		metrics.begin()
+		defer metrics.end()
+		request = request.WithContext(withGatewayMetricsContext(request.Context(), metrics))
+		defer func() {
+			if trace := TraceFromContext(request.Context()); trace != nil && completionOwnershipFromContext(request.Context()) == nil {
+				trace.observeMetrics(metrics)
+			}
+		}()
 		if next != nil {
 			next.ServeHTTP(response, request)
 			return
@@ -226,19 +242,19 @@ func serveMetrics(response http.ResponseWriter, metrics *gatewayMetrics) {
 		return
 	}
 	var builder strings.Builder
-	writeCounterFamily(&builder, "gateway_requests_total", "Total HTTP requests handled by the gateway.", &metrics.requests, []string{"route", "method", "status", "outcome"})
-	writeCounterFamily(&builder, "gateway_request_errors_total", "Total gateway-owned request errors.", &metrics.requestErrors, []string{"error_code"})
-	writeCounterFamily(&builder, "gateway_upstream_requests_total", "Total requests made to the configured upstream.", &metrics.upstream, []string{"status"})
-	writeCounterFamily(&builder, "gateway_telemetry_jobs_total", "Total telemetry jobs by terminal result.", &metrics.telemetry, []string{"result"})
+	writeFixedCounters(&builder, "gateway_requests_total", "Total HTTP requests handled by the gateway.", &metrics.requests)
+	writeSimpleCounters(&builder, "gateway_request_errors_total", "Total gateway-owned request errors.", metrics.requestErrors.values[:], errorMetricNames[:])
+	writeStatusCounters(&builder, "gateway_upstream_requests_total", "Total requests made to the configured upstream.", metrics.upstream.values[:])
+	writeSimpleCounters(&builder, "gateway_telemetry_jobs_total", "Total telemetry jobs by terminal result.", metrics.telemetry.values[:], telemetryMetricNames[:])
 	builder.WriteString("# HELP gateway_active_requests Active HTTP requests currently handled by the gateway.\n# TYPE gateway_active_requests gauge\ngateway_active_requests ")
 	builder.WriteString(strconv.FormatInt(metrics.active.Load(), 10))
 	builder.WriteString("\n")
 	builder.WriteString("# HELP gateway_telemetry_queue_depth Number of telemetry jobs currently queued.\n# TYPE gateway_telemetry_queue_depth gauge\ngateway_telemetry_queue_depth ")
 	builder.WriteString(strconv.Itoa(metrics.queueDepth()))
 	builder.WriteString("\n")
-	writeHistogramFamily(&builder, "gateway_request_duration_seconds", "HTTP request duration in seconds.", &metrics.durations, []string{"route", "method", "status", "outcome"})
-	writeHistogramFamily(&builder, "gateway_upstream_duration_seconds", "Upstream response-header duration in seconds.", &metrics.upstreamDur, nil)
-	writeHistogramFamily(&builder, "gateway_ttfb_seconds", "Time to first downstream response byte in seconds.", &metrics.ttfb, nil)
+	writeFixedHistograms(&builder, "gateway_request_duration_seconds", "HTTP request duration in seconds.", &metrics.durations)
+	writeSimpleHistogram(&builder, "gateway_upstream_duration_seconds", "Upstream response-header duration in seconds.", &metrics.upstreamDur.values[0], "")
+	writeSimpleHistogram(&builder, "gateway_ttfb_seconds", "Time to first downstream response byte in seconds.", &metrics.ttfb.values[0], "")
 	_, _ = response.Write([]byte(builder.String()))
 }
 
@@ -248,65 +264,206 @@ func escapeMetricLabel(value string) string {
 	return strings.ReplaceAll(value, "\n", `\n`)
 }
 
-func writeCounterFamily(builder *strings.Builder, name, help string, vec *metricCounterVec, labels []string) {
+var errorMetricNames = [...]string{"unknown", "invalid_api_key", "key_disabled", "key_expired", "invalid_request", "model_not_allowed", "request_limit_exceeded", "concurrency_limit_exceeded", "token_limit_exceeded", "budget_exceeded", "upstream_connection_error", "upstream_timeout", "response_transport_error", "conversion_error", "cancelled", "unsupported_response", "gateway_internal_error", "not_found", "conflict", "other"}
+var telemetryMetricNames = [...]string{"persisted", "dropped", "failed"}
+
+func writeSimpleCounters(builder *strings.Builder, name, help string, values []atomic.Uint64, names []string) {
 	fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
-	var entries []struct {
-		key   string
-		value uint64
+	label := "error_code"
+	if name == "gateway_telemetry_jobs_total" {
+		label = "result"
 	}
-	vec.series.Range(func(key, value any) bool {
-		entries = append(entries, struct {
-			key   string
-			value uint64
-		}{key.(string), value.(*metricCounter).value.Load()})
-		return true
-	})
-	sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
-	for _, entry := range entries {
-		values := strings.Split(entry.key, "\x00")
-		if len(values) < len(labels) {
-			continue
+	for i := range values {
+		value := &values[i]
+		if i < len(names) && value.Load() != 0 {
+			fmt.Fprintf(builder, "%s{%s=\"%s\"} %d\n", name, label, names[i], value.Load())
 		}
-		builder.WriteString(name)
-		writeMetricLabels(builder, labels, values)
-		fmt.Fprintf(builder, " %d\n", entry.value)
+	}
+}
+func writeStatusCounters(builder *strings.Builder, name, help string, values []atomic.Uint64) {
+	fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	for i := range values {
+		value := &values[i]
+		if value.Load() != 0 {
+			fmt.Fprintf(builder, "%s{status=\"%s\"} %d\n", name, statusMetricName(i), value.Load())
+		}
+	}
+}
+func writeFixedCounters(builder *strings.Builder, name, help string, vec *fixedRequestCounter) {
+	fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	for route := range vec.values {
+		for method := range vec.values[route] {
+			for status := range vec.values[route][method] {
+				for outcome := range vec.values[route][method][status] {
+					value := vec.values[route][method][status][outcome].Load()
+					if value == 0 {
+						continue
+					}
+					fmt.Fprintf(builder, "%s{route=\"%s\",method=\"%s\",status=\"%s\",outcome=\"%s\"} %d\n", name, routeMetricName(route), methodMetricName(method), statusMetricName(status), outcomeMetricName(outcome), value)
+				}
+			}
+		}
 	}
 }
 
-func writeHistogramFamily(builder *strings.Builder, name, help string, vec *metricHistogramVec, labels []string) {
+func writeFixedHistograms(builder *strings.Builder, name, help string, vec *fixedRequestHistogram) {
 	fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name)
-	var entries []struct {
-		key  string
-		hist *metricHistogram
-	}
-	vec.series.Range(func(key, value any) bool {
-		entries = append(entries, struct {
-			key  string
-			hist *metricHistogram
-		}{key.(string), value.(*metricHistogram)})
-		return true
-	})
-	sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
-	for _, entry := range entries {
-		values := strings.Split(entry.key, "\x00")
-		if len(values) < len(labels) {
-			continue
+	for route := range vec.values {
+		for method := range vec.values[route] {
+			for status := range vec.values[route][method] {
+				for outcome := range vec.values[route][method][status] {
+					hist := &vec.values[route][method][status][outcome]
+					if hist.count.Load() == 0 {
+						continue
+					}
+					labels := fmt.Sprintf(`route="%s",method="%s",status="%s",outcome="%s"`, routeMetricName(route), methodMetricName(method), statusMetricName(status), outcomeMetricName(outcome))
+					writeHistogramSamples(builder, name, hist, labels)
+				}
+			}
 		}
-		for index, bucket := range metricBuckets {
-			fmt.Fprintf(builder, "%s_bucket", name)
-			writeMetricLabelsWithExtra(builder, labels, values, "le", strconv.FormatFloat(bucket, 'g', -1, 64))
-			fmt.Fprintf(builder, " %d\n", entry.hist.buckets[index].Load())
-		}
-		fmt.Fprintf(builder, "%s_bucket", name)
-		writeMetricLabelsWithExtra(builder, labels, values, "le", "+Inf")
-		fmt.Fprintf(builder, " %d\n", entry.hist.count.Load())
-		fmt.Fprintf(builder, "%s_count", name)
-		writeMetricLabels(builder, labels, values)
-		fmt.Fprintf(builder, " %d\n", entry.hist.count.Load())
-		fmt.Fprintf(builder, "%s_sum", name)
-		writeMetricLabels(builder, labels, values)
-		fmt.Fprintf(builder, " %s\n", strconv.FormatFloat(math.Float64frombits(entry.hist.sum.Load()), 'g', -1, 64))
 	}
+}
+
+func writeSimpleHistogram(builder *strings.Builder, name, help string, hist *metricHistogram, labels string) {
+	fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name)
+	if hist == nil || hist.count.Load() == 0 {
+		return
+	}
+	writeHistogramSamples(builder, name, hist, labels)
+}
+
+func metricMethodIndex(method string) int {
+	switch normalizeMetricMethod(method) {
+	case "GET":
+		return 1
+	case "POST":
+		return 2
+	case "PUT":
+		return 3
+	case "PATCH":
+		return 4
+	case "DELETE":
+		return 5
+	case "HEAD":
+		return 6
+	case "OPTIONS":
+		return 7
+	}
+	return 0
+}
+func methodMetricName(index int) string {
+	if index == 1 {
+		return "GET"
+	}
+	if index == 2 {
+		return "POST"
+	}
+	if index == 3 {
+		return "PUT"
+	}
+	if index == 4 {
+		return "PATCH"
+	}
+	if index == 5 {
+		return "DELETE"
+	}
+	if index == 6 {
+		return "HEAD"
+	}
+	if index == 7 {
+		return "OPTIONS"
+	}
+	return "other"
+}
+func metricRouteIndex(route RouteClass) int {
+	if route <= RouteClassAdmin {
+		return int(route)
+	}
+	return 0
+}
+func routeMetricName(index int) string { return RouteClass(index).String() }
+func metricStatusIndex(status OptionalStatus) int {
+	if value, known := status.Value(); known && value >= 100 && value <= 599 {
+		return value
+	}
+	return 0
+}
+func statusMetricName(index int) string {
+	if index == 0 {
+		return "unknown"
+	}
+	return strconv.Itoa(index)
+}
+func metricOutcomeIndex(outcome TerminalOutcome) int {
+	switch outcome {
+	case TerminalOutcomePreUpstream:
+		return 1
+	case TerminalOutcomeUpstreamError:
+		return 2
+	case TerminalOutcomeResponseError:
+		return 3
+	case TerminalOutcomeComplete:
+		return 4
+	case TerminalOutcomeCustomDispatch:
+		return 5
+	case TerminalOutcomeCancelled:
+		return 6
+	}
+	return 0
+}
+func outcomeMetricName(index int) string {
+	switch index {
+	case 1:
+		return string(TerminalOutcomePreUpstream)
+	case 2:
+		return string(TerminalOutcomeUpstreamError)
+	case 3:
+		return string(TerminalOutcomeResponseError)
+	case 4:
+		return string(TerminalOutcomeComplete)
+	case 5:
+		return string(TerminalOutcomeCustomDispatch)
+	case 6:
+		return string(TerminalOutcomeCancelled)
+	}
+	return "unknown"
+}
+func metricErrorIndex(code SafeErrorCode) int {
+	index := int(code)
+	if index >= 0 && index < 20 {
+		return index
+	}
+	return 19
+}
+func telemetryIndex(result string) (int, bool) {
+	switch result {
+	case "persisted":
+		return 0, true
+	case "dropped":
+		return 1, true
+	case "failed":
+		return 2, true
+	}
+	return 0, false
+}
+func errorMetricNamesSlice() []string { return errorMetricNames[:] }
+func writeHistogramSamples(builder *strings.Builder, name string, hist *metricHistogram, labels string) {
+	separator := ""
+	if labels != "" {
+		separator = ","
+	}
+	// Writers update each bucket atomically in sequence. A scrape may observe
+	// that sequence between bucket writes, so clamp the read-side snapshot to a
+	// cumulative histogram before exposition. This preserves Prometheus's
+	// monotonic bucket contract without putting a lock on the completion path.
+	var cumulative uint64
+	for i, bucket := range metricBuckets {
+		if value := hist.buckets[i].Load(); value > cumulative {
+			cumulative = value
+		}
+		fmt.Fprintf(builder, "%s_bucket{%s%sle=\"%s\"} %d\n", name, labels, separator, strconv.FormatFloat(bucket, 'g', -1, 64), cumulative)
+	}
+	fmt.Fprintf(builder, "%s_bucket{%s%sle=\"+Inf\"} %d\n%s_count{%s} %d\n%s_sum{%s} %s\n", name, labels, separator, hist.count.Load(), name, labels, hist.count.Load(), name, labels, strconv.FormatFloat(math.Float64frombits(hist.sum.Load()), 'g', -1, 64))
 }
 
 func writeMetricLabels(builder *strings.Builder, names, values []string) {

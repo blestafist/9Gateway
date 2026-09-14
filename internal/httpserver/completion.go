@@ -83,11 +83,13 @@ type CompletionLogger struct {
 	stop   chan struct{}
 	done   chan struct{}
 
-	accepting atomic.Bool
-	dropped   atomic.Uint64
-	stopOnce  sync.Once
-	inFlight  atomic.Int64
-	metrics   *gatewayMetrics
+	accepting      atomic.Bool
+	dropped        atomic.Uint64
+	stopOnce       sync.Once
+	inFlight       atomic.Int64
+	metrics        atomic.Pointer[gatewayMetrics]
+	metricsQueueID uint64
+	metricsMu      sync.Mutex
 }
 
 // NewCompletionLogger starts a single worker for a bounded completion queue.
@@ -116,9 +118,18 @@ func (completionLogger *CompletionLogger) metricsQueueSource() func() int {
 }
 
 func (completionLogger *CompletionLogger) setMetrics(metrics *gatewayMetrics) {
-	completionLogger.metrics = metrics
+	completionLogger.metricsMu.Lock()
+	defer completionLogger.metricsMu.Unlock()
+	previous := completionLogger.metrics.Load()
+	if previous == metrics && (metrics == nil || completionLogger.metricsQueueID != 0) {
+		return
+	}
+	if previous != nil && previous != metrics {
+		previous.unregisterQueue(completionLogger.metricsQueueID)
+	}
+	completionLogger.metrics.Store(metrics)
 	if metrics != nil {
-		metrics.registerQueue(completionLogger.metricsQueueSource())
+		completionLogger.metricsQueueID = metrics.registerQueue(completionLogger.metricsQueueSource())
 	}
 }
 
@@ -148,8 +159,8 @@ func (completionLogger *CompletionLogger) drain() {
 
 func (completionLogger *CompletionLogger) write(record CompletionRecord) {
 	completionLogger.logger.LogAttrs(context.Background(), slog.LevelInfo, "request completed", completionLogAttrs(record)...)
-	if completionLogger.metrics != nil {
-		completionLogger.metrics.telemetryResult("persisted")
+	if metrics := completionLogger.metrics.Load(); metrics != nil {
+		metrics.telemetryResult("persisted")
 	}
 }
 
@@ -235,8 +246,8 @@ func (completionLogger *CompletionLogger) Enqueue(record CompletionRecord) bool 
 	defer completionLogger.inFlight.Add(-1)
 	if !completionLogger.accepting.Load() {
 		completionLogger.dropped.Add(1)
-		if completionLogger.metrics != nil {
-			completionLogger.metrics.telemetryResult("dropped")
+		if metrics := completionLogger.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("dropped")
 		}
 		return false
 	}
@@ -245,6 +256,9 @@ func (completionLogger *CompletionLogger) Enqueue(record CompletionRecord) bool 
 		return true
 	default:
 		completionLogger.dropped.Add(1)
+		if metrics := completionLogger.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("dropped")
+		}
 		return false
 	}
 }

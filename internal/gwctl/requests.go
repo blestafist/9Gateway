@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -234,7 +235,7 @@ func listRequests(ctx context.Context, options options, parsed requestListOption
 	records := make([]json.RawMessage, 0)
 	cursor := ""
 	seen := map[string]struct{}{}
-	for page := 0; page < maxRequestPages; page++ {
+	for page := 0; ; page++ {
 		amount := requestPageSize
 		if parsed.limited && parsed.limit-len(records) < amount {
 			amount = parsed.limit - len(records)
@@ -271,9 +272,6 @@ func listRequests(ctx context.Context, options options, parsed requestListOption
 		}
 		if response.NextCursor == nil || *response.NextCursor == "" {
 			break
-		}
-		if page+1 >= maxRequestPages {
-			return &APIError{Kind: APIErrorMalformed, Err: errors.New("request pagination exceeded 50 pages")}
 		}
 		if _, ok := seen[*response.NextCursor]; ok || *response.NextCursor == cursor {
 			return &APIError{Kind: APIErrorMalformed, Err: errors.New("repeated pagination cursor")}
@@ -513,35 +511,96 @@ func getRequestBody(ctx context.Context, options options, id string, parsed requ
 	if truncated {
 		fmt.Fprintln(stderr, "Warning: response body was truncated (original size "+strconv.FormatInt(original, 10)+" bytes).")
 	}
-	var destination io.Writer = stdout
-	var file *os.File
 	if parsed.outputSet {
-		file, err = os.Create(parsed.output)
+		return writeBodyFile(parsed.output, response.Body)
+	}
+	// stdout cannot be rolled back. Buffer the bounded response before writing
+	// anything so an overflow or interrupted read never produces a misleading
+	// partial body in a pipe.
+	body, readErr := readBoundedBody(response.Body)
+	if readErr != nil {
+		return &APIError{Kind: APIErrorMalformed, Err: readErr}
+	}
+	_, writeErr := stdout.Write(body)
+	if writeErr != nil {
+		return &APIError{Kind: APIErrorResponse, Err: writeErr}
+	}
+	return nil
+}
+
+func readBoundedBody(source io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(source, maxResponseBytes+1))
+	if err != nil {
+		return nil, errors.New("could not read response body")
+	}
+	if len(body) > maxResponseBytes {
+		return nil, errors.New("response body is too large")
+	}
+	var extra [1]byte
+	count, err := source.Read(extra[:])
+	if err != io.EOF {
 		if err != nil {
-			return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not open output file: %v", err)}
+			return nil, errors.New("could not read response body")
 		}
-		destination = file
-	}
-	_, copyErr := io.Copy(destination, io.LimitReader(response.Body, maxResponseBytes))
-	if copyErr == nil {
-		var extra [1]byte
-		if count, readErr := response.Body.Read(extra[:]); readErr != io.EOF {
-			if readErr != nil {
-				copyErr = readErr
-			} else if count != 0 {
-				copyErr = errors.New("response body is too large")
-			}
+		if count != 0 {
+			return nil, errors.New("response body is too large")
 		}
 	}
-	closeErr := error(nil)
-	if file != nil {
-		closeErr = file.Close()
+	return body, nil
+}
+
+func writeBodyFile(path string, source io.Reader) (resultErr error) {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not open output file: %v", err)}
 	}
-	if copyErr != nil {
+	temporaryName := temporary.Name()
+	defer func() {
+		if resultErr != nil {
+			_ = temporary.Close()
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	if info, statErr := os.Stat(path); statErr == nil {
+		if chmodErr := temporary.Chmod(info.Mode().Perm()); chmodErr != nil {
+			return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not set output file mode: %v", chmodErr)}
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not inspect output file: %v", statErr)}
+	}
+	if _, err = io.Copy(temporary, io.LimitReader(source, maxResponseBytes+1)); err != nil {
 		return &APIError{Kind: APIErrorMalformed, Err: errors.New("could not read response body")}
 	}
-	if closeErr != nil {
-		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not close output file: %v", closeErr)}
+	if info, statErr := temporary.Stat(); statErr != nil {
+		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not inspect temporary output: %v", statErr)}
+	} else if info.Size() > maxResponseBytes {
+		return &APIError{Kind: APIErrorMalformed, Err: errors.New("response body is too large")}
+	}
+	var extra [1]byte
+	count, readErr := source.Read(extra[:])
+	if readErr != io.EOF {
+		if readErr != nil {
+			return &APIError{Kind: APIErrorMalformed, Err: errors.New("could not read response body")}
+		}
+		if count != 0 {
+			return &APIError{Kind: APIErrorMalformed, Err: errors.New("response body is too large")}
+		}
+	}
+	if err = temporary.Sync(); err != nil {
+		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not sync output file: %v", err)}
+	}
+	if err = temporary.Close(); err != nil {
+		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not close output file: %v", err)}
+	}
+	if err = os.Rename(temporaryName, path); err != nil {
+		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not replace output file: %v", err)}
+	}
+	// Directory fsync is best effort: it is supported on Unix filesystems but
+	// not consistently available on all platforms supported by Go.
+	if directoryFile, openErr := os.Open(directory); openErr == nil {
+		_ = directoryFile.Sync()
+		_ = directoryFile.Close()
 	}
 	return nil
 }

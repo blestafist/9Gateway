@@ -211,7 +211,7 @@ func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	}
 	admin := &adminHandler{credential: adminCredential, service: service}
 	router := routeWithAdmin(proxy, admin, service.auth)
-	handler := newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router)
+	handler := newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, usageWorker, router)
 	// The concrete storage repository supplies the database used by readiness.
 	// Narrow test repositories and the legacy constructor remain valid; they
 	// simply have no deep storage check available until an embedder adds one via
@@ -289,7 +289,7 @@ func newHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWor
 	proxy := newProxyHandlerWithLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenLimiter, tokenConfig)
 	proxy.usageObservationWorker = usageWorker
 	router := routeWithAuthenticator(proxy, nil, authenticator)
-	return WithReadiness(newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router), NewReadiness(ReadinessConfig{
+	return WithReadiness(newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, usageWorker, router), NewReadiness(ReadinessConfig{
 		UpstreamBaseURL:        upstreamBaseURL,
 		UsageObservationWorker: usageWorker,
 	}))
@@ -1709,16 +1709,19 @@ func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
-	return newHandlerWithCompletionLoggerAndHistory(completionLogger, nil, next)
+	return newHandlerWithCompletionLoggerAndHistory(completionLogger, nil, nil, next)
 }
 
-func newHandlerWithCompletionLoggerAndHistory(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, next http.Handler) http.Handler {
+func newHandlerWithCompletionLoggerAndHistory(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, usageWorker *UsageObservationWorker, next http.Handler) http.Handler {
 	metrics := newGatewayMetrics()
 	if completionLogger != nil {
 		completionLogger.setMetrics(metrics)
 	}
 	if historyWorker != nil {
 		historyWorker.setMetrics(metrics)
+	}
+	if usageWorker != nil {
+		usageWorker.setMetrics(metrics)
 	}
 	if completionLogger == nil {
 		// The convenience constructor does not own a completion logger. In
@@ -1770,10 +1773,6 @@ func withRequestIDMetrics(metrics *gatewayMetrics, next http.Handler) http.Handl
 			return
 		}
 		request = request.WithContext(withGatewayMetricsContext(request.Context(), metrics))
-		metrics.begin()
-		defer func() {
-			metrics.end()
-		}()
 		id, err := newRequestID()
 		if err != nil {
 			writeGatewayError(response, gatewayErrorInternal, "")

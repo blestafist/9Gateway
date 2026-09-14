@@ -196,12 +196,14 @@ type UsageObservationWorker struct {
 	stopOnce  sync.Once
 	phase     atomic.Uint32
 
-	submitted atomic.Uint64
-	processed atomic.Uint64
-	succeeded atomic.Uint64
-	failed    atomic.Uint64
-	dropped   atomic.Uint64
-	metrics   *gatewayMetrics
+	submitted      atomic.Uint64
+	processed      atomic.Uint64
+	succeeded      atomic.Uint64
+	failed         atomic.Uint64
+	dropped        atomic.Uint64
+	metrics        atomic.Pointer[gatewayMetrics]
+	metricsQueueID uint64
+	metricsMu      sync.Mutex
 }
 
 // NewUsageObservationWorker starts one bounded usage-observation worker.
@@ -249,9 +251,25 @@ func (worker *UsageObservationWorker) metricsQueueSource() func() int {
 }
 
 func (worker *UsageObservationWorker) setMetrics(metrics *gatewayMetrics) {
-	worker.metrics = metrics
+	worker.metricsMu.Lock()
+	defer worker.metricsMu.Unlock()
+	previous := worker.metrics.Load()
+	if previous == metrics && (metrics == nil || worker.metricsQueueID != 0) {
+		return
+	}
+	if previous != nil && previous != metrics {
+		previous.unregisterQueue(worker.metricsQueueID)
+	}
+	worker.metrics.Store(metrics)
 	if metrics != nil {
-		metrics.registerQueue(worker.metricsQueueSource())
+		worker.metricsQueueID = metrics.registerQueue(worker.metricsQueueSource())
+	}
+}
+
+func (worker *UsageObservationWorker) markDropped() {
+	worker.dropped.Add(1)
+	if metrics := worker.metrics.Load(); metrics != nil {
+		metrics.telemetryResult("dropped")
 	}
 }
 
@@ -305,8 +323,8 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	worker.processed.Add(1)
 	if job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil {
 		worker.failed.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("failed")
+		if metrics := worker.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("failed")
 		}
 		return
 	}
@@ -349,8 +367,8 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 		// one-shot tickets so no discarded job can be adjusted later.
 		invalidateObservationJob(job)
 		worker.failed.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("failed")
+		if metrics := worker.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("failed")
 		}
 		return
 	}
@@ -366,8 +384,8 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	if !worker.beginAdjust() {
 		invalidateObservationJob(job)
 		worker.failed.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("failed")
+		if metrics := worker.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("failed")
 		}
 		return
 	}
@@ -402,8 +420,8 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	}
 	if settleErr != nil {
 		worker.failed.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("failed")
+		if metrics := worker.metrics.Load(); metrics != nil {
+			metrics.telemetryResult("failed")
 		}
 		return
 	}
@@ -412,8 +430,8 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 		return
 	}
 	worker.succeeded.Add(1)
-	if worker.metrics != nil {
-		worker.metrics.telemetryResult("persisted")
+	if metrics := worker.metrics.Load(); metrics != nil {
+		metrics.telemetryResult("persisted")
 	}
 }
 
@@ -428,10 +446,7 @@ func (worker *UsageObservationWorker) discardQueuedLocked() {
 		select {
 		case job := <-worker.queue:
 			worker.releaseSlot()
-			worker.dropped.Add(1)
-			if worker.metrics != nil {
-				worker.metrics.telemetryResult("dropped")
-			}
+			worker.markDropped()
 			invalidateObservationJob(job)
 		default:
 			return
@@ -458,20 +473,14 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 		return false
 	}
 	if (job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil) || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
-		worker.dropped.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("dropped")
-		}
+		worker.markDropped()
 		invalidateObservationJob(job)
 		return false
 	}
 	select {
 	case <-worker.slots:
 	default:
-		worker.dropped.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("dropped")
-		}
+		worker.markDropped()
 		invalidateObservationJob(job)
 		return false
 	}
@@ -479,10 +488,7 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 	if !worker.accepting {
 		worker.mu.Unlock()
 		worker.releaseSlot()
-		worker.dropped.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("dropped")
-		}
+		worker.markDropped()
 		invalidateObservationJob(job)
 		return false
 	}
@@ -492,10 +498,7 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 	defer worker.mu.Unlock()
 	if !worker.accepting {
 		worker.releaseSlot()
-		worker.dropped.Add(1)
-		if worker.metrics != nil {
-			worker.metrics.telemetryResult("dropped")
-		}
+		worker.markDropped()
 		invalidateObservationJob(job)
 		return false
 	}
@@ -509,7 +512,7 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 		return true
 	default:
 		worker.releaseSlot()
-		worker.dropped.Add(1)
+		worker.markDropped()
 		invalidateObservationJob(job)
 		return false
 	}

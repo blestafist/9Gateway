@@ -4,13 +4,31 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+type interruptedReader struct {
+	data []byte
+	read bool
+}
+
+func (reader *interruptedReader) Read(dst []byte) (int, error) {
+	if !reader.read {
+		reader.read = true
+		copy(dst, reader.data)
+		return len(reader.data), nil
+	}
+	return 0, errors.New("interrupted")
+}
 
 func TestRequestsListFiltersAndAggregatesJSON(t *testing.T) {
 	var queries []string
@@ -43,6 +61,32 @@ func TestRequestsListFiltersAndAggregatesJSON(t *testing.T) {
 	}
 }
 
+func TestRequestsListTraversesMoreThanFiftyPages(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := int(calls.Add(1))
+		w.Header().Set("Content-Type", "application/json")
+		if page < 53 {
+			_, _ = fmt.Fprintf(w, `{"requests":[{"request_id":"%032x"}],"next_cursor":"cursor-%d"}`, page, page)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"requests":[{"request_id":"%032x"}]}`, page)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	status := Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "secret", "requests", "list", "--json"}, &stdout, &stderr)
+	if status != ExitSuccess {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	var result aggregateRequestList
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Requests) != 53 || calls.Load() != 53 {
+		t.Fatalf("rows/calls = %d/%d", len(result.Requests), calls.Load())
+	}
+}
+
 func TestRequestsBodyIsExactAndHasNoStdoutContamination(t *testing.T) {
 	want := []byte{0x00, 0xff, 0x01, '\n'}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +111,84 @@ func TestRequestsBodyIsExactAndHasNoStdoutContamination(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("file = %v/%v", err, got)
+	}
+}
+
+func TestRequestBodyOversizeLeavesDestinationUntouched(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "body.bin")
+	want := []byte("preexisting")
+	if err := os.WriteFile(path, want, 0640); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Original-Size", strconv.Itoa(maxResponseBytes+1))
+		w.Header().Set("X-Truncated", "false")
+		flusher := w.(http.Flusher)
+		for i := 0; i < maxResponseBytes+1; i += 4096 {
+			end := i + 4096
+			if end > maxResponseBytes+1 {
+				end = maxResponseBytes + 1
+			}
+			_, _ = w.Write(bytes.Repeat([]byte{'x'}, end-i))
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	status := Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "secret", "requests", "get", "0123456789abcdef0123456789abcdef", "--body", "response", "--output", path}, &stdout, &stderr)
+	if status != ExitAPI {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("destination = %q/%v", got, err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "body.bin" {
+		t.Fatalf("temporary artifact(s) = %v/%v", entries, err)
+	}
+}
+
+func TestRequestBodyInterruptedReadLeavesDestinationUntouched(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "body.bin")
+	want := []byte("preexisting")
+	if err := os.WriteFile(path, want, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBodyFile(path, &interruptedReader{data: []byte("partial")}); err == nil {
+		t.Fatal("interrupted body unexpectedly succeeded")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("destination = %q/%v", got, err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "body.bin" {
+		t.Fatalf("temporary artifact(s) = %v/%v", entries, err)
+	}
+}
+
+func TestRequestBodyOversizeDoesNotPartiallyWriteStdout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Original-Size", strconv.Itoa(maxResponseBytes+1))
+		w.Header().Set("X-Truncated", "false")
+		flusher := w.(http.Flusher)
+		for i := 0; i < maxResponseBytes+1; i += 4096 {
+			end := i + 4096
+			if end > maxResponseBytes+1 {
+				end = maxResponseBytes + 1
+			}
+			_, _ = w.Write(bytes.Repeat([]byte{'x'}, end-i))
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	status := Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "secret", "requests", "get", "0123456789abcdef0123456789abcdef", "--body", "response"}, &stdout, &stderr)
+	if status != ExitAPI || stdout.Len() != 0 {
+		t.Fatalf("status/stdout = %d/%d", status, stdout.Len())
 	}
 }
 
