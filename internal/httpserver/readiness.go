@@ -11,6 +11,7 @@ import (
 
 	"github.com/pestit/9gateway/internal/security"
 	"github.com/pestit/9gateway/internal/storage"
+	"github.com/pestit/9gateway/internal/version"
 )
 
 const readinessTimeout = 2 * time.Second
@@ -51,6 +52,8 @@ type ReadinessConfig struct {
 	UpstreamBaseURL        string
 	UsageObservationWorker *UsageObservationWorker
 	State                  *ReadinessState
+	Version                string
+	Commit                 string
 }
 
 // Readiness is a bounded, unauthenticated readiness probe.
@@ -59,16 +62,29 @@ type Readiness struct {
 	upstreamBaseURL string
 	usageWorker     *UsageObservationWorker
 	state           *ReadinessState
+	version         string
+	commit          string
 }
 
 // NewReadiness creates a readiness checker. It does not contact the upstream
 // service; only its configured URL is validated.
 func NewReadiness(configuration ReadinessConfig) *Readiness {
+	metadata := version.Current()
+	readinessVersion := configuration.Version
+	if readinessVersion == "" {
+		readinessVersion = metadata.Version
+	}
+	readinessCommit := configuration.Commit
+	if readinessCommit == "" {
+		readinessCommit = metadata.Commit
+	}
 	return &Readiness{
 		database:        configuration.Database,
 		upstreamBaseURL: configuration.UpstreamBaseURL,
 		usageWorker:     configuration.UsageObservationWorker,
 		state:           configuration.State,
+		version:         readinessVersion,
+		commit:          readinessCommit,
 	}
 }
 
@@ -87,7 +103,8 @@ func WithReadiness(next http.Handler, readiness *Readiness) http.Handler {
 		}
 		if request.Method == http.MethodGet && request.URL.Path == "/ready" {
 			if readiness == nil {
-				writeReadiness(response, readinessResult{ready: false, checks: readinessUnavailableChecks()})
+				metadata := version.Current()
+				writeReadiness(response, readinessResult{ready: false, checks: readinessUnavailableChecks(), version: metadata.Version, commit: metadata.Commit})
 				return
 			}
 			readiness.ServeHTTP(response, request)
@@ -108,8 +125,10 @@ type readinessCheck struct {
 }
 
 type readinessResult struct {
-	ready  bool
-	checks map[string]readinessCheck
+	ready   bool
+	checks  map[string]readinessCheck
+	version string
+	commit  string
 }
 
 func (readiness *Readiness) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -140,7 +159,7 @@ func (readiness *Readiness) ServeHTTP(response http.ResponseWriter, request *htt
 		ready = false
 		checks["lifecycle"] = failedReadinessCheck("lifecycle", "gateway is shutting down")
 	}
-	writeReadiness(response, readinessResult{ready: ready, checks: checks})
+	writeReadiness(response, readinessResult{ready: ready, checks: checks, version: readiness.version, commit: readiness.commit})
 }
 
 func (readiness *Readiness) runCheck(ctx context.Context, name string) readinessCheck {
@@ -230,7 +249,9 @@ func writeReadiness(response http.ResponseWriter, result readinessResult) {
 	// All values are static/bounded and encoding errors cannot meaningfully be
 	// recovered after the status has been sent.
 	_ = json.NewEncoder(response).Encode(struct {
-		Ready  bool                      `json:"ready"`
-		Checks map[string]readinessCheck `json:"checks"`
-	}{Ready: result.ready, Checks: result.checks})
+		Ready   bool                      `json:"ready"`
+		Checks  map[string]readinessCheck `json:"checks"`
+		Version string                    `json:"version"`
+		Commit  string                    `json:"commit"`
+	}{Ready: result.ready, Checks: result.checks, Version: result.version, Commit: result.commit})
 }

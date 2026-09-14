@@ -19,12 +19,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
-)
 
-// Version is the version reported by the standalone gwctl binary. It is a
-// variable so release builds can replace it with the Docker VERSION build
-// argument using Go's -ldflags -X option.
-var Version = "0.1.0"
+	"github.com/pestit/9gateway/internal/version"
+)
 
 const (
 	defaultGatewayURL     = "http://localhost:8080"
@@ -127,7 +124,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	switch command {
 	case "version":
-		fmt.Fprintf(stdout, "gwctl version %s\n", Version)
+		version.Format(stdout, "gwctl")
 		return ExitSuccess
 	case "ping":
 		if err := validatePingOptions(options); err != nil {

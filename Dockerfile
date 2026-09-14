@@ -4,7 +4,7 @@ FROM golang:1.23-bookworm AS build
 
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG VERSION=0.1.0
+ARG VERSION=dev
 ARG COMMIT_SHA=unknown
 ARG BUILD_DATE=unknown
 
@@ -18,10 +18,10 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN mkdir -p /out/data /out/config \
     && GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -buildvcs=false \
-       -ldflags "-s -w -X github.com/pestit/9gateway/internal/gwctl.Version=${VERSION}" \
+       -ldflags "-s -w -X github.com/pestit/9gateway/internal/version.Version=${VERSION} -X github.com/pestit/9gateway/internal/version.CommitSHA=${COMMIT_SHA} -X github.com/pestit/9gateway/internal/version.BuildDate=${BUILD_DATE}" \
        -o /out/gateway ./cmd/gateway \
     && GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -buildvcs=false \
-       -ldflags "-s -w -X github.com/pestit/9gateway/internal/gwctl.Version=${VERSION}" \
+       -ldflags "-s -w -X github.com/pestit/9gateway/internal/version.Version=${VERSION} -X github.com/pestit/9gateway/internal/version.CommitSHA=${COMMIT_SHA} -X github.com/pestit/9gateway/internal/version.BuildDate=${BUILD_DATE}" \
        -o /out/gwctl ./cmd/gwctl \
     && chown 65532:65532 /out/data /out/config
 
@@ -29,7 +29,7 @@ RUN mkdir -p /out/data /out/config \
 # certificates and zoneinfo. The nonroot variant uses UID/GID 65532.
 FROM gcr.io/distroless/static-debian12:nonroot
 
-ARG VERSION=0.1.0
+ARG VERSION=dev
 ARG COMMIT_SHA=unknown
 ARG BUILD_DATE=unknown
 

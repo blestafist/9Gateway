@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/pestit/9gateway/internal/version"
 )
 
 var metricBuckets = [...]float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}
@@ -241,10 +243,12 @@ const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
 func serveMetrics(response http.ResponseWriter, metrics *gatewayMetrics) {
 	response.Header().Set("Content-Type", metricsContentType)
 	response.WriteHeader(http.StatusOK)
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "# gateway version %s\n", version.Current().Version)
 	if metrics == nil {
+		_, _ = response.Write([]byte(builder.String()))
 		return
 	}
-	var builder strings.Builder
 	writeFixedCounters(&builder, "gateway_requests_total", "Total HTTP requests handled by the gateway.", &metrics.requests)
 	writeSimpleCounters(&builder, "gateway_request_errors_total", "Total gateway-owned request errors.", metrics.requestErrors.values[:], errorMetricNames[:])
 	builder.WriteString("# HELP gateway_rejected_requests_total Total client requests rejected by the gateway.\n# TYPE gateway_rejected_requests_total counter\n")

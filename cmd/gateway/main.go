@@ -23,6 +23,7 @@ import (
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/storage"
 	"github.com/pestit/9gateway/internal/transport"
+	"github.com/pestit/9gateway/internal/version"
 )
 
 func main() {
@@ -35,6 +36,12 @@ func main() {
 func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		return runHealthcheck(os.Args[2:])
+	}
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" {
+			version.Format(os.Stdout, "gateway")
+			return nil
+		}
 	}
 	configPath := flag.String("config", "", "path to the gateway YAML configuration")
 	flag.Parse()
@@ -228,6 +235,8 @@ func run() error {
 		UsageObservationWorker: usageObservationWorker,
 		State:                  readinessState,
 	}))
+	metadata := version.Current()
+	slog.Default().Info("starting gateway version=" + metadata.Version + " commit=" + metadata.Commit + " build=" + metadata.BuildDate)
 	var activeRequests sync.WaitGroup
 	// Keep the counter non-zero until shutdown has stopped accepting requests;
 	// this makes a handler starting concurrently with Shutdown safe to Add.
