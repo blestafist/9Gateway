@@ -14,32 +14,32 @@ import (
 // Load reads, decodes, and validates configuration from a YAML file.
 func Load(path string) (Config, error) {
 	if path == "" {
-		return Config{}, fmt.Errorf("config path is required")
+		return Config{}, ValidationError("config", "path is required")
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
+		return Config{}, ValidationError("config", fmt.Sprintf("read config: %v", err))
 	}
 
 	var config Config
 	if err := validateRawObservability(data); err != nil {
-		return Config{}, fmt.Errorf("validate config: %w", err)
+		return Config{}, ValidationError("observability", err.Error())
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&config); err != nil {
-		return Config{}, fmt.Errorf("decode config YAML: %w", err)
+		return Config{}, ValidationError("config", fmt.Sprintf("decode config YAML: %v", err))
 	}
 	var extra yaml.Node
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return Config{}, fmt.Errorf("decode config YAML: multiple documents are not supported")
+			return Config{}, ValidationError("config", "decode config YAML: multiple documents are not supported")
 		}
-		return Config{}, fmt.Errorf("decode config YAML: %w", err)
+		return Config{}, ValidationError("config", fmt.Sprintf("decode config YAML: %v", err))
 	}
 	if err := rejectExplicitTokenizerDefaults(data, config); err != nil {
-		return Config{}, fmt.Errorf("validate config: %w", err)
+		return Config{}, ValidationError("tokenizer", err.Error())
 	}
 	config.ApplyDefaults()
 	secretFields := []*struct {
@@ -53,7 +53,7 @@ func Load(path string) (Config, error) {
 	}
 	for _, field := range secretFields {
 		if field.requiredReference && !isEnvironmentReference(*field.value) {
-			return Config{}, fmt.Errorf("configuration field %q must be an environment reference", field.name)
+			return Config{}, ValidationError(field.name, "must be an environment reference")
 		}
 		*field.value, err = resolveEnvironmentReference(field.name, *field.value)
 		if err != nil {
@@ -61,10 +61,17 @@ func Load(path string) (Config, error) {
 		}
 	}
 	if err := config.Validate(); err != nil {
-		return Config{}, fmt.Errorf("validate config: %w", err)
+		return Config{}, err
 	}
 
 	return config, nil
+}
+
+// ValidationError is the stable, secret-safe startup error shape. Callers may
+// include the returned error directly in logs without exposing the decoded
+// configuration or any resolved credential.
+func ValidationError(field, reason string) error {
+	return fmt.Errorf("config validation failed: field '%s': %s", field, reason)
 }
 
 // validateRawObservability checks the scalar representation before yaml.v3
@@ -163,17 +170,20 @@ func resolveEnvironmentReference(field, value string) (string, error) {
 		return value, nil
 	}
 	if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
-		return "", fmt.Errorf("configuration field %q has an invalid environment reference", field)
+		return "", ValidationError(field, "has an invalid environment reference")
 	}
 
 	name := strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}")
 	if !validEnvironmentName(name) {
-		return "", fmt.Errorf("configuration field %q has an invalid environment reference", field)
+		return "", ValidationError(field, "has an invalid environment reference")
 	}
 
 	resolved, ok := os.LookupEnv(name)
 	if !ok {
-		return "", fmt.Errorf("configuration field %q environment variable %q is not set", field, name)
+		return "", ValidationError(field, fmt.Sprintf("environment variable '%s' not set", name))
+	}
+	if strings.TrimSpace(resolved) == "" {
+		return "", ValidationError(field, fmt.Sprintf("environment variable '%s' is empty", name))
 	}
 	return resolved, nil
 }

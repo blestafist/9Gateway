@@ -3,8 +3,11 @@ package config
 import (
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/pestit/9gateway/internal/security"
@@ -20,6 +23,11 @@ const (
 	TokenizerModeUsageOnly TokenizerMode = "usage_only"
 	TokenizerModeEstimate  TokenizerMode = "estimate"
 )
+
+// effectiveUID is a variable rather than a direct call in validation so
+// callers can exercise the non-root deployment rule without changing the
+// process identity. Production code never replaces it.
+var effectiveUID = os.Geteuid
 
 const (
 	// DefaultSQLitePath keeps the default database on the persistent data
@@ -209,52 +217,117 @@ func (c Config) Validate() error {
 	tokenizer := c.Tokenizer
 	tokenizer.applyDefaults()
 	if err := tokenizer.validate(); err != nil {
-		return fmt.Errorf("tokenizer: %w", err)
+		return fieldError("tokenizer", err.Error())
 	}
 	observability := c.Observability
 	observability.applyDefaults()
 	if err := observability.validate(); err != nil {
-		return fmt.Errorf("observability: %w", err)
+		return fieldError("observability", err.Error())
 	}
 	if err := c.Pricing.Validate(); err != nil {
-		return fmt.Errorf("pricing: %w", err)
+		return fieldError("pricing", err.Error())
 	}
 	if c.ShutdownTimeoutSeconds < 0 {
-		return fmt.Errorf("shutdown timeout seconds must not be negative")
+		return fieldError("shutdown_timeout_seconds", "must not be negative")
 	}
 	if c.ShutdownTimeoutSeconds > MaxShutdownTimeoutSeconds {
-		return fmt.Errorf("shutdown timeout seconds exceeds maximum %d", MaxShutdownTimeoutSeconds)
+		return fieldError("shutdown_timeout_seconds", fmt.Sprintf("exceeds maximum %d", MaxShutdownTimeoutSeconds))
 	}
 	if strings.TrimSpace(c.ListenAddr) == "" {
-		return fmt.Errorf("listen address is required")
+		return fieldError("listen_addr", "listen address is required")
+	}
+	listenHost, listenPort, err := validateListenAddress(c.ListenAddr)
+	if err != nil {
+		return fieldError("listen_addr", err.Error())
+	}
+	if listenPort < 1024 && effectiveUID() != 0 {
+		return fieldError("listen_addr", fmt.Sprintf("listen port %d requires root privileges", listenPort))
 	}
 	if strings.TrimSpace(c.UpstreamBaseURL) == "" {
-		return fmt.Errorf("upstream base URL is required")
+		return fieldError("upstream_base_url", "upstream base URL is required")
 	}
 
-	if _, err := security.ValidateUpstreamURL(c.UpstreamBaseURL); err != nil {
-		return fmt.Errorf("invalid upstream base URL: %w", err)
+	upstream, err := security.ValidateUpstreamURL(c.UpstreamBaseURL)
+	if err != nil {
+		return fieldError("upstream_base_url", fmt.Sprintf("invalid upstream base URL: %v", err))
+	}
+	if upstreamLoopsBack(upstream, listenHost, listenPort) {
+		return fieldError("upstream_base_url", "points to the gateway listen address")
 	}
 	if strings.TrimSpace(c.UpstreamAPIKey) == "" {
-		return fmt.Errorf("upstream API key is required")
+		return fieldError("upstream_api_key", "upstream API key is required")
 	}
 	if strings.TrimSpace(c.SQLitePath) == "" {
-		return fmt.Errorf("sqlite path is required")
+		return fieldError("sqlite_path", "sqlite path is required")
 	}
 	if err := validateSQLitePath(c.SQLitePath); err != nil {
-		return fmt.Errorf("sqlite path: %w", err)
+		return fieldError("sqlite_path", fmt.Sprintf("sqlite path: %v", err))
 	}
 	if strings.TrimSpace(c.AuthPepper) == "" {
-		return fmt.Errorf("auth pepper is required")
+		return fieldError("auth_pepper", "auth pepper is required")
 	}
 	if strings.TrimSpace(c.AdminCredential) == "" {
-		return fmt.Errorf("admin credential is required")
+		return fieldError("admin_credential", "admin credential is required")
 	}
 	if c.AdminCredential == c.UpstreamAPIKey {
-		return fmt.Errorf("admin credential must differ from upstream API key")
+		return fieldError("admin_credential", "must differ from upstream API key")
 	}
 
 	return nil
+}
+
+func fieldError(field, reason string) error {
+	return fmt.Errorf("config validation failed: field '%s': %s", field, reason)
+}
+
+func validateListenAddress(address string) (string, int, error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return "", 0, fmt.Errorf("address is required")
+	}
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", 0, fmt.Errorf("must be a host:port address")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("port must be between 1 and 65535")
+	}
+	return host, port, nil
+}
+
+func upstreamLoopsBack(upstream *url.URL, listenHost string, listenPort int) bool {
+	if upstream == nil {
+		return false
+	}
+	upstreamPort := 0
+	if explicit := upstream.Port(); explicit != "" {
+		upstreamPort, _ = strconv.Atoi(explicit)
+	} else if upstream.Scheme == "https" {
+		upstreamPort = 443
+	} else {
+		upstreamPort = 80
+	}
+	if upstreamPort != listenPort {
+		return false
+	}
+	upstreamHost := strings.TrimSuffix(strings.ToLower(upstream.Hostname()), ".")
+	listenHost = strings.TrimSuffix(strings.ToLower(strings.Trim(listenHost, "[]")), ".")
+	if listenHost == "" || listenHost == "0.0.0.0" || listenHost == "::" {
+		return isLoopbackHost(upstreamHost) || upstreamHost == "0.0.0.0" || upstreamHost == "::"
+	}
+	if upstreamHost == listenHost {
+		return true
+	}
+	return isLoopbackHost(upstreamHost) && isLoopbackHost(listenHost)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateSQLitePath(path string) error {

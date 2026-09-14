@@ -124,7 +124,25 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		_ = result.Close()
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	if err := validateCurrentSchema(ctx, result.DB); err != nil {
+		_ = result.Close()
+		return nil, fmt.Errorf("open sqlite database: %w", err)
+	}
 	return result, nil
+}
+
+func validateCurrentSchema(ctx context.Context, database *sql.DB) error {
+	const query = `SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN (?, ?, ?, ?, ?, ?, ?, ?)`
+	var count int
+	if err := database.QueryRowContext(ctx, query,
+		"api_keys", "usage_buckets", "usage_bucket_identities", "usage_bucket_migration_state",
+		"budget_buckets", "requests", "request_bodies", "traversal_sequences").Scan(&count); err != nil {
+		return fmt.Errorf("check schema compatibility: %w", err)
+	}
+	if count != 8 {
+		return fmt.Errorf("database schema is incompatible with this binary; upgrade required")
+	}
+	return nil
 }
 
 func migrate(ctx context.Context, database *sql.DB) error {
@@ -200,7 +218,7 @@ func runMigrations(ctx context.Context, database *sql.DB, migrations []migration
 		return fmt.Errorf("invalid schema version %d", current)
 	}
 	if current > CurrentSchemaVersion {
-		return fmt.Errorf("database schema version %d is newer than binary version %d", current, CurrentSchemaVersion)
+		return fmt.Errorf("database schema version %d is newer than binary version %d; upgrade required", current, CurrentSchemaVersion)
 	}
 	if current > len(migrations) {
 		return fmt.Errorf("database schema version %d has no embedded migration", current)
