@@ -1,0 +1,40 @@
+# Source control and local reference material
+.git
+.git/**
+.references
+.references/**
+TASKS_old.md
+
+# Local build artifacts and runtime data
+/gateway
+/gwctl
+/bin
+/dist
+/data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.out
+*.test
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+/config.yaml
+/config.yml
+/config.local.yaml
+/config.local.yml
+
+# Archives and editor/OS files
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+.DS_Store
+.idea
+.vscode
+*.swp
+*.swo

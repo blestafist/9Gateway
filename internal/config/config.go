@@ -22,6 +22,10 @@ const (
 )
 
 const (
+	// DefaultSQLitePath keeps the default database on the persistent data
+	// volume used by the container image.
+	DefaultSQLitePath = "/data/gateway.db"
+
 	// These defaults keep preflight inspection small and make conservative
 	// fallback reservations finite for minimal deployments.
 	DefaultMaxInspectedRequestBytes   int64 = 64 * 1024
@@ -190,6 +194,9 @@ type Config struct {
 // Load after strict YAML decoding and is also available to startup code that
 // constructs Config values directly.
 func (c *Config) ApplyDefaults() {
+	if c.SQLitePath == "" {
+		c.SQLitePath = DefaultSQLitePath
+	}
 	c.Tokenizer.applyDefaults()
 	c.Observability.applyDefaults()
 	if c.ShutdownTimeoutSeconds == 0 {

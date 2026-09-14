@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,6 +33,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		return runHealthcheck(os.Args[2:])
+	}
 	configPath := flag.String("config", "", "path to the gateway YAML configuration")
 	flag.Parse()
 
@@ -251,6 +258,73 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+const (
+	defaultHealthcheckAddress = "http://127.0.0.1:8080/ready"
+	healthcheckTimeout        = 2 * time.Second
+)
+
+// runHealthcheck is intentionally a small, dependency-free probe for the
+// container HEALTHCHECK instruction. It checks readiness rather than merely
+// process liveness so an image orchestrator does not route traffic to a
+// gateway whose storage or lifecycle is unavailable.
+func runHealthcheck(args []string) error {
+	flags := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	address := os.Getenv("GATEWAY_HEALTHCHECK_ADDRESS")
+	if address == "" {
+		address = defaultHealthcheckAddress
+	}
+	flags.StringVar(&address, "address", address, "gateway readiness URL or host:port")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("healthcheck does not accept positional arguments")
+	}
+	target, err := readinessURL(address)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return fmt.Errorf("create readiness request: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), healthcheckTimeout)
+	defer cancel()
+	request = request.WithContext(ctx)
+	response, err := (&http.Client{Timeout: healthcheckTimeout}).Do(request)
+	if err != nil {
+		return fmt.Errorf("readiness request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("readiness returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func readinessURL(address string) (string, error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return "", errors.New("healthcheck address is required")
+	}
+	if !strings.Contains(address, "://") {
+		if strings.HasPrefix(address, ":") {
+			address = "127.0.0.1" + address
+		}
+		return "http://" + address + "/ready", nil
+	}
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", fmt.Errorf("healthcheck address must be an HTTP URL or host:port")
+	}
+	parsed.Path = "/ready"
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func cleanupStartup(_ *storage.DB, usage *httpserver.UsageObservationWorker, token *storage.UsageAggregateAccumulator, budget *storage.BudgetAccumulator, completion *httpserver.CompletionLogger, history *httpserver.HistoryPersistenceWorker) {

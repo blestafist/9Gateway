@@ -151,6 +151,14 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestConfigApplyDefaultsSetsContainerSQLitePath(t *testing.T) {
+	config := Config{}
+	config.ApplyDefaults()
+	if config.SQLitePath != DefaultSQLitePath {
+		t.Fatalf("SQLitePath = %q, want %q", config.SQLitePath, DefaultSQLitePath)
+	}
+}
+
 func TestTokenizerConfigDefaultsAndValidation(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
 	config := minimalConfig(databasePath)

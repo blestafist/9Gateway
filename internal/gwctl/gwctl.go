@@ -21,8 +21,10 @@ import (
 	"time"
 )
 
-// Version is the version reported by the standalone gwctl binary.
-const Version = "0.1.0"
+// Version is the version reported by the standalone gwctl binary. It is a
+// variable so release builds can replace it with the Docker VERSION build
+// argument using Go's -ldflags -X option.
+var Version = "0.1.0"
 
 const (
 	defaultGatewayURL     = "http://localhost:8080"

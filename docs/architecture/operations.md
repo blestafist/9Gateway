@@ -44,7 +44,26 @@ exists; avoid duplicating business logic through direct SQLite access.
 ## Deployment
 
 Ship one small Go binary/container, one YAML config, and one SQLite database.
-Use a multi-stage image, non-root user, persistent `/data`, `/health` healthcheck,
+Use a multi-stage image, non-root user, persistent `/data`, `/ready` healthcheck,
 and correct SIGTERM handling. No mandatory Redis, PostgreSQL, or companion
 service. Web UI begins only after transport, policy, accounting, and persistence
 are stable.
+
+The repository `Dockerfile` builds static `gateway` and `gwctl` binaries in a
+multi-stage image based on `gcr.io/distroless/static-debian12:nonroot`. The
+runtime user is UID 65532; mount a configuration file at
+`/etc/gateway/config.yaml` and persist `/data` (the default database is
+`/data/gateway.db`). Override the configuration location with the existing
+`--config` argument. For a release build, set `VERSION`, `COMMIT_SHA`, and
+`BUILD_DATE`; `VERSION` is reported by `gwctl version` and all three are OCI
+image labels. BuildKit supplies `TARGETOS`/`TARGETARCH`, for example:
+
+```text
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg VERSION=1.2.3 --build-arg COMMIT_SHA=$(git rev-parse HEAD) \
+  --build-arg BUILD_DATE=2026-01-01T00:00:00Z .
+```
+
+The image healthcheck executes `/gateway healthcheck`, which performs a local
+GET of `/ready`; `GATEWAY_HEALTHCHECK_ADDRESS` or
+`/gateway healthcheck --address ...` can point it at a non-default listener.
