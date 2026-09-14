@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -164,6 +165,74 @@ func TestMetricsParserSecretFreeAndConcurrentScrape(t *testing.T) {
 	}
 	if !strings.Contains(text, `gateway_telemetry_jobs_total{result="dropped"} 1`) {
 		t.Fatalf("dropped metric missing: %s", text)
+	}
+}
+
+func TestHistogramConcurrentScrapeBucketsShareCountSnapshot(t *testing.T) {
+	hist := &metricHistogram{}
+	const observers = 8
+	const observations = 500
+	var wait sync.WaitGroup
+	wait.Add(observers)
+	for i := 0; i < observers; i++ {
+		go func() {
+			defer wait.Done()
+			for j := 0; j < observations; j++ {
+				hist.observe(float64(j%20) / 100)
+			}
+		}()
+	}
+
+	// Scrapes deliberately overlap bucket publication. Every exposition must
+	// remain a valid cumulative histogram even when observations are in flight.
+	for i := 0; i < observers*observations; i++ {
+		var builder strings.Builder
+		writeHistogramSamples(&builder, "test_histogram", hist, "")
+		var previous uint64
+		var count, inf uint64
+		buckets := make([]uint64, 0, len(metricBuckets))
+		for _, line := range strings.Split(builder.String(), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) != 2 {
+				continue
+			}
+			switch {
+			case strings.HasSuffix(fields[0], `_bucket{le="+Inf"}`):
+				value, err := strconv.ParseUint(fields[1], 10, 64)
+				if err != nil {
+					t.Fatalf("parse +Inf sample %q: %v", line, err)
+				}
+				inf = value
+			case strings.HasSuffix(fields[0], `_count{}`):
+				value, err := strconv.ParseUint(fields[1], 10, 64)
+				if err != nil {
+					t.Fatalf("parse count sample %q: %v", line, err)
+				}
+				count = value
+			case strings.Contains(fields[0], `_bucket{le="`):
+				value, err := strconv.ParseUint(fields[1], 10, 64)
+				if err != nil {
+					t.Fatalf("parse bucket sample %q: %v", line, err)
+				}
+				if value < previous {
+					t.Fatalf("non-cumulative buckets: %s", builder.String())
+				}
+				buckets = append(buckets, value)
+				previous = value
+			}
+		}
+		for _, value := range buckets {
+			if value > count {
+				t.Fatalf("bucket exceeded count: %s", builder.String())
+			}
+		}
+		if inf != count {
+			t.Fatalf("+Inf %d differs from count %d: %s", inf, count, builder.String())
+		}
+	}
+	wait.Wait()
+	if got, want := hist.count.Load(), uint64(observers*observations); got != want {
+		t.Fatalf("count = %d, want %d", got, want)
 	}
 }
 

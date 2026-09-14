@@ -51,12 +51,14 @@ func (hist *metricHistogram) observe(value float64) {
 	if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
 		return
 	}
+	// Publish count before buckets. A scrape that sees a bucket increment then
+	// also sees this observation in the count snapshot below.
+	hist.count.Add(1)
 	for index, bucket := range metricBuckets {
 		if value <= bucket {
 			hist.buckets[index].Add(1)
 		}
 	}
-	hist.count.Add(1)
 	for {
 		old := hist.sum.Load()
 		updated := math.Float64bits(math.Float64frombits(old) + value)
@@ -454,16 +456,25 @@ func writeHistogramSamples(builder *strings.Builder, name string, hist *metricHi
 	}
 	// Writers update each bucket atomically in sequence. A scrape may observe
 	// that sequence between bucket writes, so clamp the read-side snapshot to a
-	// cumulative histogram before exposition. This preserves Prometheus's
-	// monotonic bucket contract without putting a lock on the completion path.
+	// cumulative histogram before exposition. Count is published before bucket
+	// updates and is loaded after all finite buckets here. Reuse this one count
+	// snapshot for +Inf and _count, and cap each finite bucket against it.
 	var cumulative uint64
+	var buckets [len(metricBuckets)]uint64
+	for i := range metricBuckets {
+		buckets[i] = hist.buckets[i].Load()
+	}
+	count := hist.count.Load()
 	for i, bucket := range metricBuckets {
-		if value := hist.buckets[i].Load(); value > cumulative {
+		if value := buckets[i]; value > cumulative {
 			cumulative = value
+		}
+		if cumulative > count {
+			cumulative = count
 		}
 		fmt.Fprintf(builder, "%s_bucket{%s%sle=\"%s\"} %d\n", name, labels, separator, strconv.FormatFloat(bucket, 'g', -1, 64), cumulative)
 	}
-	fmt.Fprintf(builder, "%s_bucket{%s%sle=\"+Inf\"} %d\n%s_count{%s} %d\n%s_sum{%s} %s\n", name, labels, separator, hist.count.Load(), name, labels, hist.count.Load(), name, labels, strconv.FormatFloat(math.Float64frombits(hist.sum.Load()), 'g', -1, 64))
+	fmt.Fprintf(builder, "%s_bucket{%s%sle=\"+Inf\"} %d\n%s_count{%s} %d\n%s_sum{%s} %s\n", name, labels, separator, count, name, labels, count, name, labels, strconv.FormatFloat(math.Float64frombits(hist.sum.Load()), 'g', -1, 64))
 }
 
 func writeMetricLabels(builder *strings.Builder, names, values []string) {
