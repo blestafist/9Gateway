@@ -98,6 +98,15 @@ func (accumulator *UsageAggregateAccumulator) Sink(delta limiter.CommittedTokenD
 	accumulator.mu.Unlock()
 }
 
+// Done returns a channel closed after the accumulator's worker exits. The
+// process owner uses it to keep SQLite open when shutdown times out.
+func (accumulator *UsageAggregateAccumulator) Done() <-chan struct{} {
+	if accumulator == nil {
+		return nil
+	}
+	return accumulator.done
+}
+
 func (accumulator *UsageAggregateAccumulator) run() {
 	defer close(accumulator.done)
 	for {

@@ -79,23 +79,13 @@ func (reader *Reader) Next() (SSEEvent, error) {
 	}
 
 	for {
-		part, readErr := reader.input.ReadSlice('\n')
-		reader.eventSize += len(part)
-		reader.offset += int64(len(part))
-		if reader.eventSize > reader.maxEventSize {
-			reader.terminalErr = ErrEventTooLarge
-			return SSEEvent{}, ErrEventTooLarge
-		}
-		reader.line = append(reader.line, part...)
-
-		if readErr == bufio.ErrBufferFull {
-			continue
-		}
+		line, terminated, readErr := reader.readLine()
 		if readErr != nil && readErr != io.EOF {
 			return SSEEvent{}, readErr
 		}
+		reader.line = append(reader.line[:0], line...)
 
-		if isBlankLine(reader.line) {
+		if terminated && len(reader.line) == 0 {
 			if reader.hasContent {
 				event := SSEEvent{Event: reader.eventName, Data: strings.Join(reader.dataLines, "\n")}
 				reader.lastEventEnd = reader.offset
@@ -103,7 +93,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 				return event, nil
 			}
 			reader.resetEvent()
-		} else if readErr == nil {
+		} else if terminated {
 			field, value := parseField(reader.line)
 			if isCommentLine(reader.line) {
 				reader.line = reader.line[:0]
@@ -119,7 +109,7 @@ func (reader *Reader) Next() (SSEEvent, error) {
 			}
 		}
 
-		if readErr == io.EOF {
+		if readErr == io.EOF && !terminated {
 			// A data-bearing event is only complete once its blank-line
 			// delimiter has arrived. Comments and unknown fields do not form
 			// events, so they may still be ignored when the input ends.
@@ -133,6 +123,45 @@ func (reader *Reader) Next() (SSEEvent, error) {
 		}
 
 		reader.line = reader.line[:0]
+	}
+}
+
+// readLine reads one SSE line. The event stream grammar accepts LF, CRLF, and
+// CR as line terminators. In particular, CR must be treated as a terminator
+// even when the following byte is not LF; Peek leaves that following byte for
+// the next line and also makes CRLF split across reader boundaries harmless.
+// It returns the line content without its terminator and counts every wire
+// byte toward the current event's limit.
+func (reader *Reader) readLine() ([]byte, bool, error) {
+	reader.line = reader.line[:0]
+	for {
+		character, err := reader.input.ReadByte()
+		if err != nil {
+			return reader.line, false, err
+		}
+		reader.eventSize++
+		reader.offset++
+		if reader.eventSize > reader.maxEventSize {
+			reader.terminalErr = ErrEventTooLarge
+			return nil, false, ErrEventTooLarge
+		}
+		switch character {
+		case '\n':
+			return reader.line, true, nil
+		case '\r':
+			if next, peekErr := reader.input.Peek(1); peekErr == nil && next[0] == '\n' {
+				_, _ = reader.input.ReadByte()
+				reader.eventSize++
+				reader.offset++
+				if reader.eventSize > reader.maxEventSize {
+					reader.terminalErr = ErrEventTooLarge
+					return nil, false, ErrEventTooLarge
+				}
+			}
+			return reader.line, true, nil
+		default:
+			reader.line = append(reader.line, character)
+		}
 	}
 }
 
@@ -178,5 +207,6 @@ func trimLineEnding(line []byte) []byte {
 }
 
 func isBlankLine(line []byte) bool {
-	return len(line) == 1 && line[0] == '\n' || len(line) == 2 && line[0] == '\r' && line[1] == '\n'
+	line = trimLineEnding(line)
+	return len(line) == 0
 }

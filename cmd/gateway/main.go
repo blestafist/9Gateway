@@ -440,6 +440,13 @@ func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storag
 	if history != nil {
 		dropped += history.Dropped()
 	}
+	// A timed-out owner may still be inside repository code. Closing SQLite in
+	// that case would race the owner, so leave the handle to the operating
+	// system as the process exits. This check deliberately covers every worker
+	// and aggregate saver that can issue database calls, not just history.
+	if !doneClosed(history.Done()) || !doneClosed(token.Done()) || !doneClosed(budget.Done()) {
+		return errors.Join(shutdownErr, errShutdownDeadline, drainErr)
+	}
 	slog.Default().Info("closing storage", "dropped", dropped)
 	if database != nil {
 		if err := database.Close(); err != nil {
@@ -455,6 +462,18 @@ func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storag
 	}
 	slog.Default().Info("shutdown complete", "dropped", dropped)
 	return errors.Join(shutdownErr, lifecycleErr)
+}
+
+func doneClosed(done <-chan struct{}) bool {
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 func keyRecordByID(records []storage.APIKeyRecord, id string) (storage.APIKeyRecord, bool) {

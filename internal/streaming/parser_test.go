@@ -119,6 +119,8 @@ func TestReaderParsesDataAndEventFields(t *testing.T) {
 		{name: "unknown field", input: "id: ignored\ndata: kept\nretry: 10\n\n", want: SSEEvent{Data: "kept"}, wantEvent: true},
 		{name: "event field only", input: "event: heartbeat\n\n", want: SSEEvent{}},
 		{name: "CRLF", input: "event: update\r\ndata: hello\r\n\r\n", want: SSEEvent{Event: "update", Data: "hello"}, wantEvent: true},
+		{name: "CR", input: "event: update\rdata: hello\r\r", want: SSEEvent{Event: "update", Data: "hello"}, wantEvent: true},
+		{name: "mixed line endings", input: "event: update\rdata: hello\ndata: second\r\n\r", want: SSEEvent{Event: "update", Data: "hello\nsecond"}, wantEvent: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reader, err := NewReader(strings.NewReader(test.input), 1024)
@@ -231,6 +233,16 @@ func TestReaderIgnoresInputReadBoundaries(t *testing.T) {
 			want:   []SSEEvent{{Data: "value"}},
 		},
 		{
+			name:   "split CR-only separator",
+			chunks: []string{"data: value\r", "\r", "data: next\r", "\r"},
+			want:   []SSEEvent{{Data: "value"}, {Data: "next"}},
+		},
+		{
+			name:   "split mixed terminators",
+			chunks: []string{"data: one\r", "\n\rdata: two\n", "\r\ndata: three\r", "\r"},
+			want:   []SSEEvent{{Data: "one"}, {Data: "two"}, {Data: "three"}},
+		},
+		{
 			name:   "split event separator",
 			chunks: []string{"data: one\n", "\n", "data: two\n\n"},
 			want:   []SSEEvent{{Data: "one"}, {Data: "two"}},
@@ -291,34 +303,41 @@ func TestReaderRejectsFramesOverConfiguredSize(t *testing.T) {
 }
 
 func TestReaderEnforcesFramedEventSizeBoundaries(t *testing.T) {
-	input := "data: x\n\n"
-	for _, test := range []struct {
-		name      string
-		maxSize   int
-		wantEvent SSEEvent
-		wantError error
+	for _, framing := range []struct {
+		name  string
+		input string
 	}{
-		{name: "below limit", maxSize: len(input) - 1, wantError: ErrEventTooLarge},
-		{name: "exactly at limit", maxSize: len(input), wantEvent: SSEEvent{Data: "x"}},
-		{name: "above limit", maxSize: len(input) + 1, wantEvent: SSEEvent{Data: "x"}},
+		{name: "LF", input: "data: x\n\n"},
+		{name: "CR", input: "data: x\r\r"},
+		{name: "CRLF", input: "data: x\r\n\r\n"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			reader, err := NewReader(strings.NewReader(input), test.maxSize)
-			if err != nil {
-				t.Fatalf("NewReader: %v", err)
-			}
-
-			got, err := reader.Next()
-			if err != test.wantError {
-				if test.wantError == nil {
-					t.Fatalf("Next error = %v, want no error", err)
+		for _, test := range []struct {
+			name      string
+			maxSize   int
+			wantEvent SSEEvent
+			wantError error
+		}{
+			{name: "below limit", maxSize: len(framing.input) - 1, wantError: ErrEventTooLarge},
+			{name: "exactly at limit", maxSize: len(framing.input), wantEvent: SSEEvent{Data: "x"}},
+			{name: "above limit", maxSize: len(framing.input) + 1, wantEvent: SSEEvent{Data: "x"}},
+		} {
+			t.Run(framing.name+"/"+test.name, func(t *testing.T) {
+				reader, err := NewReader(strings.NewReader(framing.input), test.maxSize)
+				if err != nil {
+					t.Fatalf("NewReader: %v", err)
 				}
-				t.Fatalf("Next error = %v, want %v", err, test.wantError)
-			}
-			if test.wantError == nil && got != test.wantEvent {
-				t.Fatalf("event = %#v, want %#v", got, test.wantEvent)
-			}
-		})
+				got, err := reader.Next()
+				if err != test.wantError {
+					if test.wantError == nil {
+						t.Fatalf("Next error = %v, want no error", err)
+					}
+					t.Fatalf("Next error = %v, want %v", err, test.wantError)
+				}
+				if test.wantError == nil && got != test.wantEvent {
+					t.Fatalf("event = %#v, want %#v", got, test.wantEvent)
+				}
+			})
+		}
 	}
 }
 

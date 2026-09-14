@@ -699,6 +699,14 @@ func (worker *UsageObservationWorker) Pending() int {
 	return len(worker.queue)
 }
 
+// Done returns the worker's terminal notification channel.
+func (worker *UsageObservationWorker) Done() <-chan struct{} {
+	if worker == nil {
+		return nil
+	}
+	return worker.done
+}
+
 // AcceptingJobs reports the worker's lifecycle admission state without
 // probing or mutating its queue. A nil worker is not accepting jobs; callers
 // that treat telemetry as optional should handle nil before calling this API.

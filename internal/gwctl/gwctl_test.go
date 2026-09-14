@@ -45,6 +45,27 @@ func TestRunVersionHelpAndUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRequestsUsageErrorsDoNotReflectArguments(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown subcommand", args: []string{"requests", "invalid-subcommand-canary"}},
+		{name: "unknown get option", args: []string{"requests", "get", "0123456789abcdef0123456789abcdef", "--invalid-option-canary"}},
+		{name: "unknown list option", args: []string{"requests", "list", "--invalid-list-option-canary"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if status := Run(context.Background(), test.args, &stdout, &stderr); status != ExitUsage {
+				t.Fatalf("status = %d, want usage (stdout %q, stderr %q)", status, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stderr.String(), "canary") || strings.Contains(stderr.String(), test.args[len(test.args)-1]) {
+				t.Fatalf("usage error reflected raw argument: %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunPingAgainstRealGateway(t *testing.T) {
 	database, err := storage.Open(context.Background(), ":memory:")
 	if err != nil {

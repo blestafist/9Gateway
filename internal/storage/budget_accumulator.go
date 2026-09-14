@@ -84,6 +84,15 @@ func (accumulator *BudgetAccumulator) Sink(delta limiter.CommittedBudgetDelta) {
 	}
 }
 
+// Done returns a channel closed after the accumulator's worker exits. The
+// process owner uses it to keep SQLite open when shutdown times out.
+func (accumulator *BudgetAccumulator) Done() <-chan struct{} {
+	if accumulator == nil {
+		return nil
+	}
+	return accumulator.done
+}
+
 func (accumulator *BudgetAccumulator) run() {
 	defer close(accumulator.done)
 	for {

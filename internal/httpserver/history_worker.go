@@ -361,6 +361,16 @@ func (worker *HistoryPersistenceWorker) Pending() int {
 	return len(worker.queue)
 }
 
+// Done returns a channel that is closed only after the history worker has
+// stopped issuing repository calls. It is a storage ownership barrier for the
+// process lifecycle owner; callers must not close SQLite before it is closed.
+func (worker *HistoryPersistenceWorker) Done() <-chan struct{} {
+	if worker == nil {
+		return nil
+	}
+	return worker.done
+}
+
 // Shutdown stops admission, drains queued jobs while the caller's context
 // permits, and drops any remainder at deadline. It never closes SQLite and
 // returns after the worker exits when possible. On deadline it cancels the

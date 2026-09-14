@@ -60,7 +60,7 @@ func runRequests(ctx context.Context, args []string, options options, stdout, st
 		}
 		return ExitSuccess
 	default:
-		return usageFailure(stderr, fmt.Errorf("unknown requests subcommand %q", args[0]))
+		return usageFailure(stderr, errors.New("unknown requests subcommand"))
 	}
 }
 
@@ -96,7 +96,7 @@ func parseRequestListOptions(args []string) (requestListOptions, error) {
 				return parsed, err
 			}
 		default:
-			return parsed, fmt.Errorf("unexpected argument for requests list: %s", arg)
+			return parsed, errors.New("unexpected argument for requests list")
 		}
 	}
 	if parsed.after != "" && parsed.before != "" {
@@ -191,7 +191,7 @@ func parseRequestGetOptions(args []string) (string, requestGetOptions, error) {
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
-			return "", parsed, fmt.Errorf("unknown option for requests get: %s", arg)
+			return "", parsed, errors.New("unknown option for requests get")
 		}
 		if id != "" {
 			return "", parsed, errors.New("requests get requires exactly one request ID")

@@ -538,6 +538,21 @@ func TestSecretRedaction(t *testing.T) {
 			_ = gwctl.Run(context.Background(), []string{"--gateway-url", "http://127.0.0.1:1", "--admin-credential", canaries.admin, "keys", "list", "--unknown-option"}, &stdout, &stderr)
 			return auditSurface{name: "gwctl unknown option argument", body: stderr.Bytes()}
 		}},
+		{"gwctl requests unknown subcommand", func() auditSurface {
+			var stdout, stderr bytes.Buffer
+			_ = gwctl.Run(context.Background(), []string{"--admin-credential", canaries.admin, "requests", "subcommand-" + canaries.body}, &stdout, &stderr)
+			return auditSurface{name: "gwctl requests unknown subcommand", body: stderr.Bytes()}
+		}},
+		{"gwctl requests get unknown option", func() auditSurface {
+			var stdout, stderr bytes.Buffer
+			_ = gwctl.Run(context.Background(), []string{"--admin-credential", canaries.admin, "requests", "get", requestID1, "--option-" + canaries.body}, &stdout, &stderr)
+			return auditSurface{name: "gwctl requests get unknown option", body: stderr.Bytes()}
+		}},
+		{"gwctl requests list unknown option", func() auditSurface {
+			var stdout, stderr bytes.Buffer
+			_ = gwctl.Run(context.Background(), []string{"--admin-credential", canaries.admin, "requests", "list", "--option-" + canaries.body}, &stdout, &stderr)
+			return auditSurface{name: "gwctl requests list unknown option", body: stderr.Bytes()}
+		}},
 		{"gwctl canceled context", func() auditSurface {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
