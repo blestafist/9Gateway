@@ -24,6 +24,7 @@ import (
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/observability"
 	"github.com/pestit/9gateway/internal/protocol/openai"
+	"github.com/pestit/9gateway/internal/storage"
 )
 
 const requestIDHeader = "X-Gateway-Request-ID"
@@ -210,7 +211,19 @@ func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	}
 	admin := &adminHandler{credential: adminCredential, service: service}
 	router := routeWithAdmin(proxy, admin, service.auth)
-	return newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router), nil
+	handler := newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router)
+	// The concrete storage repository supplies the database used by readiness.
+	// Narrow test repositories and the legacy constructor remain valid; they
+	// simply have no deep storage check available until an embedder adds one via
+	// WithReadiness.
+	if provider, ok := repository.(interface{ ReadinessDatabase() *storage.DB }); ok {
+		handler = WithReadiness(handler, NewReadiness(ReadinessConfig{
+			Database:               provider.ReadinessDatabase(),
+			UpstreamBaseURL:        upstreamBaseURL,
+			UsageObservationWorker: usageWorker,
+		}))
+	}
+	return handler, nil
 }
 
 // NewHandlerWithAuthenticator builds a handler whose public /v1/* routes
@@ -276,7 +289,10 @@ func newHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWor
 	proxy := newProxyHandlerWithLimitersAndTokenLimiter(upstreamClient, upstreamBaseURL, upstreamAPIKey, requestLimiter, concurrencyLimiter, tokenLimiter, tokenConfig)
 	proxy.usageObservationWorker = usageWorker
 	router := routeWithAuthenticator(proxy, nil, authenticator)
-	return newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router)
+	return WithReadiness(newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, router), NewReadiness(ReadinessConfig{
+		UpstreamBaseURL:        upstreamBaseURL,
+		UsageObservationWorker: usageWorker,
+	}))
 }
 
 // NewHandlerWithCompletionLogger builds a handler using the caller-owned
@@ -284,7 +300,7 @@ func newHandlerWithAuthenticatorAndLimitersAndTokenLimiterAndUsageObservationWor
 func NewHandlerWithCompletionLogger(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, completionLogger *CompletionLogger, authenticators ...*auth.Authenticator) http.Handler {
 	proxy := newProxyHandlerWithLimiters(upstreamClient, upstreamBaseURL, upstreamAPIKey, limiter.NewRequestLimiter(nil), limiter.NewConcurrencyLimiter())
 	router := routeWithAdmin(proxy, nil, authenticators...)
-	return newHandlerWithCompletionLogger(completionLogger, router)
+	return WithReadiness(newHandlerWithCompletionLogger(completionLogger, router), NewReadiness(ReadinessConfig{UpstreamBaseURL: upstreamBaseURL}))
 }
 
 func route(proxy http.Handler) http.Handler {

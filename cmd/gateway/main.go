@@ -215,6 +215,7 @@ func run() error {
 		shutdownWorker("completion logger", completionLogger.Shutdown)
 		shutdownWorker("history persistence", historyWorker.Shutdown)
 	}()
+	readinessState := &httpserver.ReadinessState{}
 
 	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorkerAndHistory(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, keyRepository, nil, nil, completionLogger, tokenLimiter, httpserver.TokenAdmissionConfig{
 		MaxInspectedRequestBytes:   cfg.Tokenizer.MaxInspectedRequestBytes,
@@ -227,6 +228,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	gatewayHandler = httpserver.WithReadiness(gatewayHandler, httpserver.NewReadiness(httpserver.ReadinessConfig{
+		Database:               database,
+		UpstreamBaseURL:        cfg.UpstreamBaseURL,
+		UsageObservationWorker: usageObservationWorker,
+		State:                  readinessState,
+	}))
 	var activeRequests sync.WaitGroup
 	// Keep the counter non-zero until shutdown has stopped accepting requests;
 	// this makes a handler starting concurrently with Shutdown safe to Add.
@@ -250,6 +257,9 @@ func run() error {
 			log.Printf("HTTP server: %v", err)
 		}
 	case <-shutdownContext.Done():
+		// Flip readiness before asking net/http to stop accepting connections so
+		// probes fail while existing handlers are still being drained.
+		readinessState.MarkDraining()
 		shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
 		shutdownErr := server.Shutdown(shutdown)
 		cancel()

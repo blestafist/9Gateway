@@ -634,6 +634,18 @@ func (worker *UsageObservationWorker) Stats() UsageObservationStats {
 func (worker *UsageObservationWorker) Dropped() uint64 { return worker.Stats().Dropped }
 func (worker *UsageObservationWorker) Failed() uint64  { return worker.Stats().Failed }
 
+// AcceptingJobs reports the worker's lifecycle admission state without
+// probing or mutating its queue. A nil worker is not accepting jobs; callers
+// that treat telemetry as optional should handle nil before calling this API.
+func (worker *UsageObservationWorker) AcceptingJobs() bool {
+	if worker == nil {
+		return false
+	}
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.accepting
+}
+
 // Shutdown stops accepting work, discards queued jobs safely, and waits for
 // the single worker subject to ctx. Repeated calls are safe. A nil context is
 // treated as context.Background().

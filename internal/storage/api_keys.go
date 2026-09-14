@@ -178,6 +178,16 @@ type APIKeyRepository struct {
 	tokenMode  auth.TokenMode
 }
 
+// ReadinessDatabase exposes the process-owned database to the HTTP readiness
+// wiring without making SQL part of the API-key repository contract.
+func (repository *APIKeyRepository) ReadinessDatabase() *DB {
+	if repository == nil {
+		return nil
+	}
+	database, _ := repository.database.(*DB)
+	return database
+}
+
 // ListRequests shares the API-key repository's database and cursor signer with
 // the admin read handler. It still uses the request-history repository's
 // metadata-only projection and never selects request bodies.
