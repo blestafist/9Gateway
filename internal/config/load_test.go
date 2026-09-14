@@ -36,6 +36,7 @@ func TestLoadValidYAML(t *testing.T) {
 			RequestRetentionSeconds: DefaultRequestRetentionSeconds,
 			BodyRetentionSeconds:    DefaultBodyRetentionSeconds,
 		},
+		ShutdownTimeoutSeconds: DefaultShutdownTimeoutSeconds,
 	}
 	if got != want {
 		t.Fatalf("Load() = %+v, want %+v", got, want)

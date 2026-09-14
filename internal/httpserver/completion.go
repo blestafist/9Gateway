@@ -269,6 +269,14 @@ func (completionLogger *CompletionLogger) Dropped() uint64 {
 	return completionLogger.dropped.Load()
 }
 
+// Pending reports the bounded completion queue depth for shutdown diagnostics.
+func (completionLogger *CompletionLogger) Pending() int {
+	if completionLogger == nil {
+		return 0
+	}
+	return len(completionLogger.queue)
+}
+
 // Shutdown stops accepting records and waits for the worker to drain the
 // bounded queue, subject to the supplied deadline. A blocked sink can make
 // the worker outlive this bounded wait; it cannot delay any HTTP response.

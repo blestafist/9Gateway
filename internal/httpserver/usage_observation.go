@@ -194,6 +194,7 @@ type UsageObservationWorker struct {
 	accepting bool
 	active    *completionOwnership
 	stopOnce  sync.Once
+	drain     atomic.Bool
 	phase     atomic.Uint32
 
 	submitted      atomic.Uint64
@@ -284,6 +285,11 @@ func (worker *UsageObservationWorker) run() {
 		select {
 		case <-worker.stop:
 			worker.mu.Lock()
+			if worker.drain.Load() {
+				worker.mu.Unlock()
+				worker.drainQueued()
+				return
+			}
 			worker.discardQueuedLocked()
 			worker.mu.Unlock()
 			return
@@ -295,6 +301,11 @@ func (worker *UsageObservationWorker) run() {
 		for {
 			worker.mu.Lock()
 			if !worker.accepting {
+				if worker.drain.Load() {
+					worker.mu.Unlock()
+					worker.drainQueued()
+					return
+				}
 				worker.discardQueuedLocked()
 				worker.mu.Unlock()
 				return
@@ -679,6 +690,15 @@ func (worker *UsageObservationWorker) Stats() UsageObservationStats {
 func (worker *UsageObservationWorker) Dropped() uint64 { return worker.Stats().Dropped }
 func (worker *UsageObservationWorker) Failed() uint64  { return worker.Stats().Failed }
 
+// Pending reports the number of observations waiting for the worker. It is a
+// bounded diagnostic only and does not grant admission.
+func (worker *UsageObservationWorker) Pending() int {
+	if worker == nil {
+		return 0
+	}
+	return len(worker.queue)
+}
+
 // AcceptingJobs reports the worker's lifecycle admission state without
 // probing or mutating its queue. A nil worker is not accepting jobs; callers
 // that treat telemetry as optional should handle nil before calling this API.
@@ -723,6 +743,49 @@ func (worker *UsageObservationWorker) Shutdown(ctx context.Context) error {
 		worker.phase.CompareAndSwap(usageObservationIdle, usageObservationTerminal)
 		worker.phase.CompareAndSwap(usageObservationAdjusting, usageObservationTerminal)
 		return ctx.Err()
+	}
+}
+
+// Drain stops admission and processes all accepted observations before
+// returning. Unlike Shutdown, this is the process lifecycle operation for the
+// critical accounting worker: queued observations are not silently discarded.
+// Any queue remainder at the deadline is invalidated and counted as dropped.
+func (worker *UsageObservationWorker) Drain(ctx context.Context) error {
+	if worker == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	worker.drain.Store(true)
+	worker.mu.Lock()
+	worker.accepting = false
+	worker.mu.Unlock()
+	worker.stopOnce.Do(func() { close(worker.stop) })
+	select {
+	case <-worker.done:
+		return nil
+	case <-ctx.Done():
+		worker.phase.CompareAndSwap(usageObservationIdle, usageObservationTerminal)
+		worker.phase.CompareAndSwap(usageObservationAdjusting, usageObservationTerminal)
+		worker.mu.Lock()
+		worker.discardQueuedLocked()
+		worker.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (worker *UsageObservationWorker) drainQueued() {
+	for {
+		select {
+		case job := <-worker.queue:
+			worker.releaseSlot()
+			worker.process(job)
+		case <-worker.done:
+			return
+		default:
+			return
+		}
 	}
 }
 

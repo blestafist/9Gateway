@@ -47,6 +47,8 @@ const (
 	DefaultBodyRetentionSeconds    int64 = 7 * 24 * 60 * 60
 	MaxRequestRetentionSeconds     int64 = 365 * 24 * 60 * 60
 	MaxBodyRetentionSeconds        int64 = 365 * 24 * 60 * 60
+	DefaultShutdownTimeoutSeconds  int64 = 30
+	MaxShutdownTimeoutSeconds      int64 = 10 * 60
 )
 
 // Retention execution is deliberately not deployment configurable. A pass is
@@ -172,15 +174,16 @@ func (c TokenizerConfig) validate() error {
 
 // Config contains the settings required to connect the gateway to 9router.
 type Config struct {
-	ListenAddr      string              `yaml:"listen_addr"`
-	UpstreamBaseURL string              `yaml:"upstream_base_url"`
-	UpstreamAPIKey  string              `yaml:"upstream_api_key"`
-	SQLitePath      string              `yaml:"sqlite_path"`
-	AuthPepper      string              `yaml:"auth_pepper"`
-	AdminCredential string              `yaml:"admin_credential"`
-	Tokenizer       TokenizerConfig     `yaml:"tokenizer"`
-	Observability   ObservabilityConfig `yaml:"observability"`
-	Pricing         PricingConfig       `yaml:"pricing"`
+	ListenAddr             string              `yaml:"listen_addr"`
+	UpstreamBaseURL        string              `yaml:"upstream_base_url"`
+	UpstreamAPIKey         string              `yaml:"upstream_api_key"`
+	SQLitePath             string              `yaml:"sqlite_path"`
+	AuthPepper             string              `yaml:"auth_pepper"`
+	AdminCredential        string              `yaml:"admin_credential"`
+	Tokenizer              TokenizerConfig     `yaml:"tokenizer"`
+	Observability          ObservabilityConfig `yaml:"observability"`
+	Pricing                PricingConfig       `yaml:"pricing"`
+	ShutdownTimeoutSeconds int64               `yaml:"shutdown_timeout_seconds"`
 }
 
 // ApplyDefaults fills omitted optional deployment settings. It is called by
@@ -189,6 +192,9 @@ type Config struct {
 func (c *Config) ApplyDefaults() {
 	c.Tokenizer.applyDefaults()
 	c.Observability.applyDefaults()
+	if c.ShutdownTimeoutSeconds == 0 {
+		c.ShutdownTimeoutSeconds = DefaultShutdownTimeoutSeconds
+	}
 }
 
 // Validate checks the configuration needed before the gateway can start.
@@ -205,6 +211,12 @@ func (c Config) Validate() error {
 	}
 	if err := c.Pricing.Validate(); err != nil {
 		return fmt.Errorf("pricing: %w", err)
+	}
+	if c.ShutdownTimeoutSeconds < 0 {
+		return fmt.Errorf("shutdown timeout seconds must not be negative")
+	}
+	if c.ShutdownTimeoutSeconds > MaxShutdownTimeoutSeconds {
+		return fmt.Errorf("shutdown timeout seconds exceeds maximum %d", MaxShutdownTimeoutSeconds)
 	}
 	if strings.TrimSpace(c.ListenAddr) == "" {
 		return fmt.Errorf("listen address is required")

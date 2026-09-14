@@ -196,25 +196,6 @@ func run() error {
 		RequestRetention: time.Duration(cfg.Observability.RequestRetentionSeconds) * time.Second,
 		BodyRetention:    time.Duration(cfg.Observability.BodyRetentionSeconds) * time.Second,
 	})
-	defer func() {
-		// Accounting observation may own deferred token/budget adjustments, so it
-		// must finish before the critical accumulator sinks are stopped. Only then
-		// do detailed log/history submissions stop and drain. This cleanup defer
-		// runs before the database.Close defer above; history Shutdown is also a
-		// completion barrier and returns only after its goroutine has exited.
-		shutdownWorker := func(name string, shutdown func(context.Context) error) {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := shutdown(ctx); err != nil {
-				log.Printf("%s shutdown: %v", name, err)
-			}
-		}
-		shutdownWorker("usage observation worker", usageObservationWorker.Shutdown)
-		shutdownWorker("budget aggregate", budgetAccumulator.Shutdown)
-		shutdownWorker("token aggregate", aggregateAccumulator.Shutdown)
-		shutdownWorker("completion logger", completionLogger.Shutdown)
-		shutdownWorker("history persistence", historyWorker.Shutdown)
-	}()
 	readinessState := &httpserver.ReadinessState{}
 
 	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorkerAndHistory(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, keyRepository, nil, nil, completionLogger, tokenLimiter, httpserver.TokenAdmissionConfig{
@@ -226,6 +207,7 @@ func run() error {
 		BudgetLimiter:              budgetLimiter,
 	}, usageObservationWorker, historyWorker, auth.TokenMode(cfg.Tokenizer.Mode))
 	if err != nil {
+		cleanupStartup(database, usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
 		return err
 	}
 	gatewayHandler = httpserver.WithReadiness(gatewayHandler, httpserver.NewReadiness(httpserver.ReadinessConfig{
@@ -255,32 +237,101 @@ func run() error {
 	case err := <-serveErr:
 		if err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP server: %v", err)
+			cleanupStartup(nil, usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
+			return err
 		}
 	case <-shutdownContext.Done():
-		// Flip readiness before asking net/http to stop accepting connections so
-		// probes fail while existing handlers are still being drained.
-		readinessState.MarkDraining()
-		shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
-		shutdownErr := server.Shutdown(shutdown)
-		cancel()
+		shutdownErr := shutdownGateway(cfg.ShutdownTimeoutSeconds, server, database, readinessState, &activeRequests,
+			usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
 		if shutdownErr != nil {
-			log.Printf("HTTP server shutdown: %v", shutdownErr)
-			// Shutdown stops accepting work but may leave handlers running when
-			// its deadline expires. Force-close those handlers before allowing
-			// owned resources, including the completion logger, to exit.
-			if err := server.Close(); err != nil {
-				log.Printf("HTTP server close: %v", err)
-			}
+			log.Printf("gateway shutdown error: %v", shutdownErr)
 		}
-		activeRequests.Done()
-		// The force-close above cancels handlers that outlive graceful shutdown;
-		// await their completion before the deferred logger and database cleanup.
-		activeRequests.Wait()
 		if err := <-serveErr; err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP server: %v", err)
 		}
 	}
 	return nil
+}
+
+func cleanupStartup(_ *storage.DB, usage *httpserver.UsageObservationWorker, token *storage.UsageAggregateAccumulator, budget *storage.BudgetAccumulator, completion *httpserver.CompletionLogger, history *httpserver.HistoryPersistenceWorker) {
+	ctx := context.Background()
+	_ = usage.Shutdown(ctx)
+	_ = token.Shutdown(ctx)
+	_ = budget.Shutdown(ctx)
+	_ = completion.Shutdown(ctx)
+	_ = history.Shutdown(ctx)
+}
+
+// shutdownGateway coordinates the process-owned dependencies under one
+// absolute deadline. Readiness is flipped before net/http stops accepting.
+func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storage.DB, readiness *httpserver.ReadinessState, active *sync.WaitGroup,
+	usage *httpserver.UsageObservationWorker, token *storage.UsageAggregateAccumulator, budget *storage.BudgetAccumulator,
+	completion *httpserver.CompletionLogger, history *httpserver.HistoryPersistenceWorker) error {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = config.DefaultShutdownTimeoutSeconds
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	if readiness != nil {
+		readiness.MarkDraining()
+	}
+	slog.Default().Info("shutting down HTTP server")
+	shutdownErr := server.Shutdown(ctx)
+	if shutdownErr != nil {
+		if err := server.Close(); err != nil {
+			log.Printf("HTTP server close: %v", err)
+		}
+		log.Printf("HTTP server shutdown: %v", shutdownErr)
+	}
+	if active != nil {
+		active.Done()
+		active.Wait()
+	}
+	if err := usage.Drain(ctx); err != nil {
+		log.Printf("usage observation shutdown: %v", err)
+	}
+	if err := token.Shutdown(ctx); err != nil {
+		log.Printf("token aggregate shutdown: %v", err)
+	}
+	if err := budget.Shutdown(ctx); err != nil {
+		log.Printf("budget aggregate shutdown: %v", err)
+	}
+	pending := 0
+	if completion != nil {
+		pending += completion.Pending()
+	}
+	if history != nil {
+		pending += history.Pending()
+	}
+	slog.Default().Info("draining telemetry", "pending", pending)
+	var drainErr error
+	if completion != nil {
+		drainErr = errors.Join(drainErr, completion.Shutdown(ctx))
+	}
+	if history != nil {
+		drainErr = errors.Join(drainErr, history.Shutdown(ctx))
+	}
+	dropped := uint64(0)
+	if usage != nil {
+		dropped += usage.Dropped()
+	}
+	if completion != nil {
+		dropped += completion.Dropped()
+	}
+	if history != nil {
+		dropped += history.Dropped()
+	}
+	slog.Default().Info("closing storage", "dropped", dropped)
+	if database != nil {
+		if err := database.Close(); err != nil {
+			drainErr = errors.Join(drainErr, err)
+		}
+	}
+	if drainErr != nil {
+		log.Printf("telemetry shutdown: %v", drainErr)
+	}
+	slog.Default().Info("shutdown complete", "dropped", dropped)
+	return errors.Join(shutdownErr, drainErr)
 }
 
 func keyRecordByID(records []storage.APIKeyRecord, id string) (storage.APIKeyRecord, bool) {

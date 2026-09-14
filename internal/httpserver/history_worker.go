@@ -353,6 +353,14 @@ func (worker *HistoryPersistenceWorker) Dropped() uint64 {
 	return worker.Stats().Dropped
 }
 
+// Pending reports the bounded history queue depth for shutdown diagnostics.
+func (worker *HistoryPersistenceWorker) Pending() int {
+	if worker == nil {
+		return 0
+	}
+	return len(worker.queue)
+}
+
 // Shutdown stops admission, drains queued jobs while the caller's context
 // permits, and drops any remainder at deadline. It never closes SQLite and
 // returns only after the worker goroutine has exited. On deadline it cancels
