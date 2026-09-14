@@ -3,8 +3,10 @@ package gwctl
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -154,4 +156,127 @@ func TestValidateBaseURLAndJoinURLPreserveBasePath(t *testing.T) {
 
 func newAdminTestGateway(database *storage.DB, credential string) (http.Handler, error) {
 	return httpserver.NewHandlerWithAdmin(transport.NewClient(), "http://127.0.0.1:1", "upstream", credential, "pepper", storage.NewAPIKeyRepository(database))
+}
+
+func TestRunKeysListAggregatesPagesAndPreservesJSON(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests = append(requests, request.URL.RawQuery)
+		if request.Header.Get("Authorization") != "Bearer admin" {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		page := 0
+		if request.URL.Query().Get("cursor") == "cursor-1" {
+			page = 1
+		}
+		if request.URL.Query().Get("cursor") == "cursor-2" {
+			page = 2
+		}
+		items := make([]map[string]any, 0, 50)
+		for index := 0; index < 50; index++ {
+			id := "key-" + strconv.Itoa(page*50+index)
+			items = append(items, map[string]any{"id": id, "name": "name", "display_prefix": "gw", "enabled": true, "created_at": "2024-01-02T03:04:05Z", "custom": nil})
+		}
+		body := map[string]any{"keys": items}
+		if page < 2 {
+			body["next_cursor"] = "cursor-" + strconv.Itoa(page+1)
+		}
+		_ = json.NewEncoder(response).Encode(body)
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	status := Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "admin", "keys", "list", "--json"}, &stdout, &stderr)
+	if status != ExitSuccess {
+		t.Fatalf("status = %d, stdout %q, stderr %q", status, stdout.String(), stderr.String())
+	}
+	var result struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("JSON output: %v (%q)", err, stdout.String())
+	}
+	if len(result.Keys) != 150 || len(requests) != 3 {
+		t.Fatalf("keys/requests = %d/%d, want 150/3 (%v)", len(result.Keys), len(requests), requests)
+	}
+	if requests[0] != "limit=50" || requests[1] != "cursor=cursor-1&limit=50" || requests[2] != "cursor=cursor-2&limit=50" {
+		t.Fatalf("queries = %v", requests)
+	}
+	if !strings.Contains(stderr.String(), "Fetching additional key pages") || !strings.Contains(stderr.String(), "Fetching key page 3") {
+		t.Fatalf("progress = %q", stderr.String())
+	}
+	if result.Keys[0]["custom"] != nil {
+		t.Fatalf("JSON field semantics were not retained: %#v", result.Keys[0])
+	}
+}
+
+func TestRunKeysListLimitAndEmptyHumanOutput(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		queries = append(queries, request.URL.RawQuery)
+		if request.URL.Query().Get("empty") == "1" {
+			_, _ = response.Write([]byte(`{"keys":[]}`))
+			return
+		}
+		_, _ = response.Write([]byte(`{"keys":[{"id":"short","name":"demo","display_prefix":"gw-","enabled":false,"created_at":"2024-01-02T03:04:05Z"}],"next_cursor":"ignored"}`))
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	status := Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "admin", "keys", "list", "--limit", "1"}, &stdout, &stderr)
+	if status != ExitSuccess || !strings.Contains(stdout.String(), "ID") || !strings.Contains(stdout.String(), "short") || stderr.Len() != 0 {
+		t.Fatalf("limit output = %d/%q/%q", status, stdout.String(), stderr.String())
+	}
+	if len(queries) != 1 || queries[0] != "limit=1" {
+		t.Fatalf("limit query = %v", queries)
+	}
+}
+
+func TestRunKeysGetHumanJSONAndErrors(t *testing.T) {
+	id := "key-safe_123"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/admin/v1/keys/" + id:
+			_, _ = response.Write([]byte(`{"id":"key-safe_123","name":"demo","display_prefix":"gw","enabled":true,"created_at":"2024-01-02T03:04:05Z","updated_at":"2024-01-03T03:04:05Z","expires_at":null,"policy":{"allowed_models":["gpt-*"],"denied_models":null,"request_windows":[{"amount":2,"duration":60}],"token_windows":null,"token_mode":"usage_only","max_concurrent_requests":3,"budget_limits":[{"period":"day","amount_micros":42}],"log_request_body":true,"log_response_body":false}}`))
+		case "/admin/v1/keys/missing":
+			response.WriteHeader(http.StatusNotFound)
+		case "/admin/v1/keys/auth":
+			response.WriteHeader(http.StatusUnauthorized)
+		default:
+			response.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	status := Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "admin", "keys", "get", id}, &stdout, &stderr)
+	if status != ExitSuccess || !strings.Contains(stdout.String(), "Request limits") || !strings.Contains(stdout.String(), "Allow models") || stderr.Len() != 0 {
+		t.Fatalf("human get = %d/%q/%q", status, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	status = Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "admin", "keys", "get", id, "--json"}, &stdout, &stderr)
+	if status != ExitSuccess {
+		t.Fatalf("JSON get status = %d (%q)", status, stderr.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil || raw["expires_at"] != nil {
+		t.Fatalf("JSON get = %v/%q", err, stdout.String())
+	}
+	for _, test := range []struct {
+		id, want string
+	}{
+		{id: "missing", want: "Key not found"},
+		{id: "auth", want: "Authentication failed"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		status = Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "admin", "keys", "get", test.id}, &stdout, &stderr)
+		if status != ExitAPI || !strings.Contains(stderr.String(), test.want) || stdout.Len() != 0 {
+			t.Fatalf("%s = %d/%q/%q", test.id, status, stdout.String(), stderr.String())
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if status = Run(context.Background(), []string{"--gateway-url", server.URL, "--admin-credential", "admin", "keys", "get", "bad/id"}, &stdout, &stderr); status != ExitUsage {
+		t.Fatalf("unsafe ID status = %d/%q", status, stderr.String())
+	}
 }
