@@ -162,7 +162,7 @@ type keyGetOptions struct {
 
 func runKeys(ctx context.Context, args []string, options options, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return usageFailure(stderr, errors.New("a keys subcommand is required (list or get)"))
+		return usageFailure(stderr, errors.New("a keys subcommand is required (create, list or get)"))
 	}
 	if _, err := validateBaseURL(options.gatewayURL); err != nil {
 		return usageFailure(stderr, err)
@@ -171,6 +171,16 @@ func runKeys(ctx context.Context, args []string, options options, stdout, stderr
 		return usageFailure(stderr, errors.New("admin credential is required"))
 	}
 	switch args[0] {
+	case "create":
+		name, jsonMode, err := parseKeyCreateOptions(args[1:])
+		if err != nil {
+			return usageFailure(stderr, err)
+		}
+		if err := createKey(ctx, options, name, jsonMode, stdout); err != nil {
+			fmt.Fprintln(stderr, describeKeyFailure(err))
+			return ExitAPI
+		}
+		return ExitSuccess
 	case "list":
 		parsed, err := parseKeyListOptions(args[1:])
 		if err != nil {
@@ -194,6 +204,57 @@ func runKeys(ctx context.Context, args []string, options options, stdout, stderr
 	default:
 		return usageFailure(stderr, errors.New("unknown keys subcommand"))
 	}
+}
+
+func parseKeyCreateOptions(args []string) (string, bool, error) {
+	var name string
+	jsonMode := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonMode = true
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return "", false, errors.New("unknown option for keys create")
+		}
+		if name != "" {
+			return "", false, errors.New("keys create requires exactly one name")
+		}
+		name = arg
+	}
+	if strings.TrimSpace(name) == "" {
+		return "", false, errors.New("keys create requires a name")
+	}
+	return name, jsonMode, nil
+}
+
+func createKey(ctx context.Context, options options, name string, jsonMode bool, stdout io.Writer) error {
+	base, err := validateBaseURL(options.gatewayURL)
+	if err != nil {
+		return &APIError{Kind: APIErrorResponse, Err: err}
+	}
+	body, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return err
+	}
+	responseBody, err := adminPOST(ctx, options, joinURL(base, adminKeysEndpoint), body)
+	if err != nil {
+		return err
+	}
+	var created struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+		Key  string `json:"key"`
+	}
+	if err := decodeJSON(responseBody, &created); err != nil || created.ID == "" || created.Key == "" {
+		return &APIError{Kind: APIErrorMalformed, Err: errors.New("gateway returned an invalid created key")}
+	}
+	if jsonMode {
+		_, err = stdout.Write(append(responseBody, '\n'))
+		return err
+	}
+	fmt.Fprintf(stdout, "Created key %s (%s)\nKey: %s\nSave this key; it will not be shown again.\n", created.Name, created.ID, created.Key)
+	return nil
 }
 
 func parseKeyListOptions(args []string) (keyListOptions, error) {
@@ -523,6 +584,31 @@ func adminGET(ctx context.Context, options options, target *url.URL) ([]byte, er
 	return body, nil
 }
 
+func adminPOST(ctx context.Context, options options, target *url.URL, body []byte) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader(string(body)))
+	if err != nil {
+		return nil, &APIError{Kind: APIErrorResponse, Err: errors.New("could not create gateway request")}
+	}
+	request.Header.Set("Authorization", "Bearer "+options.adminCredential)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: requestTimeout}).Do(request)
+	if err != nil {
+		return nil, &APIError{Kind: APIErrorNetwork, Err: err}
+	}
+	responseBody, readErr := readResponse(response)
+	if readErr != nil {
+		return nil, &APIError{Kind: APIErrorMalformed, StatusCode: response.StatusCode, Err: readErr}
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		kind := APIErrorResponse
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			kind = APIErrorAuth
+		}
+		return nil, &APIError{Kind: kind, StatusCode: response.StatusCode}
+	}
+	return responseBody, nil
+}
+
 func decodeJSON(body []byte, target any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	if err := decoder.Decode(target); err != nil {
@@ -751,10 +837,11 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Commands:")
 	fmt.Fprintln(writer, "  version    print the gwctl version")
 	fmt.Fprintln(writer, "  ping       verify gateway connectivity and admin authentication")
-	fmt.Fprintln(writer, "  keys       list or inspect API keys")
+	fmt.Fprintln(writer, "  keys       create, list or inspect API keys")
 	fmt.Fprintln(writer, "  requests   list or inspect request history")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Keys commands:")
+	fmt.Fprintln(writer, "  keys create <name> [--json]")
 	fmt.Fprintln(writer, "  keys list [--limit N] [--json]")
 	fmt.Fprintln(writer, "  keys get <id> [--json]")
 	fmt.Fprintln(writer, "  requests list [--limit N] [--key-id ID] [--after TIME] [--before TIME] [--json]")

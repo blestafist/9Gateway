@@ -1,0 +1,64 @@
+services:
+  gateway:
+    image: 9gateway:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      mock-upstream:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      UPSTREAM_API_KEY: "${UPSTREAM_API_KEY:?set UPSTREAM_API_KEY in .env (copy .env.example)}"
+      ADMIN_CREDENTIAL: "${ADMIN_CREDENTIAL:?set ADMIN_CREDENTIAL in .env (copy .env.example)}"
+      AUTH_PEPPER: "${AUTH_PEPPER:?set AUTH_PEPPER in .env (copy .env.example)}"
+      GWCTL_ADMIN_CREDENTIAL: "${ADMIN_CREDENTIAL:?set ADMIN_CREDENTIAL in .env (copy .env.example)}"
+    volumes:
+      - gateway-data:/data
+      - "${GATEWAY_CONFIG:-./config.yaml}:/etc/gateway/config.yaml:ro"
+    healthcheck:
+      test: ["CMD", "/gateway", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  mock-upstream:
+    build:
+      context: ./tests/mock-upstream
+      dockerfile: Dockerfile
+    environment:
+      UPSTREAM_API_KEY: "${UPSTREAM_API_KEY:?set UPSTREAM_API_KEY in .env (copy .env.example)}"
+    expose:
+      - "8081"
+    healthcheck:
+      test: ["CMD", "/mock-upstream", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 2s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: [observability]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    restart: unless-stopped
+
+volumes:
+  gateway-data:
+    name: 9gateway-data
+  prometheus-data:
+    name: 9gateway-prometheus
