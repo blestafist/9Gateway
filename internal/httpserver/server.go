@@ -13,9 +13,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pestit/9gateway/internal/accounting"
@@ -31,6 +33,15 @@ import (
 const requestIDHeader = "X-Gateway-Request-ID"
 
 const requestInspectionLimit int64 = config.DefaultMaxInspectedRequestBytes
+
+// Request and response limits are transport boundaries, not inspection or
+// telemetry settings. They deliberately use binary MiB, matching Go's byte
+// counts and the documented 10 MiB/100 MiB limits.
+const (
+	maxInboundRequestBodyBytes   int64 = 10 * 1024 * 1024
+	maxUpstreamResponseBodyBytes int64 = 100 * 1024 * 1024
+	maxSSEEventBytes             int   = 1 * 1024 * 1024
+)
 
 // TokenAdmissionConfig contains the bounded, deployment-wide settings used by
 // token preflight. The key's effective token mode is already compiled into its
@@ -82,6 +93,12 @@ func (configuration TokenAdmissionConfig) withDefaults() TokenAdmissionConfig {
 }
 
 type requestIDContextKey struct{}
+type requestBodyLimitContextKey struct{}
+
+type requestBodyLimitState struct {
+	exceeded atomic.Bool
+	recorded atomic.Bool
+}
 
 // NewHandler returns the gateway's HTTP handler using the provided upstream client.
 func NewHandler(upstreamClient *http.Client, upstreamBaseURL, upstreamAPIKey string, authenticators ...*auth.Authenticator) http.Handler {
@@ -568,7 +585,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	var inspectionAvailable bool
 	policyInspection := shouldInspectRequestMetadata(request)
 	if policyInspection {
-		requestBody, metadata, inspected, inspectionAvailable = inspectRequest(request, handler.tokenConfig.MaxInspectedRequestBytes)
+		var inspectionErr error
+		requestBody, metadata, inspected, inspectionAvailable, inspectionErr = inspectRequest(request, handler.tokenConfig.MaxInspectedRequestBytes)
+		if isRequestBodyTooLarge(inspectionErr) {
+			recordBodyTooLarge(request)
+			setTerminal(TerminalOutcomePreUpstream)
+			writeGatewayError(response, gatewayErrorBodyTooLarge, "")
+			return
+		}
 	} else if shouldObserveRequestPricing(request, handler.pricingResolver) {
 		// Pricing-only telemetry must not read ahead of client.Do. The wrapper
 		// records only bytes the normal upstream transport has already requested;
@@ -764,6 +788,12 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 	upstreamResponse, err = handler.client.Do(upstreamRequest)
 	if err != nil {
+		if isRequestBodyTooLarge(err) {
+			recordBodyTooLarge(request)
+			setTerminal(TerminalOutcomePreUpstream)
+			writeGatewayError(response, gatewayErrorBodyTooLarge, "")
+			return
+		}
 		if proxyContext.Err() != nil {
 			setTerminal(TerminalOutcomeCancelled)
 			writeGatewayError(response, gatewayErrorCancellation, "")
@@ -774,6 +804,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			setTerminal(TerminalOutcomeUpstreamError)
 			writeGatewayError(response, gatewayErrorUpstreamConnection, "")
 		}
+		return
+	}
+	if requestBodyTooLarge(request) {
+		if upstreamResponse != nil && upstreamResponse.Body != nil {
+			_ = upstreamResponse.Body.Close()
+		}
+		setTerminal(TerminalOutcomePreUpstream)
+		writeGatewayError(response, gatewayErrorBodyTooLarge, "")
 		return
 	}
 	if upstreamResponse == nil {
@@ -1119,30 +1157,30 @@ func eligibleTokenRequest(request *http.Request) bool {
 	return request.Method == http.MethodPost && (request.URL.Path == "/v1/chat/completions" || request.URL.Path == "/v1/responses") && isJSONMediaType(request.Header)
 }
 
-func inspectRequest(request *http.Request, limit int64) (io.ReadCloser, *openai.RequestMetadata, []byte, bool) {
+func inspectRequest(request *http.Request, limit int64) (io.ReadCloser, *openai.RequestMetadata, []byte, bool, error) {
 	if request.Body == nil || request.Body == http.NoBody || request.ContentLength == 0 {
-		return request.Body, nil, nil, false
+		return request.Body, nil, nil, false, nil
 	}
-	inspected, replacement, available, _ := openai.InspectRequestBody(request.Body, limit)
+	inspected, replacement, available, inspectionErr := openai.InspectRequestBody(request.Body, limit)
 	if replacement == nil {
-		return request.Body, nil, nil, false
+		return request.Body, nil, nil, false, inspectionErr
 	}
 	body := &replayedRequestBody{Reader: replacement, source: request.Body}
 	if !available {
-		return body, nil, nil, false
+		return body, nil, nil, false, inspectionErr
 	}
 	metadata, err := openai.ParseRequestMetadata(inspected)
 	if err != nil {
-		return body, nil, inspected, true
+		return body, nil, inspected, true, inspectionErr
 	}
-	return body, &metadata, inspected, true
+	return body, &metadata, inspected, true, inspectionErr
 }
 
 func inspectChatRequest(request *http.Request) (io.ReadCloser, *openai.RequestMetadata) {
 	if request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" || !isJSONMediaType(request.Header) {
 		return request.Body, nil
 	}
-	body, metadata, _, _ := inspectRequest(request, requestInspectionLimit)
+	body, metadata, _, _, _ := inspectRequest(request, requestInspectionLimit)
 	return body, metadata
 }
 
@@ -1236,6 +1274,21 @@ func (body *capturedRequestBody) Close() error {
 	return body.source.Close()
 }
 
+type trackedRequestBody struct {
+	source io.ReadCloser
+	state  *requestBodyLimitState
+}
+
+func (body *trackedRequestBody) Read(destination []byte) (int, error) {
+	read, err := body.source.Read(destination)
+	if isRequestBodyTooLarge(err) && body.state != nil {
+		body.state.exceeded.Store(true)
+	}
+	return read, err
+}
+
+func (body *trackedRequestBody) Close() error { return body.source.Close() }
+
 // dispatchResponse forwards an upstream response. The optional request is used
 // for the one compatibility transformation; omitting it retains the original
 // direct-call behavior for callers that only need transparent dispatch.
@@ -1278,7 +1331,7 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		if request != nil {
 			trace = TraceFromContext(request.Context())
 		}
-		aggregation, err := openai.AggregateSSEToJSONWithTiming(aggregationBody, aggregationMaxEventSize, aggregationMaxPayloadSize, func() time.Time {
+		aggregation, err := openai.AggregateSSEToJSONWithTiming(aggregationBody, maxSSEEventBytes, aggregationMaxPayloadSize, func() time.Time {
 			if trace == nil {
 				return time.Time{}
 			}
@@ -1342,8 +1395,6 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		return writeErr
 	}
 
-	copyResponseHeaders(response.Header(), upstreamResponse.Header)
-	response.WriteHeader(upstreamResponse.StatusCode)
 	if upstreamResponse.Body == nil {
 		// A RoundTripper is allowed to return a malformed response. It is still
 		// post-start ambiguity: preserve the upstream status, report a bounded
@@ -1352,10 +1403,11 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		return io.ErrUnexpectedEOF
 	}
 	if responseMode == ResponseModeSSE {
-		return streamResponseBody(response, upstreamResponse.Body, observation)
+		copyResponseHeaders(response.Header(), upstreamResponse.Header)
+		response.WriteHeader(upstreamResponse.StatusCode)
+		return streamResponseBody(response, &sseEventLimitReader{source: upstreamResponse.Body, limit: maxSSEEventBytes}, observation)
 	}
-	_, err := io.Copy(response, upstreamResponse.Body)
-	return err
+	return copyBoundedNonStreamingResponse(response, upstreamResponse)
 }
 
 func dispatchErrorCode(err error) string {
@@ -1363,6 +1415,110 @@ func dispatchErrorCode(err error) string {
 		return gatewayErrorUnsupportedResponse
 	}
 	return gatewayErrorConversion
+}
+
+var errUpstreamResponseTooLarge = errors.New("upstream response exceeds maximum size")
+var errSSEEventTooLarge = errors.New("upstream SSE event exceeds maximum size")
+
+// copyBoundedNonStreamingResponse spools unknown-length responses to a
+// temporary file. This keeps the gateway from committing a successful status
+// before discovering an oversized response, without retaining 100 MiB in RAM.
+func copyBoundedNonStreamingResponse(response http.ResponseWriter, upstream *http.Response) error {
+	declared, known := responseContentLength(upstream)
+	if known && declared > maxUpstreamResponseBodyBytes {
+		writeGatewayError(response, gatewayErrorResponseTransport, "")
+		return errUpstreamResponseTooLarge
+	}
+	if known {
+		copyResponseHeaders(response.Header(), upstream.Header)
+		response.WriteHeader(upstream.StatusCode)
+		_, err := io.Copy(response, io.LimitReader(upstream.Body, maxUpstreamResponseBodyBytes))
+		return err
+	}
+	temporary, err := os.CreateTemp("", "9gateway-response-")
+	if err != nil {
+		writeGatewayError(response, gatewayErrorResponseTransport, "")
+		return err
+	}
+	name := temporary.Name()
+	defer os.Remove(name)
+	defer temporary.Close()
+	written, copyErr := io.Copy(temporary, io.LimitReader(upstream.Body, maxUpstreamResponseBodyBytes+1))
+	if copyErr != nil {
+		writeGatewayError(response, gatewayErrorResponseTransport, "")
+		return copyErr
+	}
+	if written > maxUpstreamResponseBodyBytes {
+		writeGatewayError(response, gatewayErrorResponseTransport, "")
+		return errUpstreamResponseTooLarge
+	}
+	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+		writeGatewayError(response, gatewayErrorResponseTransport, "")
+		return err
+	}
+	copyResponseHeaders(response.Header(), upstream.Header)
+	response.WriteHeader(upstream.StatusCode)
+	_, err = io.Copy(response, temporary)
+	return err
+}
+
+type sseEventLimitReader struct {
+	source io.Reader
+	limit  int
+	size   int
+	bad    bool
+	tail   [4]byte
+	tailN  int
+}
+
+func (reader *sseEventLimitReader) Read(destination []byte) (int, error) {
+	if reader == nil || reader.source == nil {
+		return 0, io.EOF
+	}
+	if reader.bad {
+		return 0, errSSEEventTooLarge
+	}
+	read, err := reader.source.Read(destination)
+	if read == 0 {
+		return read, err
+	}
+	for index := 0; index < read; index++ {
+		reader.size++
+		if reader.size > reader.limit {
+			reader.bad = true
+			return index + 1, errSSEEventTooLarge
+		}
+		if reader.tailN < len(reader.tail) {
+			reader.tail[reader.tailN] = destination[index]
+			reader.tailN++
+		} else {
+			copy(reader.tail[:], reader.tail[1:])
+			reader.tail[len(reader.tail)-1] = destination[index]
+		}
+		if (reader.tailN >= 2 && reader.tail[reader.tailN-2] == '\n' && reader.tail[reader.tailN-1] == '\n') ||
+			(reader.tailN >= 3 && reader.tail[reader.tailN-3] == '\n' && reader.tail[reader.tailN-2] == '\r' && reader.tail[reader.tailN-1] == '\n') ||
+			(reader.tailN == 4 && reader.tail[0] == '\r' && reader.tail[1] == '\n' && reader.tail[2] == '\r' && reader.tail[3] == '\n') {
+			reader.size = 0
+			reader.tailN = 0
+		}
+	}
+	return read, err
+}
+
+func responseContentLength(upstream *http.Response) (int64, bool) {
+	if upstream == nil {
+		return 0, false
+	}
+	if upstream.ContentLength > 0 || (upstream.ContentLength == 0 && (upstream.Body == nil || upstream.Body == http.NoBody)) {
+		return upstream.ContentLength, true
+	}
+	values := upstream.Header.Values("Content-Length")
+	if len(values) == 1 {
+		if value, err := strconv.ParseInt(strings.TrimSpace(values[0]), 10, 64); err == nil && value >= 0 {
+			return value, true
+		}
+	}
+	return 0, false
 }
 
 // finalizeConvertedLeaseConservatively settles a conversion that cannot use a
@@ -1711,7 +1867,7 @@ func copyHeaders(destination, source http.Header, deniedHeaders map[string]struc
 
 func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
 	metrics := newGatewayMetrics()
-	return withIngressLimits(withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionLog(logger, next))))
+	return withIngressLimitsAndMetrics(metrics, withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionLog(logger, next))))
 }
 
 func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
@@ -1734,10 +1890,10 @@ func newHandlerWithCompletionLoggerAndHistory(completionLogger *CompletionLogger
 		// particular, do not fall back to synchronous slog logging: a blocked
 		// handler must never delay normal or streaming response completion.
 		if historyWorker == nil {
-			return withIngressLimits(withMetrics(metrics, withRequestIDMetrics(metrics, next)))
+			return withIngressLimitsAndMetrics(metrics, withMetrics(metrics, withRequestIDMetrics(metrics, next)))
 		}
 	}
-	return withIngressLimits(withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionOwnership(completionLogger, historyWorker, next))))
+	return withIngressLimitsAndMetrics(metrics, withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionOwnership(completionLogger, historyWorker, next))))
 }
 
 const (
@@ -1749,6 +1905,10 @@ const (
 // inspection. RequestURI is deliberately measured as received so escaped
 // paths and generic query bytes remain transparent below the boundary.
 func withIngressLimits(next http.Handler) http.Handler {
+	return withIngressLimitsAndMetrics(nil, next)
+}
+
+func withIngressLimitsAndMetrics(metrics *gatewayMetrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requestURI := request.RequestURI
 		if requestURI == "" && request.URL != nil {
@@ -1761,8 +1921,53 @@ func withIngressLimits(next http.Handler) http.Handler {
 			writeGatewayErrorStatus(response, http.StatusRequestHeaderFieldsTooLarge, gatewayErrorInvalidRequest, gatewayErrorDefinitions[gatewayErrorInvalidRequest], "")
 			return
 		}
+		bodyRoute := strings.HasPrefix(request.URL.Path, "/v1/") || strings.HasPrefix(request.URL.Path, "/admin/")
+		if bodyRoute {
+			if request.ContentLength > maxInboundRequestBodyBytes {
+				recordBodyTooLargeMetric(metrics)
+				writeGatewayError(response, gatewayErrorBodyTooLarge, "")
+				return
+			}
+			if request.Body != nil && request.Body != http.NoBody {
+				state := &requestBodyLimitState{}
+				request.Body = &trackedRequestBody{source: http.MaxBytesReader(response, request.Body, maxInboundRequestBodyBytes), state: state}
+				request = request.WithContext(context.WithValue(request.Context(), requestBodyLimitContextKey{}, state))
+			}
+		}
 		next.ServeHTTP(response, request)
 	})
+}
+
+func isRequestBodyTooLarge(err error) bool {
+	var maxBytesError *http.MaxBytesError
+	return errors.As(err, &maxBytesError)
+}
+
+func recordBodyTooLarge(request *http.Request) {
+	if request != nil {
+		if state, ok := request.Context().Value(requestBodyLimitContextKey{}).(*requestBodyLimitState); ok && !state.recorded.CompareAndSwap(false, true) {
+			return
+		}
+		recordBodyTooLargeMetric(metricsFromRequest(request))
+	}
+}
+
+func requestBodyTooLarge(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	state, ok := request.Context().Value(requestBodyLimitContextKey{}).(*requestBodyLimitState)
+	if !ok || state == nil || !state.exceeded.Load() {
+		return false
+	}
+	recordBodyTooLarge(request)
+	return true
+}
+
+func recordBodyTooLargeMetric(metrics *gatewayMetrics) {
+	if metrics != nil {
+		metrics.bodyTooLarge.Add(1)
+	}
 }
 
 func withCompletionOwnership(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, next http.Handler) http.Handler {

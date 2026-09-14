@@ -23,6 +23,13 @@ bounded buffer when metadata inspection or preflight token estimation requires
 it, but the exact original bytes must still reach upstream. Separate absolute
 body-size and inspect/log-size limits.
 
+The gateway applies a binary 10 MiB absolute limit to client request bodies at
+ingress, before authentication policy inspection or body capture. The limit is
+independent of the optional body-capture bound (which defaults to disabled and
+is capped at 1 MiB). A declared oversized `Content-Length` is rejected before
+the upstream request is started; unknown-length bodies are bounded
+incrementally while they are streamed.
+
 While the body bytes are forwarded unchanged, preserve the incoming distinction
 between a known `Content-Length`, a known empty body, and an unknown streaming
 length. Never buffer a generic body just to calculate its size.
@@ -63,6 +70,12 @@ Missing, repeated, or malformed `Content-Type` uses the opaque fallback. This st
 not sniff response body bytes. After safe headers and status are copied, SSE
 uses the dedicated transparent streaming loop; JSON and opaque responses use
 ordinary byte copying. The streaming loop is protocol-neutral.
+
+Non-SSE upstream representations are bounded to 100 MiB. Unknown-length
+responses are spooled through a bounded temporary file so an oversized body
+can be rejected before downstream success headers are committed without
+retaining the response in memory. SSE has no total-size limit, but each framed
+event is bounded to 1 MiB across transport read boundaries.
 
 ## Cancellation
 

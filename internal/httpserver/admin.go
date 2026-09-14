@@ -498,6 +498,7 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	body, err := decodeAdminKeyRequest(response, request)
 	if err != nil {
 		if errors.Is(err, errAdminBodyTooLarge) {
+			recordBodyTooLarge(request)
 			writeAdminError(response, http.StatusRequestEntityTooLarge, "invalid_request", "request body is too large")
 		} else {
 			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request body")
@@ -947,6 +948,7 @@ func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request 
 	body, err := decodeAdminPolicyRequest(response, request)
 	if err != nil {
 		if errors.Is(err, errAdminBodyTooLarge) {
+			recordBodyTooLarge(request)
 			writeAdminError(response, http.StatusRequestEntityTooLarge, "invalid_request", "request body is too large")
 		} else {
 			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request body")

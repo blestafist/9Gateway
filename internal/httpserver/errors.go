@@ -16,6 +16,7 @@ const (
 	gatewayErrorTokenLimit          = "token_limit_exceeded"
 	gatewayErrorBudgetLimit         = "budget_exceeded"
 	gatewayErrorInvalidRequest      = "invalid_request"
+	gatewayErrorBodyTooLarge        = "body_too_large"
 	gatewayErrorNotFound            = "not_found"
 	gatewayErrorUpstreamConnection  = "upstream_connection_error"
 	gatewayErrorUpstreamTimeout     = "upstream_timeout"
@@ -54,6 +55,7 @@ var gatewayErrorDefinitions = map[string]gatewayErrorDefinition{
 	gatewayErrorTokenLimit:          {"Token limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
 	gatewayErrorBudgetLimit:         {"Budget exceeded.", "rate_limit_error", http.StatusTooManyRequests},
 	gatewayErrorInvalidRequest:      {"Invalid request.", "invalid_request_error", http.StatusBadRequest},
+	gatewayErrorBodyTooLarge:        {"Request body exceeds the 10 MiB limit.", "invalid_request_error", http.StatusRequestEntityTooLarge},
 	gatewayErrorNotFound:            {"The requested resource was not found.", "invalid_request_error", http.StatusNotFound},
 	gatewayErrorUpstreamConnection:  {"Unable to connect to the upstream service.", "upstream_error", http.StatusBadGateway},
 	gatewayErrorUpstreamTimeout:     {"The upstream service timed out.", "upstream_error", http.StatusGatewayTimeout},
@@ -80,6 +82,8 @@ func safeErrorCodeForGatewayCode(code string) SafeErrorCode {
 	case gatewayErrorKeyExpired:
 		return ErrorCodeKeyExpired
 	case gatewayErrorInvalidRequest:
+		return ErrorCodeInvalidRequest
+	case gatewayErrorBodyTooLarge:
 		return ErrorCodeInvalidRequest
 	case gatewayErrorModelNotAllowed:
 		return ErrorCodeModelNotAllowed

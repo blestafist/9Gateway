@@ -19,6 +19,7 @@ var metricBuckets = [...]float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5
 type gatewayMetrics struct {
 	requests      fixedRequestCounter
 	requestErrors metricCounterSeries20
+	bodyTooLarge  atomic.Uint64
 	upstream      metricCounterSeries601
 	telemetry     metricCounterSeries3
 	active        atomic.Int64
@@ -246,6 +247,8 @@ func serveMetrics(response http.ResponseWriter, metrics *gatewayMetrics) {
 	var builder strings.Builder
 	writeFixedCounters(&builder, "gateway_requests_total", "Total HTTP requests handled by the gateway.", &metrics.requests)
 	writeSimpleCounters(&builder, "gateway_request_errors_total", "Total gateway-owned request errors.", metrics.requestErrors.values[:], errorMetricNames[:])
+	builder.WriteString("# HELP gateway_rejected_requests_total Total client requests rejected by the gateway.\n# TYPE gateway_rejected_requests_total counter\n")
+	fmt.Fprintf(&builder, "gateway_rejected_requests_total{reason=\"body_too_large\"} %d\n", metrics.bodyTooLarge.Load())
 	writeStatusCounters(&builder, "gateway_upstream_requests_total", "Total requests made to the configured upstream.", metrics.upstream.values[:])
 	writeSimpleCounters(&builder, "gateway_telemetry_jobs_total", "Total telemetry jobs by terminal result.", metrics.telemetry.values[:], telemetryMetricNames[:])
 	builder.WriteString("# HELP gateway_active_requests Active HTTP requests currently handled by the gateway.\n# TYPE gateway_active_requests gauge\ngateway_active_requests ")
