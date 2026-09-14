@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pestit/9gateway/internal/observability"
+	"github.com/pestit/9gateway/internal/security"
 )
 
 // OptionalInt64 is a storage-owned optional integer. Known zero is deliberately
@@ -192,7 +193,7 @@ type requestListCursor struct {
 	RequestID        string
 }
 
-const maxRequestCursorBytes = 512
+const maxRequestCursorBytes = security.MaxCursorBytes
 
 var requestCursorMagic = [3]byte{'r', 'q', 1}
 
@@ -226,7 +227,7 @@ func (repository *RequestHistoryRepository) GetRequestByID(ctx context.Context, 
 	if ctx == nil {
 		return nil, errors.New("get request detail: nil context")
 	}
-	if !validHistoryRequestID(requestID) {
+	if !security.ValidateRequestID(requestID) {
 		return nil, ErrHistoryInvalidRecord
 	}
 	if repository == nil || repository.database == nil {
@@ -242,7 +243,7 @@ func (repository *RequestHistoryRepository) GetRequestBody(ctx context.Context, 
 	if ctx == nil {
 		return nil, errors.New("get request body: nil context")
 	}
-	if !validHistoryRequestID(requestID) {
+	if !security.ValidateRequestID(requestID) {
 		return nil, ErrHistoryInvalidRecord
 	}
 	if !validRequestBodyKind(kind) {
@@ -575,19 +576,7 @@ func newHistoryCursorAEAD() cipher.AEAD {
 }
 
 func validRequestKeyID(value string) bool {
-	if value == "" || len(value) > 256 {
-		return false
-	}
-	for index, character := range value {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
-			if index == 0 && (character == '-' || character == '_') {
-				return false
-			}
-			continue
-		}
-		return false
-	}
-	return true
+	return security.ValidateIdentifier(value)
 }
 
 // sha256Sum is kept local to avoid making cursor cryptography part of the
@@ -621,7 +610,7 @@ func decodeRequestCursor(signer cipher.AEAD, value string) (*requestListCursor, 
 	if value == "" {
 		return nil, nil
 	}
-	if len(value) > maxRequestCursorBytes || signer == nil {
+	if len(value) > maxRequestCursorBytes || signer == nil || !security.ValidateCursorSyntax(value) {
 		return nil, ErrInvalidCursor
 	}
 	sealed, err := base64.RawURLEncoding.DecodeString(value)
@@ -634,7 +623,7 @@ func decodeRequestCursor(signer cipher.AEAD, value string) (*requestListCursor, 
 	}
 	snapshotSequence := int64(binary.BigEndian.Uint64(payload[4:12]))
 	idLength := int(binary.BigEndian.Uint16(payload[20:]))
-	if snapshotSequence <= 0 || idLength == 0 || idLength != len(payload)-22 || idLength > 256 || !validHistoryRequestID(string(payload[22:])) {
+	if snapshotSequence <= 0 || idLength == 0 || idLength != len(payload)-22 || idLength > security.MaxIdentifierBytes || !security.ValidateRequestID(string(payload[22:])) {
 		return nil, ErrInvalidCursor
 	}
 	return &requestListCursor{SnapshotSequence: snapshotSequence, FinishedKnown: payload[3] == 1, FinishedAt: int64(binary.BigEndian.Uint64(payload[12:20])), RequestID: string(payload[22:])}, nil
@@ -900,15 +889,7 @@ func (err boundedHistoryError) Is(target error) bool {
 func fmtHistoryError(kind, cause error) error { return boundedHistoryError{kind: kind, cause: cause} }
 
 func validHistoryRequestID(value string) bool {
-	if len(value) != 32 {
-		return false
-	}
-	for _, character := range value {
-		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
-			return false
-		}
-	}
-	return true
+	return security.ValidateRequestID(value)
 }
 
 func validHistoryText(value string, max int, emptyOK bool) bool {

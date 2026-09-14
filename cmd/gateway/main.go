@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,7 +23,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		log.Print(err)
+		slog.Default().Error("gateway startup failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -45,7 +44,7 @@ func run() error {
 	}
 	defer func() {
 		if err := database.Close(); err != nil {
-			log.Printf("SQLite shutdown: %v", err)
+			slog.Default().Error("SQLite shutdown failed", "error", err)
 		}
 	}()
 	keyRepository := storage.NewAPIKeyRepository(database)
@@ -226,8 +225,9 @@ func run() error {
 		gatewayHandler.ServeHTTP(response, request)
 	})
 	server := &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: trackedHandler,
+		Addr:           cfg.ListenAddr,
+		Handler:        trackedHandler,
+		MaxHeaderBytes: 16 * 1024,
 	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -236,7 +236,7 @@ func run() error {
 	select {
 	case err := <-serveErr:
 		if err != nil && err != http.ErrServerClosed {
-			log.Printf("HTTP server: %v", err)
+			slog.Default().Error("HTTP server failed", "error", err)
 			cleanupStartup(nil, usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
 			return err
 		}
@@ -244,10 +244,10 @@ func run() error {
 		shutdownErr := shutdownGateway(cfg.ShutdownTimeoutSeconds, server, database, readinessState, &activeRequests,
 			usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
 		if shutdownErr != nil {
-			log.Printf("gateway shutdown error: %v", shutdownErr)
+			slog.Default().Error("gateway shutdown failed", "error", shutdownErr)
 		}
 		if err := <-serveErr; err != nil && err != http.ErrServerClosed {
-			log.Printf("HTTP server: %v", err)
+			slog.Default().Error("HTTP server failed", "error", err)
 		}
 	}
 	return nil
@@ -279,22 +279,22 @@ func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storag
 	shutdownErr := server.Shutdown(ctx)
 	if shutdownErr != nil {
 		if err := server.Close(); err != nil {
-			log.Printf("HTTP server close: %v", err)
+			slog.Default().Error("HTTP server close failed", "error", err)
 		}
-		log.Printf("HTTP server shutdown: %v", shutdownErr)
+		slog.Default().Error("HTTP server shutdown failed", "error", shutdownErr)
 	}
 	if active != nil {
 		active.Done()
 		active.Wait()
 	}
 	if err := usage.Drain(ctx); err != nil {
-		log.Printf("usage observation shutdown: %v", err)
+		slog.Default().Error("usage observation shutdown failed", "error", err)
 	}
 	if err := token.Shutdown(ctx); err != nil {
-		log.Printf("token aggregate shutdown: %v", err)
+		slog.Default().Error("token aggregate shutdown failed", "error", err)
 	}
 	if err := budget.Shutdown(ctx); err != nil {
-		log.Printf("budget aggregate shutdown: %v", err)
+		slog.Default().Error("budget aggregate shutdown failed", "error", err)
 	}
 	pending := 0
 	if completion != nil {
@@ -328,7 +328,7 @@ func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storag
 		}
 	}
 	if drainErr != nil {
-		log.Printf("telemetry shutdown: %v", drainErr)
+		slog.Default().Error("telemetry shutdown failed", "error", drainErr)
 	}
 	slog.Default().Info("shutdown complete", "dropped", dropped)
 	return errors.Join(shutdownErr, drainErr)

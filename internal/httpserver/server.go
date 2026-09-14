@@ -24,6 +24,7 @@ import (
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/observability"
 	"github.com/pestit/9gateway/internal/protocol/openai"
+	"github.com/pestit/9gateway/internal/security"
 	"github.com/pestit/9gateway/internal/storage"
 )
 
@@ -398,7 +399,7 @@ func newProxyHandlerWithLimitersAndTokenConfig(client *http.Client, baseURL, api
 }
 
 func newProxyHandlerWithLimitersAndTokenLimiter(client *http.Client, baseURL, apiKey string, requestLimiter *limiter.RequestLimiter, concurrencyLimiter *limiter.ConcurrencyLimiter, tokenLimiter *limiter.TokenLimiter, tokenConfig TokenAdmissionConfig) *proxyHandler {
-	parsedURL, err := url.Parse(baseURL)
+	parsedURL, err := security.ValidateUpstreamURL(baseURL)
 	if err != nil {
 		return &proxyHandler{client: client, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, tokenConfig: tokenConfig.withDefaults(), responseDispatch: func(response http.ResponseWriter, _ *http.Response, _ *openai.RequestMetadata) {
 			writeGatewayError(response, gatewayErrorInternal, "")
@@ -597,6 +598,11 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		trace.SetRequestMetadataPath(request.Method, boundedEscapedPath(request), ClassifyRoute(request.Method, request.URL.Path), model, mode)
 	}
 	if metadata != nil && metadata.Model != "" {
+		if !validBoundedText(metadata.Model, 512) {
+			setTerminal(TerminalOutcomePreUpstream)
+			writeGatewayError(response, gatewayErrorInvalidRequest, "")
+			return
+		}
 		if authenticated && !principal.Policy.AllowsModel(metadata.Model) {
 			setTerminal(TerminalOutcomePreUpstream)
 			writeGatewayError(response, gatewayErrorModelNotAllowed, "model")
@@ -1705,7 +1711,7 @@ func copyHeaders(destination, source http.Header, deniedHeaders map[string]struc
 
 func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
 	metrics := newGatewayMetrics()
-	return withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionLog(logger, next)))
+	return withIngressLimits(withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionLog(logger, next))))
 }
 
 func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
@@ -1728,10 +1734,35 @@ func newHandlerWithCompletionLoggerAndHistory(completionLogger *CompletionLogger
 		// particular, do not fall back to synchronous slog logging: a blocked
 		// handler must never delay normal or streaming response completion.
 		if historyWorker == nil {
-			return withMetrics(metrics, withRequestIDMetrics(metrics, next))
+			return withIngressLimits(withMetrics(metrics, withRequestIDMetrics(metrics, next)))
 		}
 	}
-	return withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionOwnership(completionLogger, historyWorker, next)))
+	return withIngressLimits(withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionOwnership(completionLogger, historyWorker, next))))
+}
+
+const (
+	maxRequestURIBytes = 8 * 1024
+	maxQueryBytes      = 4 * 1024
+)
+
+// withIngressLimits runs before routing, authentication, and any request-body
+// inspection. RequestURI is deliberately measured as received so escaped
+// paths and generic query bytes remain transparent below the boundary.
+func withIngressLimits(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requestURI := request.RequestURI
+		if requestURI == "" && request.URL != nil {
+			requestURI = request.URL.EscapedPath()
+			if request.URL.RawQuery != "" {
+				requestURI += "?" + request.URL.RawQuery
+			}
+		}
+		if len(requestURI) > maxRequestURIBytes || request.URL == nil || len(request.URL.RawQuery) > maxQueryBytes {
+			writeGatewayErrorStatus(response, http.StatusRequestHeaderFieldsTooLarge, gatewayErrorInvalidRequest, gatewayErrorDefinitions[gatewayErrorInvalidRequest], "")
+			return
+		}
+		next.ServeHTTP(response, request)
+	})
 }
 
 func withCompletionOwnership(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, next http.Handler) http.Handler {

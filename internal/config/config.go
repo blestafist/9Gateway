@@ -3,11 +3,11 @@ package config
 import (
 	"fmt"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/pestit/9gateway/internal/security"
 	"github.com/pestit/9gateway/internal/storage/schema"
 )
 
@@ -225,15 +225,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("upstream base URL is required")
 	}
 
-	upstreamURL, err := url.Parse(c.UpstreamBaseURL)
-	if err != nil {
+	if _, err := security.ValidateUpstreamURL(c.UpstreamBaseURL); err != nil {
 		return fmt.Errorf("invalid upstream base URL: %w", err)
-	}
-	if upstreamURL.Scheme != "http" && upstreamURL.Scheme != "https" {
-		return fmt.Errorf("invalid upstream base URL: scheme must be http or https")
-	}
-	if upstreamURL.Host == "" {
-		return fmt.Errorf("invalid upstream base URL: host is required")
 	}
 	if strings.TrimSpace(c.UpstreamAPIKey) == "" {
 		return fmt.Errorf("upstream API key is required")

@@ -3,11 +3,11 @@
 Current milestone: admin read API, CLI, readiness/metrics, packaging
 (`T141`-`T160`).
 
-Done: `T001`-`T151`.
+Done: `T001`-`T152`.
 
-Current: `T152`.
+Current: `T153`.
 
-Queued: `T152`-`T160`.
+Queued: `T153`-`T160`.
 
 The gateway now provides transparent policy enforcement, token and budget
 accounting, bounded safe request tracing, optional per-key body capture,
@@ -23,7 +23,8 @@ body captures transfer immutable ownership without defensive re-cloning, and
 retention passes are capped at 1000 rows while T140 verifies log/persistence
 scalars, policy bodies, and restart retention. Storage review fixes for T136-T139: lifecycle timestamp ordering constraints, indexed retention by completion time, and an enforced schema/config body-size compatibility constant (schema version 9).
 
-The next milestone extends `gwctl` with key read commands. The remaining
-milestone work covers `/ready`, `/metrics`, explicit ordered graceful shutdown,
-path/body-size hardening, and a minimal Docker image/compose. No Web UI,
-provider routing, retries, Redis, or PostgreSQL.
+The next milestone extends `gwctl` with key read commands. T152 hardened
+semantic admin IDs/cursors, upstream URL startup validation, structured error
+logging, and early request-line limits. The remaining milestone work covers
+body-size hardening and a minimal Docker image/compose. No Web UI, provider
+routing, retries, Redis, or PostgreSQL.

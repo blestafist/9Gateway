@@ -6,11 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/pestit/9gateway/internal/security"
 	"github.com/pestit/9gateway/internal/storage"
 )
 
@@ -178,8 +177,7 @@ func (readiness *Readiness) runCheck(ctx context.Context, name string) readiness
 		}
 		return passedReadinessCheck(name)
 	case "upstream":
-		parsed, err := url.Parse(strings.TrimSpace(readiness.upstreamBaseURL))
-		if err != nil || parsed == nil || !parsed.IsAbs() || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		if _, err := security.ValidateUpstreamURL(readiness.upstreamBaseURL); err != nil {
 			return failedReadinessCheck(name, "upstream URL is invalid or not configured")
 		}
 		return passedReadinessCheck(name)

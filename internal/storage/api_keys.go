@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pestit/9gateway/internal/auth"
+	"github.com/pestit/9gateway/internal/security"
 )
 
 const (
@@ -71,7 +72,7 @@ var (
 const (
 	defaultAPIKeyListLimit = 50
 	maxAPIKeyListLimit     = 500
-	maxAPIKeyCursorBytes   = 512
+	maxAPIKeyCursorBytes   = security.MaxCursorBytes
 )
 
 // KeyPolicySummary contains only the policy facts safe for the list endpoint.
@@ -123,7 +124,7 @@ type apiKeyListCursor struct {
 // interpreted here.
 func (record APIKeyRecord) Validate() error {
 	prefix, digest, ok := record.identityValues()
-	if strings.TrimSpace(record.ID) == "" || strings.TrimSpace(record.Name) == "" || strings.TrimSpace(prefix) == "" || !ok {
+	if !security.ValidateIdentifier(record.ID) || strings.TrimSpace(record.Name) == "" || strings.TrimSpace(prefix) == "" || !ok {
 		return ErrInvalidRecord
 	}
 	if len(digest) != hmacDigestSize {
@@ -351,7 +352,7 @@ func (repository *APIKeyRepository) LookupByPrefix(ctx context.Context, prefix s
 
 // GetByID finds a record by its stable ID.
 func (repository *APIKeyRepository) GetByID(ctx context.Context, id string) (APIKeyRecord, error) {
-	if strings.TrimSpace(id) == "" {
+	if !security.ValidateIdentifier(id) {
 		return APIKeyRecord{}, ErrInvalidRecord
 	}
 	return repository.lookup(ctx, `SELECT id, name, prefix, key_hash, enabled, expires_at, created_at, updated_at, policy_json
@@ -366,7 +367,7 @@ func (repository *APIKeyRepository) GetAPIKeyByID(ctx context.Context, id string
 	if ctx == nil {
 		return nil, errors.New("get api key detail: nil context")
 	}
-	if strings.TrimSpace(id) == "" {
+	if !security.ValidateIdentifier(id) {
 		return nil, ErrInvalidRecord
 	}
 	if repository == nil || repository.database == nil {
@@ -606,7 +607,7 @@ func (repository *APIKeyRepository) decodeListCursor(value string) (*apiKeyListC
 	if value == "" {
 		return nil, nil
 	}
-	if len(value) > maxAPIKeyCursorBytes || repository.cursorAEAD == nil {
+	if len(value) > maxAPIKeyCursorBytes || repository.cursorAEAD == nil || !security.ValidateCursorSyntax(value) {
 		return nil, ErrInvalidCursor
 	}
 	sealed, err := base64.RawURLEncoding.DecodeString(value)
@@ -619,7 +620,7 @@ func (repository *APIKeyRepository) decodeListCursor(value string) (*apiKeyListC
 		return nil, ErrInvalidCursor
 	}
 	idLength := int(binary.BigEndian.Uint16(payload[16:18]))
-	if idLength == 0 || idLength != len(payload)-18 || idLength > 256 {
+	if idLength == 0 || idLength != len(payload)-18 || idLength > security.MaxIdentifierBytes || !security.ValidateIdentifier(string(payload[18:])) {
 		return nil, ErrInvalidCursor
 	}
 	snapshotSequence := int64(binary.BigEndian.Uint64(payload[:8]))
@@ -635,7 +636,7 @@ func (repository *APIKeyRepository) SetEnabled(ctx context.Context, id string, e
 	if ctx == nil {
 		return errors.New("update api key: nil context")
 	}
-	if strings.TrimSpace(id) == "" {
+	if !security.ValidateIdentifier(id) {
 		return ErrInvalidRecord
 	}
 	if repository == nil || repository.database == nil {
@@ -669,7 +670,7 @@ func (repository *APIKeyRepository) UpdatePolicy(ctx context.Context, id string,
 	if ctx == nil {
 		return errors.New("update api key policy: nil context")
 	}
-	if strings.TrimSpace(id) == "" {
+	if !security.ValidateIdentifier(id) {
 		return ErrInvalidRecord
 	}
 	if repository == nil || repository.database == nil {
@@ -699,7 +700,7 @@ func (repository *APIKeyRepository) UpdatePolicyRecord(ctx context.Context, id s
 	if ctx == nil {
 		return APIKeyRecord{}, errors.New("update api key policy: nil context")
 	}
-	if strings.TrimSpace(id) == "" {
+	if !security.ValidateIdentifier(id) {
 		return APIKeyRecord{}, ErrInvalidRecord
 	}
 	if repository == nil || repository.database == nil {

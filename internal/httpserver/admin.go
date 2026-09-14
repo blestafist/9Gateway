@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/limiter"
+	"github.com/pestit/9gateway/internal/security"
 	"github.com/pestit/9gateway/internal/storage"
 )
 
@@ -230,20 +232,10 @@ type adminKeyDetailItem struct {
 }
 
 func validAPIKeyID(value string) bool {
-	if value == "" || len(value) > 256 {
-		return false
-	}
-	for index, character := range value {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
-			if index == 0 && (character == '-' || character == '_') {
-				return false
-			}
-			continue
-		}
-		return false
-	}
-	return true
+	return security.ValidateIdentifier(value)
 }
+
+func validAdminID(value string) bool { return security.ValidateIdentifier(value) }
 
 // create makes one persistent key. A small retry budget handles an extremely
 // unlikely random identity collision without ever returning a colliding raw
@@ -556,12 +548,12 @@ func (handler *adminHandler) getRequestBody(response http.ResponseWriter, reques
 	}
 	const prefix = "/admin/v1/requests/"
 	parts := strings.Split(strings.TrimPrefix(request.URL.Path, prefix), "/")
-	if len(parts) != 3 || parts[1] != "bodies" || !validRequestID(parts[0]) {
+	if len(parts) != 3 || parts[1] != "bodies" || !security.ValidateRequestID(parts[0]) {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request id or body kind")
 		return
 	}
 	kind := parts[2]
-	if kind != "client_request" && kind != "upstream_request" && kind != "response" {
+	if !security.ValidateKind(kind, "client_request", "upstream_request", "response") {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request id or body kind")
 		return
 	}
@@ -671,19 +663,23 @@ func (handler *adminHandler) listRequests(response http.ResponseWriter, request 
 		writeAdminError(response, http.StatusInternalServerError, "internal_error", "request listing failed")
 		return
 	}
-	query := request.URL.Query()
+	query, err := adminQuery(request)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
 	limit, err := parseAdminListLimit(query)
 	if err != nil {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
 		return
 	}
 	cursor, err := singleAdminQueryValue(query, "cursor", false)
-	if err != nil || len(cursor) > 512 || strings.ContainsAny(cursor, "\r\n") {
+	if err != nil || !security.ValidateCursorSyntax(cursor) {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
 		return
 	}
 	keyID, err := singleAdminQueryValue(query, "key_id", false)
-	if err != nil || (keyID != "" && !validAPIKeyID(keyID)) {
+	if err != nil || (keyID != "" && !validAdminID(keyID)) {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
 		return
 	}
@@ -723,7 +719,7 @@ func (handler *adminHandler) getRequest(response http.ResponseWriter, request *h
 	}
 	const prefix = "/admin/v1/requests/"
 	id := strings.TrimPrefix(request.URL.Path, prefix)
-	if !validRequestID(id) {
+	if !security.ValidateRequestID(id) {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request id")
 		return
 	}
@@ -864,8 +860,13 @@ func (handler *adminHandler) listKeys(response http.ResponseWriter, request *htt
 		writeAdminError(response, http.StatusInternalServerError, "internal_error", "key listing failed")
 		return
 	}
+	query, err := adminQuery(request)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
+		return
+	}
 	limit := 50
-	values, present := request.URL.Query()["limit"]
+	values, present := query["limit"]
 	if present {
 		if len(values) != 1 || values[0] == "" {
 			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
@@ -879,7 +880,7 @@ func (handler *adminHandler) listKeys(response http.ResponseWriter, request *htt
 		}
 		limit = parsed
 	}
-	cursorValues, cursorPresent := request.URL.Query()["cursor"]
+	cursorValues, cursorPresent := query["cursor"]
 	if cursorPresent && len(cursorValues) != 1 {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
 		return
@@ -892,7 +893,7 @@ func (handler *adminHandler) listKeys(response http.ResponseWriter, request *htt
 			return
 		}
 	}
-	if len(cursor) > 512 || strings.ContainsAny(cursor, "\r\n") {
+	if !security.ValidateCursorSyntax(cursor) {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid pagination")
 		return
 	}
@@ -921,11 +922,22 @@ func (handler *adminHandler) listKeys(response http.ResponseWriter, request *htt
 	writeAdminJSON(response, http.StatusOK, body)
 }
 
+func adminQuery(request *http.Request) (url.Values, error) {
+	if request == nil || request.URL == nil {
+		return nil, errInvalidAdminRequest
+	}
+	query, err := url.ParseQuery(request.URL.RawQuery)
+	if err != nil {
+		return nil, errInvalidAdminRequest
+	}
+	return query, nil
+}
+
 func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request *http.Request) {
 	const prefix = "/admin/v1/keys/"
 	id := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, prefix), "/policy")
-	if id == "" || strings.Contains(id, "/") {
-		writeAdminError(response, http.StatusNotFound, "not_found", "")
+	if !validAdminID(id) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid key id")
 		return
 	}
 	if !adminBearerMatches(request, handler.credential) {
