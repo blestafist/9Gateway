@@ -87,6 +87,7 @@ type CompletionLogger struct {
 	dropped   atomic.Uint64
 	stopOnce  sync.Once
 	inFlight  atomic.Int64
+	metrics   *gatewayMetrics
 }
 
 // NewCompletionLogger starts a single worker for a bounded completion queue.
@@ -108,6 +109,17 @@ func NewCompletionLogger(logger *slog.Logger, capacity int) *CompletionLogger {
 	completionLogger.accepting.Store(true)
 	go completionLogger.run()
 	return completionLogger
+}
+
+func (completionLogger *CompletionLogger) metricsQueueSource() func() int {
+	return func() int { return len(completionLogger.queue) }
+}
+
+func (completionLogger *CompletionLogger) setMetrics(metrics *gatewayMetrics) {
+	completionLogger.metrics = metrics
+	if metrics != nil {
+		metrics.registerQueue(completionLogger.metricsQueueSource())
+	}
 }
 
 func (completionLogger *CompletionLogger) run() {
@@ -136,6 +148,9 @@ func (completionLogger *CompletionLogger) drain() {
 
 func (completionLogger *CompletionLogger) write(record CompletionRecord) {
 	completionLogger.logger.LogAttrs(context.Background(), slog.LevelInfo, "request completed", completionLogAttrs(record)...)
+	if completionLogger.metrics != nil {
+		completionLogger.metrics.telemetryResult("persisted")
+	}
 }
 
 // completionLogAttrs is deliberately a projection, rather than a formatter of
@@ -220,6 +235,9 @@ func (completionLogger *CompletionLogger) Enqueue(record CompletionRecord) bool 
 	defer completionLogger.inFlight.Add(-1)
 	if !completionLogger.accepting.Load() {
 		completionLogger.dropped.Add(1)
+		if completionLogger.metrics != nil {
+			completionLogger.metrics.telemetryResult("dropped")
+		}
 		return false
 	}
 	select {

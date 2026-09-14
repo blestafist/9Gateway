@@ -78,6 +78,14 @@ func NewReadiness(configuration ReadinessConfig) *Readiness {
 // gateway keys or admin credentials exist.
 func WithReadiness(next http.Handler, readiness *Readiness) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/metrics" {
+			if next != nil {
+				next.ServeHTTP(response, request)
+			} else {
+				http.NotFound(response, request)
+			}
+			return
+		}
 		if request.Method == http.MethodGet && request.URL.Path == "/ready" {
 			if readiness == nil {
 				writeReadiness(response, readinessResult{ready: false, checks: readinessUnavailableChecks()})

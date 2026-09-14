@@ -86,8 +86,9 @@ type traceContextKey struct{}
 type RequestTraceState struct {
 	mu sync.Mutex
 
-	clock TraceClock
-	input CompletionRecordInput
+	clock   TraceClock
+	metrics *gatewayMetrics
+	input   CompletionRecordInput
 
 	startedMono         time.Time
 	upstreamMono        time.Time
@@ -129,6 +130,26 @@ type RequestTraceState struct {
 	responseBodyRecorder *observability.BodyRecorder
 	bodySnapshotsSet     bool
 	responseBodySet      bool
+}
+
+func (state *RequestTraceState) setMetrics(metrics *gatewayMetrics) {
+	if state != nil {
+		state.metrics = metrics
+	}
+}
+func (state *RequestTraceState) metricsValue() *gatewayMetrics {
+	if state == nil {
+		return nil
+	}
+	return state.metrics
+}
+func (state *RequestTraceState) observeMetrics(metrics *gatewayMetrics) {
+	if metrics == nil {
+		return
+	}
+	if record, err := state.Final(); err == nil {
+		metrics.observe(record)
+	}
 }
 
 func (state *RequestTraceState) setCompletionOwnership(ownership *completionOwnership) {

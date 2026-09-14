@@ -1704,7 +1704,8 @@ func copyHeaders(destination, source http.Header, deniedHeaders map[string]struc
 }
 
 func newHandler(logger *slog.Logger, next http.Handler) http.Handler {
-	return withRequestID(withCompletionLog(logger, next))
+	metrics := newGatewayMetrics()
+	return withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionLog(logger, next)))
 }
 
 func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next http.Handler) http.Handler {
@@ -1712,15 +1713,22 @@ func newHandlerWithCompletionLogger(completionLogger *CompletionLogger, next htt
 }
 
 func newHandlerWithCompletionLoggerAndHistory(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, next http.Handler) http.Handler {
+	metrics := newGatewayMetrics()
+	if completionLogger != nil {
+		completionLogger.setMetrics(metrics)
+	}
+	if historyWorker != nil {
+		historyWorker.setMetrics(metrics)
+	}
 	if completionLogger == nil {
 		// The convenience constructor does not own a completion logger. In
 		// particular, do not fall back to synchronous slog logging: a blocked
 		// handler must never delay normal or streaming response completion.
 		if historyWorker == nil {
-			return withRequestID(next)
+			return withMetrics(metrics, withRequestIDMetrics(metrics, next))
 		}
 	}
-	return withRequestID(withCompletionOwnership(completionLogger, historyWorker, next))
+	return withMetrics(metrics, withRequestIDMetrics(metrics, withCompletionOwnership(completionLogger, historyWorker, next)))
 }
 
 func withCompletionOwnership(completionLogger *CompletionLogger, historyWorker *HistoryPersistenceWorker, next http.Handler) http.Handler {
@@ -1749,7 +1757,23 @@ func health(response http.ResponseWriter, request *http.Request) {
 }
 
 func withRequestID(next http.Handler) http.Handler {
+	return withRequestIDMetrics(newGatewayMetrics(), next)
+}
+
+func withRequestIDMetrics(metrics *gatewayMetrics, next http.Handler) http.Handler {
+	if metrics == nil {
+		metrics = newGatewayMetrics()
+	}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/metrics" {
+			serveMetrics(response, metrics)
+			return
+		}
+		request = request.WithContext(withGatewayMetricsContext(request.Context(), metrics))
+		metrics.begin()
+		defer func() {
+			metrics.end()
+		}()
 		id, err := newRequestID()
 		if err != nil {
 			writeGatewayError(response, gatewayErrorInternal, "")
@@ -1762,6 +1786,7 @@ func withRequestID(next http.Handler) http.Handler {
 			writeGatewayError(response, gatewayErrorInternal, "")
 			return
 		}
+		trace.setMetrics(metricsFromRequest(request))
 		terminal := newTerminalMetadataState()
 		requestContext := context.WithValue(request.Context(), requestIDContextKey{}, id)
 		requestContext = context.WithValue(requestContext, terminalMetadataContextKey{}, terminal)

@@ -95,6 +95,7 @@ type HistoryPersistenceWorker struct {
 	persistFailed   atomic.Uint64
 	retentionFailed atomic.Uint64
 	dropped         atomic.Uint64
+	metrics         *gatewayMetrics
 }
 
 // NewHistoryPersistenceWorker starts one bounded history writer.
@@ -150,6 +151,17 @@ func NewHistoryPersistenceWorker(options HistoryPersistenceWorkerOptions) *Histo
 	return worker
 }
 
+func (worker *HistoryPersistenceWorker) metricsQueueSource() func() int {
+	return func() int { return len(worker.queue) }
+}
+
+func (worker *HistoryPersistenceWorker) setMetrics(metrics *gatewayMetrics) {
+	worker.metrics = metrics
+	if metrics != nil {
+		metrics.registerQueue(worker.metricsQueueSource())
+	}
+}
+
 func (worker *HistoryPersistenceWorker) run() {
 	defer close(worker.done)
 	worker.retentionPass()
@@ -184,6 +196,9 @@ func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			worker.persistFailed.Add(1)
+			if worker.metrics != nil {
+				worker.metrics.telemetryResult("failed")
+			}
 			clearHistoryJob(&job)
 		}
 	}()
@@ -210,8 +225,14 @@ func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
 	}
 	if err != nil {
 		worker.persistFailed.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("failed")
+		}
 	} else {
 		worker.persisted.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("persisted")
+		}
 	}
 
 	if worker.processed.Load()%worker.every == 0 {
@@ -280,6 +301,9 @@ func (worker *HistoryPersistenceWorker) Enqueue(job HistoryPersistenceJob) bool 
 func (worker *HistoryPersistenceWorker) drop(job HistoryPersistenceJob) {
 	clearHistoryJob(&job)
 	worker.dropped.Add(1)
+	if worker.metrics != nil {
+		worker.metrics.telemetryResult("dropped")
+	}
 }
 
 // Stats returns only bounded scalar counters.

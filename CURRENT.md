@@ -3,18 +3,18 @@
 Current milestone: admin read API, CLI, readiness/metrics, packaging
 (`T141`-`T160`).
 
-Done: `T001`-`T149`.
+Done: `T001`-`T150`.
 
-Current: `T150`.
+Current: `T151`.
 
-Queued: `T150`-`T160`.
+Queued: `T151`-`T160`.
 
 The gateway now provides transparent policy enforcement, token and budget
 accounting, bounded safe request tracing, optional per-key body capture,
 structured completion logging, persistent request history with independent
 retention, ordered lifecycle shutdown, and a thin `gwctl` admin API client
 foundation. Detailed telemetry is best effort and droppable; transport and
-critical accounting remain independent of its queues and sinks. `/metrics`,
+critical accounting remain independent of its queues and sinks. Metrics and
 request-history admin APIs, provider routing/translation, tool-call
 execution/validation, Redis, PostgreSQL, and Web UI remain out of scope.
 

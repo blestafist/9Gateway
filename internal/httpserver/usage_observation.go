@@ -201,6 +201,7 @@ type UsageObservationWorker struct {
 	succeeded atomic.Uint64
 	failed    atomic.Uint64
 	dropped   atomic.Uint64
+	metrics   *gatewayMetrics
 }
 
 // NewUsageObservationWorker starts one bounded usage-observation worker.
@@ -241,6 +242,17 @@ func NewUsageObservationWorker(options UsageObservationWorkerOptions) *UsageObse
 	}
 	go worker.run()
 	return worker
+}
+
+func (worker *UsageObservationWorker) metricsQueueSource() func() int {
+	return func() int { return len(worker.queue) }
+}
+
+func (worker *UsageObservationWorker) setMetrics(metrics *gatewayMetrics) {
+	worker.metrics = metrics
+	if metrics != nil {
+		metrics.registerQueue(worker.metricsQueueSource())
+	}
 }
 
 // NewUsageObserver is a concise constructor alias.
@@ -293,6 +305,9 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	worker.processed.Add(1)
 	if job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil {
 		worker.failed.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("failed")
+		}
 		return
 	}
 
@@ -334,6 +349,9 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 		// one-shot tickets so no discarded job can be adjusted later.
 		invalidateObservationJob(job)
 		worker.failed.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("failed")
+		}
 		return
 	}
 	if worker.beforeAdjust != nil {
@@ -348,6 +366,9 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	if !worker.beginAdjust() {
 		invalidateObservationJob(job)
 		worker.failed.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("failed")
+		}
 		return
 	}
 	defer worker.finishAdjust()
@@ -381,6 +402,9 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 	}
 	if settleErr != nil {
 		worker.failed.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("failed")
+		}
 		return
 	}
 	if job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil {
@@ -388,6 +412,9 @@ func (worker *UsageObservationWorker) process(job UsageObservationJob) {
 		return
 	}
 	worker.succeeded.Add(1)
+	if worker.metrics != nil {
+		worker.metrics.telemetryResult("persisted")
+	}
 }
 
 func (worker *UsageObservationWorker) discardQueued() {
@@ -402,6 +429,9 @@ func (worker *UsageObservationWorker) discardQueuedLocked() {
 		case job := <-worker.queue:
 			worker.releaseSlot()
 			worker.dropped.Add(1)
+			if worker.metrics != nil {
+				worker.metrics.telemetryResult("dropped")
+			}
 			invalidateObservationJob(job)
 		default:
 			return
@@ -429,6 +459,9 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 	}
 	if (job.Ticket == nil && job.BudgetTicket == nil && job.Completion == nil) || !validContentCoding(job.ContentCoding) || int64(len(job.Bytes)) > worker.maxBytes {
 		worker.dropped.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("dropped")
+		}
 		invalidateObservationJob(job)
 		return false
 	}
@@ -436,6 +469,9 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 	case <-worker.slots:
 	default:
 		worker.dropped.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("dropped")
+		}
 		invalidateObservationJob(job)
 		return false
 	}
@@ -444,6 +480,9 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 		worker.mu.Unlock()
 		worker.releaseSlot()
 		worker.dropped.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("dropped")
+		}
 		invalidateObservationJob(job)
 		return false
 	}
@@ -454,6 +493,9 @@ func (worker *UsageObservationWorker) submit(job UsageObservationJob) bool {
 	if !worker.accepting {
 		worker.releaseSlot()
 		worker.dropped.Add(1)
+		if worker.metrics != nil {
+			worker.metrics.telemetryResult("dropped")
+		}
 		invalidateObservationJob(job)
 		return false
 	}

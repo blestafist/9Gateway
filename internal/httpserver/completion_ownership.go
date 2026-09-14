@@ -112,6 +112,9 @@ func (ownership *completionOwnership) emit(trace *RequestTraceState, logger *Com
 	if err != nil {
 		return
 	}
+	if metrics := trace.metricsValue(); metrics != nil {
+		metrics.observe(record)
+	}
 	// Completion logger and history persistence are independent best-effort sinks.
 	// Each admission is bounded and nonblocking; one sink may accept while the
 	// other drops due to queue saturation or shutdown. This is intentional: the
