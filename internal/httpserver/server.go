@@ -1814,6 +1814,16 @@ func copyResponseHeaders(destination, source http.Header) {
 	copyHeaders(destination, source, map[string]struct{}{
 		"authorization":       {},
 		"proxy-authorization": {},
+		// Response headers are an observable gateway surface. Do not forward
+		// common credential-bearing spellings when an upstream error echoes them.
+		"api-key":             {},
+		"x-api-key":           {},
+		"x-upstream-api-key":  {},
+		"x-goog-api-key":      {},
+		"x-anthropic-api-key": {},
+		"x-auth-token":        {},
+		"cookie":              {},
+		"set-cookie":          {},
 	})
 }
 

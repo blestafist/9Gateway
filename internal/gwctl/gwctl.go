@@ -547,13 +547,12 @@ func describeKeyFailure(err error) string {
 	case APIErrorNotFound:
 		return "Key not found"
 	case APIErrorNetwork:
-		return fmt.Sprintf("Connection failed: %v", apiErr.Err)
+		// Transport errors can contain a URL, proxy detail, or user-supplied
+		// path. Do not reflect that data in CLI diagnostics.
+		return "Connection failed"
 	case APIErrorMalformed:
 		return "Invalid API response"
 	case APIErrorResponse:
-		if apiErr.Err != nil {
-			return "API error: " + apiErr.Err.Error()
-		}
 		return fmt.Sprintf("API error: gateway returned HTTP %d (%s)", apiErr.StatusCode, http.StatusText(apiErr.StatusCode))
 	default:
 		return "API error: gateway request failed"
@@ -723,20 +722,14 @@ func describeFailure(err error) string {
 	}
 	switch apiErr.Kind {
 	case APIErrorNetwork:
-		return fmt.Sprintf("connection failed: %v", apiErr.Err)
+		return "connection failed"
 	case APIErrorAuth:
 		return fmt.Sprintf("authentication failed: gateway rejected admin credential (HTTP %d)", apiErr.StatusCode)
 	case APIErrorMalformed:
-		if apiErr.Err != nil {
-			return "invalid API response: " + apiErr.Err.Error()
-		}
 		return "invalid API response"
 	case APIErrorResponse:
 		if apiErr.StatusCode != 0 {
 			return fmt.Sprintf("API error: gateway returned HTTP %d (%s)", apiErr.StatusCode, http.StatusText(apiErr.StatusCode))
-		}
-		if apiErr.Err != nil {
-			return "API error: " + apiErr.Err.Error()
 		}
 		return "API error: gateway request failed"
 	default:

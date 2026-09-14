@@ -553,7 +553,7 @@ func writeBodyFile(path string, source io.Reader) (resultErr error) {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not open output file: %v", err)}
+		return &APIError{Kind: APIErrorResponse, Err: errors.New("could not open output file")}
 	}
 	temporaryName := temporary.Name()
 	defer func() {
@@ -564,16 +564,16 @@ func writeBodyFile(path string, source io.Reader) (resultErr error) {
 	}()
 	if info, statErr := os.Stat(path); statErr == nil {
 		if chmodErr := temporary.Chmod(info.Mode().Perm()); chmodErr != nil {
-			return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not set output file mode: %v", chmodErr)}
+			return &APIError{Kind: APIErrorResponse, Err: errors.New("could not set output file mode")}
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not inspect output file: %v", statErr)}
+		return &APIError{Kind: APIErrorResponse, Err: errors.New("could not inspect output file")}
 	}
 	if _, err = io.Copy(temporary, io.LimitReader(source, maxResponseBytes+1)); err != nil {
 		return &APIError{Kind: APIErrorMalformed, Err: errors.New("could not read response body")}
 	}
 	if info, statErr := temporary.Stat(); statErr != nil {
-		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not inspect temporary output: %v", statErr)}
+		return &APIError{Kind: APIErrorResponse, Err: errors.New("could not inspect temporary output")}
 	} else if info.Size() > maxResponseBytes {
 		return &APIError{Kind: APIErrorMalformed, Err: errors.New("response body is too large")}
 	}
@@ -588,13 +588,13 @@ func writeBodyFile(path string, source io.Reader) (resultErr error) {
 		}
 	}
 	if err = temporary.Sync(); err != nil {
-		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not sync output file: %v", err)}
+		return &APIError{Kind: APIErrorResponse, Err: errors.New("could not sync output file")}
 	}
 	if err = temporary.Close(); err != nil {
-		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not close output file: %v", err)}
+		return &APIError{Kind: APIErrorResponse, Err: errors.New("could not close output file")}
 	}
 	if err = os.Rename(temporaryName, path); err != nil {
-		return &APIError{Kind: APIErrorResponse, Err: fmt.Errorf("could not replace output file: %v", err)}
+		return &APIError{Kind: APIErrorResponse, Err: errors.New("could not replace output file")}
 	}
 	// Directory fsync is best effort: it is supported on Unix filesystems but
 	// not consistently available on all platforms supported by Go.
@@ -639,13 +639,10 @@ func describeRequestFailure(err error) string {
 		}
 		return "Request not found"
 	case APIErrorNetwork:
-		return fmt.Sprintf("Connection failed: %v", apiErr.Err)
+		return "Connection failed"
 	case APIErrorMalformed:
 		return "Invalid API response"
 	case APIErrorResponse:
-		if apiErr.Err != nil {
-			return "API error: " + apiErr.Err.Error()
-		}
 		return fmt.Sprintf("API error: gateway returned HTTP %d (%s)", apiErr.StatusCode, http.StatusText(apiErr.StatusCode))
 	default:
 		return "API error: gateway request failed"
