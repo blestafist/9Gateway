@@ -378,6 +378,29 @@ func TestProxyCopiesEndToEndResponseHeadersAndRemovesHopByHopHeaders(t *testing.
 	}
 }
 
+func TestProxyPreservesCookiesAndOrdinaryResponseHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Add("Set-Cookie", "session=opaque; Path=/")
+		response.Header().Set("X-Upstream-Trace", "trace-value")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(newTransportHandler(transport.NewClient(), upstream.URL, "upstream-secret"))
+	t.Cleanup(gateway.Close)
+	response, err := http.Get(gateway.URL + "/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if got := response.Header.Values("Set-Cookie"); len(got) != 1 || got[0] != "session=opaque; Path=/" {
+		t.Fatalf("Set-Cookie = %#v, want transparent cookie", got)
+	}
+	if response.Header.Get("X-Upstream-Trace") != "trace-value" {
+		t.Fatal("ordinary response header was not preserved")
+	}
+}
+
 func TestProxyDoesNotExposeUpstreamAuthorization(t *testing.T) {
 	const upstreamSecret = "upstream-secret"
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

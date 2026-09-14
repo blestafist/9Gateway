@@ -74,12 +74,40 @@ func newCanaryScanner(canaries auditCanaries) canaryScanner {
 	// key material.
 	if len(canaries.gatewayRaw) > len(auth.GatewayKeyNamespace)+auth.GatewayKeyDisplayPrefixLength+12 {
 		start := len(auth.GatewayKeyNamespace) + auth.GatewayKeyDisplayPrefixLength
-		values = append(values, canaryValue{"gateway key fragment", canaries.gatewayRaw[start : start+12]}, canaryValue{"gateway key suffix", canaries.gatewayRaw[len(canaries.gatewayRaw)-12:]})
+		values = appendMeaningfulWindows(values, "gateway key fragment", canaries.gatewayRaw[start:])
 	}
 	for _, item := range []canaryValue{{"admin fragment", canaries.admin}, {"pepper fragment", canaries.pepper}, {"upstream fragment", canaries.upstream}, {"sqlite fragment", canaries.sqlite}, {"body fragment", canaries.body}, {"query fragment", canaries.query}} {
-		values = append(values, canaryValue{item.label, item.value[:12]}, canaryValue{item.label + " suffix", item.value[len(item.value)-12:]})
+		values = appendMeaningfulWindows(values, item.label, item.value)
 	}
 	return canaryScanner{values: values}
+}
+
+// appendMeaningfulWindows deliberately overlaps windows across the complete
+// secret. Prefix/suffix-only checks miss a leaked middle fragment split across
+// a formatted header, log field, or error message.
+func appendMeaningfulWindows(values []canaryValue, label, secret string) []canaryValue {
+	const width = 12
+	if len(secret) <= width {
+		return append(values, canaryValue{label, secret})
+	}
+	step := width / 2
+	for start := 0; start+width <= len(secret); start += step {
+		values = append(values, canaryValue{label, secret[start : start+width]})
+	}
+	if last := len(secret) - width; last >= 0 && (len(secret)-width)%step != 0 {
+		values = append(values, canaryValue{label + " suffix", secret[last:]})
+	}
+	return values
+}
+
+func TestCanaryScannerChecksOverlappingMiddleWindows(t *testing.T) {
+	scanner := newCanaryScanner(newAuditCanaries("gw_test_0123456789ABCDEFGHIJKL"))
+	for _, value := range scanner.values {
+		if strings.Contains(value.label, "gateway key") && strings.Contains(value.value, "56789") {
+			return
+		}
+	}
+	t.Fatal("scanner did not include an overlapping middle gateway-key window")
 }
 
 func (scanner canaryScanner) check(t *testing.T, surface auditSurface) {

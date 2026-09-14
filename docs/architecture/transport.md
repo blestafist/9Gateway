@@ -71,11 +71,13 @@ not sniff response body bytes. After safe headers and status are copied, SSE
 uses the dedicated transparent streaming loop; JSON and opaque responses use
 ordinary byte copying. The streaming loop is protocol-neutral.
 
-Non-SSE upstream representations are bounded to 100 MiB. Unknown-length
-responses are spooled through a bounded temporary file so an oversized body
-can be rejected before downstream success headers are committed without
-retaining the response in memory. SSE has no total-size limit, but each framed
-event is bounded to 1 MiB across transport read boundaries.
+Non-SSE upstream representations are bounded to 100 MiB. All responses,
+including those declaring a smaller `Content-Length`, are spooled through a
+bounded temporary file so dishonest lengths and oversized bodies are rejected
+before downstream success headers are committed without retaining the response
+in memory. SSE has no total-size limit, but each framed event is bounded to
+1 MiB across transport read boundaries; the violating byte is never forwarded
+and the already-committed stream is terminated.
 
 ## Cancellation
 

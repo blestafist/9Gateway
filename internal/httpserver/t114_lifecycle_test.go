@@ -86,7 +86,7 @@ func TestT114BudgetPostStartErrorsRemainConservative(t *testing.T) {
 				}))
 				return server.URL, server.Close
 			},
-			wantStatus: http.StatusOK,
+			wantStatus: http.StatusBadGateway,
 		},
 		{
 			name: "unsupported response",

@@ -64,16 +64,16 @@ func TestHistoryWorkerShutdownWaitsForCanceledSQLBeforeStorageClose(t *testing.T
 	// Shutdown's return is the storage ownership barrier, even when the caller
 	// deadline expired. Closing the owner after it returns cannot race SQL.
 	close(repository.closed)
+	select {
+	case <-worker.done:
+	case <-time.After(time.Second):
+		t.Fatal("history worker did not honor canceled SQL")
+	}
 	repository.mu.Lock()
 	startedAfterClose := repository.startedAfterClose
 	repository.mu.Unlock()
 	if startedAfterClose {
 		t.Fatal("repository issued SQL after its storage owner closed")
-	}
-	select {
-	case <-worker.done:
-	default:
-		t.Fatal("history worker still running after shutdown")
 	}
 }
 

@@ -67,3 +67,15 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 The image healthcheck executes `/gateway healthcheck`, which performs a local
 GET of `/ready`; `GATEWAY_HEALTHCHECK_ADDRESS` or
 `/gateway healthcheck --address ...` can point it at a non-default listener.
+
+Use a named volume for the normal deployment so the image-owned `/data`
+directory retains its UID 65532 permissions:
+
+```text
+docker volume create 9gateway-data
+docker run --mount source=9gateway-data,target=/data ... 9gateway:latest
+```
+
+If a host bind mount is required, create it for the image user first:
+`install -d -m 0750 -o 65532 -g 65532 data`. The image keeps `/gwctl` and puts
+`/` on `PATH`, so `docker exec <container> gwctl ...` works without a shell.

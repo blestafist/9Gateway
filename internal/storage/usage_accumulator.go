@@ -200,10 +200,10 @@ func (accumulator *UsageAggregateAccumulator) Shutdown(ctx context.Context) erro
 	select {
 	case <-accumulator.done:
 	case <-ctx.Done():
-		// Cancel the worker-owned context and wait for any in-flight SQLite call;
-		// callers must not close the database while this goroutine still exists.
+		// Cancel the worker-owned context, but do not wait beyond the shared
+		// lifecycle deadline. The process owner must retain SQLite until the
+		// worker has actually exited.
 		accumulator.cancel()
-		<-accumulator.done
 		return ctx.Err()
 	}
 	for {

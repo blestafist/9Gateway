@@ -205,7 +205,8 @@ func (accumulator *BudgetAccumulator) Shutdown(ctx context.Context) error {
 	case <-accumulator.done:
 	case <-ctx.Done():
 		accumulator.cancel()
-		<-accumulator.done
+		// The caller's shutdown deadline is authoritative. SQLite remains open
+		// when the worker has not yet observed cancellation.
 		return ctx.Err()
 	}
 	for {

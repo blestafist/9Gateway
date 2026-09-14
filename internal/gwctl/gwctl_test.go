@@ -26,7 +26,7 @@ func TestRunVersionHelpAndUnknownCommand(t *testing.T) {
 		{name: "version ignores gateway and credential", args: []string{"--gateway-url", ":not-a-url", "version"}, status: ExitSuccess, stdoutPart: "gwctl version "},
 		{name: "help", args: []string{"--help"}, status: ExitSuccess, stdoutPart: "Usage: gwctl", stderrPart: ""},
 		{name: "help after command", args: []string{"ping", "--help"}, status: ExitSuccess, stdoutPart: "Commands:"},
-		{name: "unknown", args: []string{"wat"}, status: ExitUsage, stderrPart: `unknown command "wat"`},
+		{name: "unknown", args: []string{"wat"}, status: ExitUsage, stderrPart: "unknown command"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

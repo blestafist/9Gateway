@@ -363,14 +363,9 @@ func (worker *HistoryPersistenceWorker) Pending() int {
 
 // Shutdown stops admission, drains queued jobs while the caller's context
 // permits, and drops any remainder at deadline. It never closes SQLite and
-// returns only after the worker goroutine has exited. On deadline it cancels
-// the worker context before dropping queued jobs; repositories must honor
-// context cancellation so an in-progress SQL call does not make shutdown
-// unbounded. After deadline expiry and context cancellation, Shutdown waits
-// unconditionally for the worker goroutine to exit; this wait is bounded only
-// by repository compliance with context cancellation. This completion barrier
-// is what permits the process owner to close SQLite immediately after Shutdown
-// returns.
+// returns after the worker exits when possible. On deadline it cancels the
+// worker context, drops queued jobs, and returns immediately; the process owner
+// must retain SQLite until the worker has actually exited.
 func (worker *HistoryPersistenceWorker) Shutdown(ctx context.Context) error {
 	if worker == nil {
 		return nil
@@ -396,7 +391,6 @@ func (worker *HistoryPersistenceWorker) Shutdown(ctx context.Context) error {
 				worker.drop(job)
 			default:
 				worker.mu.Unlock()
-				<-worker.done
 				return ctx.Err()
 			}
 		}

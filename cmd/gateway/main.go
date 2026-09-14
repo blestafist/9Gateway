@@ -49,9 +49,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	shutdownStarted := false
 	defer func() {
-		if err := database.Close(); err != nil {
-			slog.Default().Error("SQLite shutdown failed", "error", err)
+		// shutdownGateway owns the final close once the listener has started. If
+		// shutdown is forced while a handler survives, deliberately leave the
+		// database open: a deferred close here would race that handler.
+		if !shutdownStarted {
+			if err := database.Close(); err != nil {
+				slog.Default().Error("SQLite shutdown failed", "error", err)
+			}
 		}
 	}()
 	keyRepository := storage.NewAPIKeyRepository(database)
@@ -237,19 +243,25 @@ func run() error {
 		MaxHeaderBytes: 16 * 1024,
 	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ListenAndServe() }()
+	var shutdownResult error
 	select {
 	case err := <-serveErr:
+		stop()
 		if err != nil && err != http.ErrServerClosed {
 			slog.Default().Error("HTTP server failed", "error", err)
 			cleanupStartup(nil, usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
 			return err
 		}
 	case <-shutdownContext.Done():
+		// Restore the default signal disposition immediately. A second SIGTERM
+		// or SIGINT must be able to terminate a process stuck in a handler.
+		stop()
+		shutdownStarted = true
 		shutdownErr := shutdownGateway(cfg.ShutdownTimeoutSeconds, server, database, readinessState, &activeRequests,
 			usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
+		shutdownResult = shutdownErr
 		if shutdownErr != nil {
 			slog.Default().Error("gateway shutdown failed", "error", shutdownErr)
 		}
@@ -257,8 +269,10 @@ func run() error {
 			slog.Default().Error("HTTP server failed", "error", err)
 		}
 	}
-	return nil
+	return shutdownResult
 }
+
+var errShutdownDeadline = errors.New("gateway shutdown deadline exceeded; dependent resources remain open")
 
 const (
 	defaultHealthcheckAddress = "http://127.0.0.1:8080/ready"
@@ -359,16 +373,47 @@ func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storag
 	}
 	if active != nil {
 		active.Done()
-		active.Wait()
+		finished := make(chan struct{})
+		go func() {
+			active.Wait()
+			close(finished)
+		}()
+		select {
+		case <-finished:
+		case <-ctx.Done():
+			// Close has already cancelled context-aware handlers. Never close
+			// workers or SQLite while a non-cooperative handler can still use
+			// them.
+			return errors.Join(shutdownErr, errShutdownDeadline)
+		}
 	}
-	if err := usage.Drain(ctx); err != nil {
-		slog.Default().Error("usage observation shutdown failed", "error", err)
+	var lifecycleErr error
+	if usage != nil {
+		if err := usage.Drain(ctx); err != nil {
+			slog.Default().Error("usage observation shutdown failed", "error", err)
+			if ctx.Err() != nil {
+				return errors.Join(shutdownErr, errShutdownDeadline, err)
+			}
+			lifecycleErr = errors.Join(lifecycleErr, err)
+		}
 	}
-	if err := token.Shutdown(ctx); err != nil {
-		slog.Default().Error("token aggregate shutdown failed", "error", err)
+	if token != nil {
+		if err := token.Shutdown(ctx); err != nil {
+			slog.Default().Error("token aggregate shutdown failed", "error", err)
+			if ctx.Err() != nil {
+				return errors.Join(shutdownErr, errShutdownDeadline, err)
+			}
+			lifecycleErr = errors.Join(lifecycleErr, err)
+		}
 	}
-	if err := budget.Shutdown(ctx); err != nil {
-		slog.Default().Error("budget aggregate shutdown failed", "error", err)
+	if budget != nil {
+		if err := budget.Shutdown(ctx); err != nil {
+			slog.Default().Error("budget aggregate shutdown failed", "error", err)
+			if ctx.Err() != nil {
+				return errors.Join(shutdownErr, errShutdownDeadline, err)
+			}
+			lifecycleErr = errors.Join(lifecycleErr, err)
+		}
 	}
 	pending := 0
 	if completion != nil {
@@ -403,9 +448,13 @@ func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storag
 	}
 	if drainErr != nil {
 		slog.Default().Error("telemetry shutdown failed", "error", drainErr)
+		if ctx.Err() != nil {
+			return errors.Join(shutdownErr, errShutdownDeadline, drainErr)
+		}
+		lifecycleErr = errors.Join(lifecycleErr, drainErr)
 	}
 	slog.Default().Info("shutdown complete", "dropped", dropped)
-	return errors.Join(shutdownErr, drainErr)
+	return errors.Join(shutdownErr, lifecycleErr)
 }
 
 func keyRecordByID(records []storage.APIKeyRecord, id string) (storage.APIKeyRecord, bool) {

@@ -40,6 +40,7 @@ LABEL org.opencontainers.image.title="9gateway" \
 
 COPY --from=build --chown=65532:65532 /out/gateway /gateway
 COPY --from=build --chown=65532:65532 /out/gwctl /gwctl
+ENV PATH=/:/usr/local/bin:/usr/local/sbin:/usr/bin:/sbin:/bin
 COPY --from=build --chown=65532:65532 /out/data /data
 COPY --from=build --chown=65532:65532 /out/config /etc/gateway
 

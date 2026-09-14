@@ -115,7 +115,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	command := commandArgs[0]
 	if command != "version" && command != "ping" && command != "keys" && command != "requests" {
-		return usageFailure(stderr, fmt.Errorf("unknown command %q", command))
+		return usageFailure(stderr, errors.New("unknown command"))
 	}
 	if help {
 		printUsage(stdout)
@@ -146,7 +146,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	default:
 		// The command set is checked above. Keep this branch defensive if a
 		// future edit adds a command without adding its implementation.
-		return usageFailure(stderr, fmt.Errorf("unknown command %q", command))
+		return usageFailure(stderr, errors.New("unknown command"))
 	}
 }
 
@@ -192,7 +192,7 @@ func runKeys(ctx context.Context, args []string, options options, stdout, stderr
 		}
 		return ExitSuccess
 	default:
-		return usageFailure(stderr, fmt.Errorf("unknown keys subcommand %q", args[0]))
+		return usageFailure(stderr, errors.New("unknown keys subcommand"))
 	}
 }
 
@@ -216,7 +216,7 @@ func parseKeyListOptions(args []string) (keyListOptions, error) {
 				return keyListOptions{}, err
 			}
 		default:
-			return keyListOptions{}, fmt.Errorf("unexpected argument for keys list: %s", arg)
+			return keyListOptions{}, errors.New("unexpected argument for keys list")
 		}
 	}
 	return parsed, nil
@@ -240,7 +240,7 @@ func parseKeyGetOptions(args []string) (string, keyGetOptions, error) {
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
-			return "", keyGetOptions{}, fmt.Errorf("unknown option for keys get: %s", arg)
+			return "", keyGetOptions{}, errors.New("unknown option for keys get")
 		}
 		if id != "" {
 			return "", keyGetOptions{}, errors.New("keys get requires exactly one key ID")

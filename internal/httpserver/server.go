@@ -1424,17 +1424,23 @@ var errSSEEventTooLarge = errors.New("upstream SSE event exceeds maximum size")
 // temporary file. This keeps the gateway from committing a successful status
 // before discovering an oversized response, without retaining 100 MiB in RAM.
 func copyBoundedNonStreamingResponse(response http.ResponseWriter, upstream *http.Response) error {
+	return copyBoundedNonStreamingResponseWithLimit(response, upstream, maxUpstreamResponseBodyBytes)
+}
+
+// copyBoundedNonStreamingResponseWithLimit is split out so transport tests can
+// exercise the limit and temporary-file cleanup with small bodies.
+func copyBoundedNonStreamingResponseWithLimit(response http.ResponseWriter, upstream *http.Response, limit int64) error {
+	if limit < 0 {
+		limit = 0
+	}
 	declared, known := responseContentLength(upstream)
-	if known && declared > maxUpstreamResponseBodyBytes {
+	if known && declared > limit {
 		writeGatewayError(response, gatewayErrorResponseTransport, "")
 		return errUpstreamResponseTooLarge
 	}
-	if known {
-		copyResponseHeaders(response.Header(), upstream.Header)
-		response.WriteHeader(upstream.StatusCode)
-		_, err := io.Copy(response, io.LimitReader(upstream.Body, maxUpstreamResponseBodyBytes))
-		return err
-	}
+	// Always spool through limit+1, including declared-small responses. A
+	// dishonest RoundTripper must not be able to commit a successful status
+	// before its body is checked, and the spool keeps the limit out of RAM.
 	temporary, err := os.CreateTemp("", "9gateway-response-")
 	if err != nil {
 		writeGatewayError(response, gatewayErrorResponseTransport, "")
@@ -1443,14 +1449,18 @@ func copyBoundedNonStreamingResponse(response http.ResponseWriter, upstream *htt
 	name := temporary.Name()
 	defer os.Remove(name)
 	defer temporary.Close()
-	written, copyErr := io.Copy(temporary, io.LimitReader(upstream.Body, maxUpstreamResponseBodyBytes+1))
+	written, copyErr := io.Copy(temporary, io.LimitReader(upstream.Body, limit+1))
 	if copyErr != nil {
 		writeGatewayError(response, gatewayErrorResponseTransport, "")
 		return copyErr
 	}
-	if written > maxUpstreamResponseBodyBytes {
+	if written > limit {
 		writeGatewayError(response, gatewayErrorResponseTransport, "")
 		return errUpstreamResponseTooLarge
+	}
+	if known && written != declared {
+		writeGatewayError(response, gatewayErrorResponseTransport, "")
+		return io.ErrUnexpectedEOF
 	}
 	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
 		writeGatewayError(response, gatewayErrorResponseTransport, "")
@@ -1486,7 +1496,10 @@ func (reader *sseEventLimitReader) Read(destination []byte) (int, error) {
 		reader.size++
 		if reader.size > reader.limit {
 			reader.bad = true
-			return index + 1, errSSEEventTooLarge
+			// The violating byte is never returned to streamResponseBody. The
+			// response status is already committed by this point, so the
+			// deliberate outcome is a truncated stream followed by cancellation.
+			return index, errSSEEventTooLarge
 		}
 		if reader.tailN < len(reader.tail) {
 			reader.tail[reader.tailN] = destination[index]
@@ -1822,8 +1835,6 @@ func copyResponseHeaders(destination, source http.Header) {
 		"x-goog-api-key":      {},
 		"x-anthropic-api-key": {},
 		"x-auth-token":        {},
-		"cookie":              {},
-		"set-cookie":          {},
 	})
 }
 
