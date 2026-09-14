@@ -25,13 +25,16 @@ import (
 const Version = "0.1.0"
 
 const (
-	defaultGatewayURL = "http://localhost:8080"
-	adminKeysPath     = "/admin/v1/keys?limit=1"
-	adminKeysEndpoint = "/admin/v1/keys"
-	requestTimeout    = 10 * time.Second
-	maxResponseBytes  = 1 << 20
-	keyPageSize       = 50
-	maxKeysLimit      = 100000
+	defaultGatewayURL     = "http://localhost:8080"
+	adminKeysPath         = "/admin/v1/keys?limit=1"
+	adminKeysEndpoint     = "/admin/v1/keys"
+	adminRequestsEndpoint = "/admin/v1/requests"
+	requestTimeout        = 10 * time.Second
+	maxResponseBytes      = 1 << 20
+	keyPageSize           = 50
+	requestPageSize       = 50
+	maxRequestPages       = 50
+	maxKeysLimit          = 100000
 )
 
 // Exit statuses are part of gwctl's command-line interface.
@@ -110,14 +113,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	command := commandArgs[0]
-	if command != "version" && command != "ping" && command != "keys" {
+	if command != "version" && command != "ping" && command != "keys" && command != "requests" {
 		return usageFailure(stderr, fmt.Errorf("unknown command %q", command))
 	}
 	if help {
 		printUsage(stdout)
 		return ExitSuccess
 	}
-	if command != "keys" && len(commandArgs) != 1 {
+	if command != "keys" && command != "requests" && len(commandArgs) != 1 {
 		return usageFailure(stderr, fmt.Errorf("unexpected arguments for %s", command))
 	}
 
@@ -137,6 +140,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return ExitSuccess
 	case "keys":
 		return runKeys(ctx, commandArgs[1:], options, stdout, stderr)
+	case "requests":
+		return runRequests(ctx, commandArgs[1:], options, stdout, stderr)
 	default:
 		// The command set is checked above. Keep this branch defensive if a
 		// future edit adds a command without adding its implementation.
@@ -753,10 +758,14 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  version    print the gwctl version")
 	fmt.Fprintln(writer, "  ping       verify gateway connectivity and admin authentication")
 	fmt.Fprintln(writer, "  keys       list or inspect API keys")
+	fmt.Fprintln(writer, "  requests   list or inspect request history")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Keys commands:")
 	fmt.Fprintln(writer, "  keys list [--limit N] [--json]")
 	fmt.Fprintln(writer, "  keys get <id> [--json]")
+	fmt.Fprintln(writer, "  requests list [--limit N] [--key-id ID] [--after TIME] [--before TIME] [--json]")
+	fmt.Fprintln(writer, "  requests get <request-id> [--json]")
+	fmt.Fprintln(writer, "  requests get <request-id> --body <kind> [--output FILE]")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Global options:")
 	fmt.Fprintln(writer, "  --gateway-url URL          gateway base URL (default http://localhost:8080)")
