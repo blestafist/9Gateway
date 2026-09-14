@@ -522,7 +522,17 @@ func getRequestBody(ctx context.Context, options options, id string, parsed requ
 		}
 		destination = file
 	}
-	_, copyErr := io.Copy(destination, io.LimitReader(response.Body, maxResponseBytes+1))
+	_, copyErr := io.Copy(destination, io.LimitReader(response.Body, maxResponseBytes))
+	if copyErr == nil {
+		var extra [1]byte
+		if count, readErr := response.Body.Read(extra[:]); readErr != io.EOF {
+			if readErr != nil {
+				copyErr = readErr
+			} else if count != 0 {
+				copyErr = errors.New("response body is too large")
+			}
+		}
+	}
 	closeErr := error(nil)
 	if file != nil {
 		closeErr = file.Close()
