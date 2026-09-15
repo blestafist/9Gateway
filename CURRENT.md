@@ -32,5 +32,6 @@ and early request-line limits; T154 audited control-plane secret redaction and
 hardened credential-bearing error/header surfaces. T156-T160 completed Compose,
 startup validation, version metadata, integration coverage, documentation, and
 release-candidate preparation. Docker-daemon runtime checks remain environment
-dependent, and known T157/T158 config test failures mean this candidate is not
-test-green yet. No Web UI, provider routing, retries, Redis, or PostgreSQL.
+dependent. The three stale T157 config assertions are fixed; the remaining
+REVIEW-HANDOFF findings are still in progress and do not constitute a completed
+review. No Web UI, provider routing, retries, Redis, or PostgreSQL.

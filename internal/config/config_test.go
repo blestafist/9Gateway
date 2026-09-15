@@ -125,7 +125,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name:    "admin credential must be distinct",
 			config:  Config{ListenAddr: ":8080", UpstreamBaseURL: "http://router.example.test", UpstreamAPIKey: "same", SQLitePath: databasePath, AuthPepper: "pepper", AdminCredential: "same"},
-			wantErr: "admin credential must differ from upstream API key",
+			wantErr: "config validation failed: field 'admin_credential': must differ from upstream API key",
 		},
 		{
 			name:    "directory is not a database path",

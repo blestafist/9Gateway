@@ -201,7 +201,7 @@ func TestLoadFailsWhenUpstreamAPIKeyEnvironmentVariableIsMissing(t *testing.T) {
 	path := writeConfig(t, "listen_addr: :8080\nupstream_base_url: http://router.example.test\nupstream_api_key: ${TEST_MISSING_UPSTREAM_API_KEY}\nsqlite_path: ':memory:'\nauth_pepper: ${TEST_AUTH_PEPPER}\nadmin_credential: ${TEST_ADMIN_CREDENTIAL}\n")
 
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "upstream_api_key") || !strings.Contains(err.Error(), "environment variable \"TEST_MISSING_UPSTREAM_API_KEY\" is not set") {
+	if err == nil || !strings.Contains(err.Error(), "config validation failed: field 'upstream_api_key': environment variable 'TEST_MISSING_UPSTREAM_API_KEY' not set") {
 		t.Fatalf("Load() error = %v, want missing environment variable error", err)
 	}
 }
@@ -214,7 +214,7 @@ func TestLoadSecretEnvironmentReferences(t *testing.T) {
 		field string
 	}{
 		{name: "missing pepper", yaml: "auth_pepper: ${MISSING_PEPPER}\nadmin_credential: ${VALID_ADMIN}", setup: func(t *testing.T) { t.Setenv("VALID_ADMIN", "admin") }, field: "auth_pepper"},
-		{name: "empty pepper", yaml: "auth_pepper: ${EMPTY_PEPPER}\nadmin_credential: ${VALID_ADMIN}", setup: func(t *testing.T) { t.Setenv("EMPTY_PEPPER", ""); t.Setenv("VALID_ADMIN", "admin") }, field: "auth pepper"},
+		{name: "empty pepper", yaml: "auth_pepper: ${EMPTY_PEPPER}\nadmin_credential: ${VALID_ADMIN}", setup: func(t *testing.T) { t.Setenv("EMPTY_PEPPER", ""); t.Setenv("VALID_ADMIN", "admin") }, field: "auth_pepper"},
 		{name: "literal pepper rejected", yaml: "auth_pepper: pepper\nadmin_credential: ${VALID_ADMIN}", setup: func(t *testing.T) { t.Setenv("VALID_ADMIN", "admin") }, field: "auth_pepper"},
 		{name: "literal admin rejected", yaml: "auth_pepper: ${VALID_PEPPER}\nadmin_credential: admin", setup: func(t *testing.T) { t.Setenv("VALID_PEPPER", "pepper") }, field: "admin_credential"},
 		{name: "malformed admin reference", yaml: "auth_pepper: ${VALID_PEPPER}\nadmin_credential: ${ADMIN", setup: func(t *testing.T) { t.Setenv("VALID_PEPPER", "pepper") }, field: "admin_credential"},
