@@ -1515,8 +1515,8 @@ func TestProxyDispatchesOnlySSEThroughStreamingCopyPath(t *testing.T) {
 		contentType string
 		wantFlushes int
 	}{
-		{name: "json", contentType: "application/json", wantFlushes: 0},
-		{name: "opaque", contentType: "application/octet-stream", wantFlushes: 0},
+		{name: "json", contentType: "application/json", wantFlushes: 1},
+		{name: "opaque", contentType: "application/octet-stream", wantFlushes: 1},
 		{name: "SSE", contentType: "text/event-stream", wantFlushes: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {

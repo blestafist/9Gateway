@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1420,65 +1419,78 @@ func dispatchErrorCode(err error) string {
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds maximum size")
 var errSSEEventTooLarge = errors.New("upstream SSE event exceeds maximum size")
 
-// copyBoundedNonStreamingResponse spools unknown-length responses to a
-// temporary file. This keeps the gateway from committing a successful status
-// before discovering an oversized response, without retaining 100 MiB in RAM.
+// copyBoundedNonStreamingResponse forwards non-SSE responses as they arrive,
+// while preventing the byte which exceeds the transport bound from reaching
+// the client. The response is deliberately committed before the body is
+// consumed: a generic non-SSE representation is still transparent transport,
+// not a response which must be validated in full before its first byte.
 func copyBoundedNonStreamingResponse(response http.ResponseWriter, upstream *http.Response) error {
 	return copyBoundedNonStreamingResponseWithLimit(response, upstream, maxUpstreamResponseBodyBytes)
 }
 
 // copyBoundedNonStreamingResponseWithLimit is split out so transport tests can
-// exercise the limit and temporary-file cleanup with small bodies.
+// exercise the limit with small bodies.
 func copyBoundedNonStreamingResponseWithLimit(response http.ResponseWriter, upstream *http.Response, limit int64) error {
 	if limit < 0 {
 		limit = 0
 	}
 	declared, known := responseContentLength(upstream)
-	if known && declared > limit {
-		writeGatewayError(response, gatewayErrorResponseTransport, "")
-		return errUpstreamResponseTooLarge
-	}
-	// Always spool through limit+1, including declared-small responses. A
-	// dishonest RoundTripper must not be able to commit a successful status
-	// before its body is checked, and the spool keeps the limit out of RAM.
-	temporary, err := os.CreateTemp("", "9gateway-response-")
-	if err != nil {
-		writeGatewayError(response, gatewayErrorResponseTransport, "")
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	defer temporary.Close()
-	written, copyErr := io.Copy(temporary, io.LimitReader(upstream.Body, limit+1))
-	if copyErr != nil {
-		writeGatewayError(response, gatewayErrorResponseTransport, "")
-		return copyErr
-	}
-	if written > limit {
-		writeGatewayError(response, gatewayErrorResponseTransport, "")
-		return errUpstreamResponseTooLarge
-	}
-	if known && written != declared {
-		writeGatewayError(response, gatewayErrorResponseTransport, "")
-		return io.ErrUnexpectedEOF
-	}
-	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
-		writeGatewayError(response, gatewayErrorResponseTransport, "")
-		return err
-	}
 	copyResponseHeaders(response.Header(), upstream.Header)
+	// A truncated response cannot retain a larger Content-Length: doing so
+	// makes the downstream HTTP client wait for bytes the gateway intentionally
+	// does not send. Known-small lengths remain untouched for transparent
+	// passthrough.
+	if known && declared > limit {
+		response.Header().Del("Content-Length")
+	}
 	response.WriteHeader(upstream.StatusCode)
-	_, err = io.Copy(response, temporary)
-	return err
+	return streamResponseBody(response, &boundedResponseReader{source: upstream.Body, remaining: limit})
+}
+
+// boundedResponseReader probes one byte after the allowed prefix. That byte
+// is used only to detect overflow and is never returned to the caller.
+type boundedResponseReader struct {
+	source    io.Reader
+	remaining int64
+	exceeded  bool
+}
+
+func (reader *boundedResponseReader) Read(destination []byte) (int, error) {
+	if reader == nil || reader.source == nil {
+		return 0, io.EOF
+	}
+	if reader.exceeded {
+		return 0, errUpstreamResponseTooLarge
+	}
+	if reader.remaining == 0 {
+		var probe [1]byte
+		read, err := reader.source.Read(probe[:])
+		if read > 0 {
+			reader.exceeded = true
+			return 0, errUpstreamResponseTooLarge
+		}
+		if err == nil {
+			return 0, io.ErrNoProgress
+		}
+		return 0, err
+	}
+	if int64(len(destination)) > reader.remaining {
+		destination = destination[:int(reader.remaining)]
+	}
+	read, err := reader.source.Read(destination)
+	if read > 0 {
+		reader.remaining -= int64(read)
+	}
+	return read, err
 }
 
 type sseEventLimitReader struct {
-	source io.Reader
-	limit  int
-	size   int
-	bad    bool
-	tail   [4]byte
-	tailN  int
+	source     io.Reader
+	limit      int
+	size       int
+	bad        bool
+	lineBreaks int
+	pendingCR  bool
 }
 
 func (reader *sseEventLimitReader) Read(destination []byte) (int, error) {
@@ -1501,21 +1513,33 @@ func (reader *sseEventLimitReader) Read(destination []byte) (int, error) {
 			// deliberate outcome is a truncated stream followed by cancellation.
 			return index, errSSEEventTooLarge
 		}
-		if reader.tailN < len(reader.tail) {
-			reader.tail[reader.tailN] = destination[index]
-			reader.tailN++
-		} else {
-			copy(reader.tail[:], reader.tail[1:])
-			reader.tail[len(reader.tail)-1] = destination[index]
-		}
-		if (reader.tailN >= 2 && reader.tail[reader.tailN-2] == '\n' && reader.tail[reader.tailN-1] == '\n') ||
-			(reader.tailN >= 3 && reader.tail[reader.tailN-3] == '\n' && reader.tail[reader.tailN-2] == '\r' && reader.tail[reader.tailN-1] == '\n') ||
-			(reader.tailN == 4 && reader.tail[0] == '\r' && reader.tail[1] == '\n' && reader.tail[2] == '\r' && reader.tail[3] == '\n') {
-			reader.size = 0
-			reader.tailN = 0
-		}
+		reader.observeByte(destination[index])
 	}
 	return read, err
+}
+
+func (reader *sseEventLimitReader) observeByte(value byte) {
+	switch value {
+	case '\r':
+		reader.finishLineBreak()
+		reader.pendingCR = true
+	case '\n':
+		if !reader.pendingCR {
+			reader.finishLineBreak()
+		}
+		reader.pendingCR = false // CRLF is one line break.
+	default:
+		reader.pendingCR = false
+		reader.lineBreaks = 0
+	}
+}
+
+func (reader *sseEventLimitReader) finishLineBreak() {
+	reader.lineBreaks++
+	if reader.lineBreaks >= 2 {
+		reader.size = 0
+		reader.lineBreaks = 0
+	}
 }
 
 func responseContentLength(upstream *http.Response) (int64, bool) {
@@ -1740,7 +1764,7 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader, observatio
 			if written != read {
 				if written > 0 && written < read {
 					if flushErr := controller.Flush(); flushErr == nil {
-						if completion != nil {
+						if completion != nil && completion.responseBodyAfterFlush {
 							completion.recordResponseBodyAfterFlush(buffer[:written], written)
 						}
 						if observation != nil {
@@ -1754,7 +1778,7 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader, observatio
 			if flushErr := controller.Flush(); flushErr != nil {
 				return flushErr
 			}
-			if completion != nil {
+			if completion != nil && completion.responseBodyAfterFlush {
 				completion.recordResponseBodyAfterFlush(buffer[:read], written)
 			}
 			// Capture only after both the downstream write and its flush have
