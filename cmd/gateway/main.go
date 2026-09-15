@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -215,6 +214,10 @@ func run() error {
 		RequestRetention: time.Duration(cfg.Observability.RequestRetentionSeconds) * time.Second,
 		BodyRetention:    time.Duration(cfg.Observability.BodyRetentionSeconds) * time.Second,
 	})
+	if err := historyWorker.WaitReady(context.Background()); err != nil {
+		cleanupStartup(database, usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
+		return err
+	}
 	readinessState := &httpserver.ReadinessState{}
 
 	gatewayHandler, err := httpserver.NewHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservationWorkerAndHistory(upstreamClient, cfg.UpstreamBaseURL, cfg.UpstreamAPIKey, cfg.AdminCredential, cfg.AuthPepper, keyRepository, nil, nil, completionLogger, tokenLimiter, httpserver.TokenAdmissionConfig{
@@ -237,15 +240,8 @@ func run() error {
 	}))
 	metadata := version.Current()
 	slog.Default().Info("starting gateway version=" + metadata.Version + " commit=" + metadata.Commit + " build=" + metadata.BuildDate)
-	var activeRequests sync.WaitGroup
-	// Keep the counter non-zero until shutdown has stopped accepting requests;
-	// this makes a handler starting concurrently with Shutdown safe to Add.
-	activeRequests.Add(1)
-	trackedHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		activeRequests.Add(1)
-		defer activeRequests.Done()
-		gatewayHandler.ServeHTTP(response, request)
-	})
+	activeRequests := httpserver.NewRequestLifecycle()
+	trackedHandler := activeRequests.Handler(gatewayHandler)
 	server := &http.Server{
 		Addr:           cfg.ListenAddr,
 		Handler:        trackedHandler,
@@ -268,7 +264,7 @@ func run() error {
 		// or SIGINT must be able to terminate a process stuck in a handler.
 		stop()
 		shutdownStarted = true
-		shutdownErr := shutdownGateway(cfg.ShutdownTimeoutSeconds, server, database, readinessState, &activeRequests,
+		shutdownErr := shutdownGateway(cfg.ShutdownTimeoutSeconds, server, database, readinessState, activeRequests,
 			usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
 		shutdownResult = shutdownErr
 		if shutdownErr != nil {
@@ -361,7 +357,7 @@ func cleanupStartup(_ *storage.DB, usage *httpserver.UsageObservationWorker, tok
 
 // shutdownGateway coordinates the process-owned dependencies under one
 // absolute deadline. Readiness is flipped before net/http stops accepting.
-func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storage.DB, readiness *httpserver.ReadinessState, active *sync.WaitGroup,
+func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storage.DB, readiness *httpserver.ReadinessState, active *httpserver.RequestLifecycle,
 	usage *httpserver.UsageObservationWorker, token *storage.UsageAggregateAccumulator, budget *storage.BudgetAccumulator,
 	completion *httpserver.CompletionLogger, history *httpserver.HistoryPersistenceWorker) error {
 	if timeoutSeconds <= 0 {
@@ -381,19 +377,12 @@ func shutdownGateway(timeoutSeconds int64, server *http.Server, database *storag
 		slog.Default().Error("HTTP server shutdown failed", "error", shutdownErr)
 	}
 	if active != nil {
-		active.Done()
-		finished := make(chan struct{})
-		go func() {
-			active.Wait()
-			close(finished)
-		}()
-		select {
-		case <-finished:
-		case <-ctx.Done():
+		active.StopAccepting()
+		if err := active.Wait(ctx); err != nil {
 			// Close has already cancelled context-aware handlers. Never close
 			// workers or SQLite while a non-cooperative handler can still use
 			// them.
-			return errors.Join(shutdownErr, errShutdownDeadline)
+			return errors.Join(shutdownErr, errShutdownDeadline, err)
 		}
 	}
 	var lifecycleErr error

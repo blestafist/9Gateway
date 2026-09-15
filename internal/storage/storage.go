@@ -61,6 +61,26 @@ type DB struct {
 
 	closeOnce sync.Once
 	closeErr  error
+	writeMu   sync.Mutex
+}
+
+// lockWrite serializes transactions that read before writing. In WAL mode a
+// deferred transaction can otherwise lose its read snapshot while another
+// process-owned accumulator commits, producing SQLITE_BUSY_SNAPSHOT instead
+// of honoring busy_timeout. All repositories in this process share this gate.
+func (database *DB) lockWrite() func() {
+	if database == nil {
+		return func() {}
+	}
+	database.writeMu.Lock()
+	return database.writeMu.Unlock
+}
+
+func lockStorageWrite(database dbQueries) func() {
+	if writer, ok := database.(*DB); ok {
+		return writer.lockWrite()
+	}
+	return func() {}
 }
 
 var memoryDatabaseID atomic.Uint64
@@ -72,13 +92,6 @@ var memoryDatabaseID atomic.Uint64
 // context-aware so a canceled startup cannot wait indefinitely behind another
 // opener.
 var fileStartupGate = make(chan struct{}, 1)
-
-// configureAndPingFunc is package-private so startup cleanup can be tested
-// after a real connection has been opened without changing the production
-// startup path.
-var configureAndPingFunc = func(database *DB, ctx context.Context, inMemory bool) error {
-	return database.configureAndPing(ctx, inMemory)
-}
 
 // Open validates, opens, configures, and pings the SQLite database at path.
 // Parent directories are intentionally never created. The returned handle is
@@ -116,7 +129,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 			return nil, fmt.Errorf("open sqlite database: acquire startup lock: %w", ctx.Err())
 		}
 	}
-	if err := configureAndPingFunc(result, ctx, inMemory); err != nil {
+	if err := result.configureAndPing(ctx, inMemory); err != nil {
 		_ = result.Close()
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}

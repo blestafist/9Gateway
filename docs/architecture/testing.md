@@ -2,6 +2,18 @@
 
 ## Transport Integration
 
+The T159 acceptance suite (`go test ./internal/integration -v`) uses a real TCP
+gateway listener, an HTTP upstream, a temporary SQLite database, and the same
+worker wiring as production. Failure assertions correlate each persisted
+request ID with terminal outcome, upstream boundary, statuses, and usage/cost.
+The live budget scenario asserts reservation, pre-upstream rejection, actual
+cost, reconciliation, and the SQLite history/bucket projections.
+
+Telemetry backpressure is tested only through live HTTP requests. A real
+`slog.Handler` blocks after the first completion; channels synchronize entry
+and release while subsequent responses and critical accounting must finish and
+the bounded detailed queue may drop.
+
 Use a real HTTP mock upstream and a real gateway HTTP server. Interface-only
 mocks cannot verify chunk boundaries, flushing, EOF, cancellation, content type,
 slow bodies, hanging connections, or parallel requests.
@@ -27,6 +39,11 @@ the conversion is bounded and is only selected after actual upstream response
 classification.
 
 Timing assertions use generous CI thresholds, not flaky one-millisecond targets.
+T159's 100-request test measures each request from immediately before
+`client.Do` through EOF, fails on every Do/read/close error, requires each total
+duration below 10 seconds, and independently requires mean stream-close
+overhead against a direct-upstream baseline below 50 ms. TTFB cannot mask the
+stream-close threshold.
 
 Split and coalesced SSE tests compare the complete raw body. They must not assume
 that an upstream write, HTTP read, or TCP read corresponds to one downstream
@@ -65,3 +82,30 @@ of admin and gateway credentials. Compare direct mock or 9router against gateway
 TTFT, stream close, total duration, and parallelism before optimizing. The
 release blocker is observable coding-agent latency, not an arbitrary
 requests-per-second target.
+
+The broad internal coverage smoke check is:
+
+```text
+go test -coverpkg=./internal/... ./internal/...
+```
+
+It reports package-level coverage for every internal package and is useful for
+spotting unexercised subsystems, but it includes CLI and provider-side support
+packages that are not part of the T159 HTTP happy path. The acceptance contract
+for this task uses the scoped aggregate command below and requires at least
+80.0% total statement coverage.
+
+The meaningful integration coverage command is:
+
+```text
+go test ./internal/... -coverpkg=./internal/accounting,./internal/auth,./internal/httpserver,./internal/limiter,./internal/observability,./internal/storage -coverprofile=/tmp/9gateway-integration.cover
+go tool cover -func=/tmp/9gateway-integration.cover
+```
+
+The package set contains the accounting, authentication, gateway HTTP,
+limiter, body observability, and SQLite implementations exercised by the live
+happy path; CLI and provider test doubles are excluded. The acceptance gate is
+an aggregate total of at least 80.0%; the reported percentage is expected to
+vary with the checked-out source and test selection. Integration `TestMain`
+runs goleak with no broad ignores; every test closes its listeners, transports,
+workers, and SQLite handle before leak verification.

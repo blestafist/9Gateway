@@ -82,6 +82,8 @@ func (repository *UsageBucketRepository) UpsertCommittedDeltas(ctx context.Conte
 	if len(valid) == 0 {
 		return nil
 	}
+	unlock := lockStorageWrite(repository.database)
+	defer unlock()
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return errors.New("upsert usage buckets: begin failed")

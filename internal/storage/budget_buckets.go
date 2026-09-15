@@ -109,6 +109,8 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 	if len(valid) == 0 {
 		return nil
 	}
+	unlock := lockStorageWrite(repository.database)
+	defer unlock()
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return errors.New("apply budget buckets: begin failed")

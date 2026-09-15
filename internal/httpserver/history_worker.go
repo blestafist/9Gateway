@@ -210,7 +210,6 @@ func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
 			if metrics := worker.metrics.Load(); metrics != nil {
 				metrics.telemetryResult("failed")
 			}
-			clearHistoryJob(&job)
 		}
 	}()
 	defer clearHistoryJob(&job)
@@ -266,7 +265,11 @@ func (worker *HistoryPersistenceWorker) retentionPass() {
 		}
 		return
 	}
-	now := worker.now().UTC()
+	// SQLite history timestamps are stored in microseconds. Truncate before
+	// deriving retention cutoffs; passing wall-clock nanoseconds violates the
+	// repository's exact cutoff contract and made the startup pass fail on real
+	// clocks, leaving the first valid request vulnerable to concurrent cleanup.
+	now := worker.now().UTC().Truncate(time.Microsecond)
 	bodyErr := error(nil)
 	metadataErr := error(nil)
 	_, bodyErr = worker.repository.DeleteBodiesBefore(worker.workerContext, now.Add(-worker.bodyRetention), worker.bodyLimit)
@@ -369,6 +372,25 @@ func (worker *HistoryPersistenceWorker) Done() <-chan struct{} {
 		return nil
 	}
 	return worker.done
+}
+
+// WaitReady waits until the initial retention pass has completed. Owners that
+// open SQLite concurrently with this worker must wait before admitting writes;
+// otherwise the startup retention DELETE can contend with the first request's
+// history transaction and make an otherwise valid persistence fail.
+func (worker *HistoryPersistenceWorker) WaitReady(ctx context.Context) error {
+	if worker == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-worker.startupDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Shutdown stops admission, drains queued jobs while the caller's context

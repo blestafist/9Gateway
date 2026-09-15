@@ -15,6 +15,8 @@ bounded safe request tracing, optional per-key body capture, structured
 completion logging, persistent request history with independent retention, and
 ordered lifecycle shutdown. Detailed telemetry is best effort and droppable;
 transport and critical accounting remain independent of its queues and sinks.
+The seven original T159 REVIEW-HANDOFF gaps are closed; other handoff review
+work remains outside this cumulative patch.
 Provider routing/translation, tool-call execution/validation, Redis,
 PostgreSQL, Web UI, and T161+ follow-on work remain out of scope.
 

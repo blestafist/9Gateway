@@ -88,7 +88,11 @@ func TestConcurrencyLimitIsHeldUntilResponseBodyCompletes(t *testing.T) {
 	}
 
 	third := doAuthenticatedRequest(t, gateway.URL+"/v1/opaque", key.RawKey)
+	thirdBody, err := io.ReadAll(third.Body)
 	third.Body.Close()
+	if err != nil || !bytes.Equal(thirdBody, []byte(`{"ok":true}`)) {
+		t.Fatalf("third body = %q, err = %v", thirdBody, err)
+	}
 	if third.StatusCode != http.StatusOK {
 		t.Fatalf("third status = %d, want 200 after lease release", third.StatusCode)
 	}

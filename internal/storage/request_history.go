@@ -724,6 +724,8 @@ func (repository *RequestHistoryRepository) Persist(ctx context.Context, record 
 	if err := ctx.Err(); err != nil {
 		return historyContextError(err, ErrHistoryWrite)
 	}
+	unlock := lockStorageWrite(repository.database)
+	defer unlock()
 
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
@@ -804,6 +806,8 @@ func (repository *RequestHistoryRepository) DeleteBodiesBefore(ctx context.Conte
 	if repository == nil || repository.database == nil {
 		return 0, ErrHistoryRepositoryUnavailable
 	}
+	unlock := lockStorageWrite(repository.database)
+	defer unlock()
 	result, err := repository.database.ExecContext(ctx, `
 		DELETE FROM request_bodies
 		WHERE rowid IN (
@@ -833,6 +837,8 @@ func (repository *RequestHistoryRepository) DeleteMetadataBefore(ctx context.Con
 	if repository == nil || repository.database == nil {
 		return 0, ErrHistoryRepositoryUnavailable
 	}
+	unlock := lockStorageWrite(repository.database)
+	defer unlock()
 	result, err := repository.database.ExecContext(ctx, `
 		DELETE FROM requests
 		WHERE request_id IN (
@@ -951,7 +957,7 @@ func historyOperationError(err error, fallback error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmtHistoryError(fallback, context.DeadlineExceeded)
 	}
-	return fallback
+	return fmtHistoryError(fallback, err)
 }
 
 type boundedHistoryError struct{ kind, cause error }

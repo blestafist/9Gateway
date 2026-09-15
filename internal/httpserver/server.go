@@ -775,6 +775,12 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 	}
 	copyEndToEndHeaders(upstreamRequest.Header, request.Header)
 	upstreamRequest.Header.Set("Authorization", "Bearer "+handler.apiKey)
+	// Propagate the opaque gateway correlation ID to the upstream boundary. It
+	// contains no credentials and lets provider-side traces be joined to the
+	// durable gateway history without guessing from timing or path.
+	if requestID := requestIDFromContext(request.Context()); requestID != "" {
+		upstreamRequest.Header.Set(requestIDHeader, requestID)
+	}
 
 	if handler.client == nil {
 		setTerminal(TerminalOutcomePreUpstream)
