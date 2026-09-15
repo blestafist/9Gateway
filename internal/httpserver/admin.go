@@ -696,6 +696,10 @@ func (handler *adminHandler) listRequests(response http.ResponseWriter, request 
 	}
 	records, nextCursor, err := lister.ListRequests(request.Context(), storage.ListRequestsFilter{KeyID: keyID, After: after, Before: before}, limit, cursor)
 	if err != nil {
+		if errors.Is(err, storage.ErrCursorExpired) {
+			writeAdminError(response, http.StatusBadRequest, gatewayErrorCursorExpired, "")
+			return
+		}
 		if errors.Is(err, storage.ErrInvalidCursor) {
 			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
 		} else {

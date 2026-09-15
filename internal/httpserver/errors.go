@@ -26,6 +26,7 @@ const (
 	gatewayErrorUnsupportedResponse = "unsupported_response"
 	gatewayErrorInternal            = "gateway_internal_error"
 	gatewayErrorConflict            = "conflict"
+	gatewayErrorCursorExpired       = "cursor_expired"
 )
 
 type gatewayErrorBody struct {
@@ -65,6 +66,7 @@ var gatewayErrorDefinitions = map[string]gatewayErrorDefinition{
 	gatewayErrorUnsupportedResponse: {"The upstream response is not supported.", "upstream_error", http.StatusBadGateway},
 	gatewayErrorInternal:            {"An internal gateway error occurred.", "server_error", http.StatusInternalServerError},
 	gatewayErrorConflict:            {"The requested change conflicts with active work.", "conflict_error", http.StatusConflict},
+	gatewayErrorCursorExpired:       {"The pagination cursor has expired; restart the traversal.", "invalid_request_error", http.StatusBadRequest},
 }
 
 // gatewayErrorTraceRecorder is deliberately tiny so error writing remains
@@ -113,6 +115,8 @@ func safeErrorCodeForGatewayCode(code string) SafeErrorCode {
 		return ErrorCodeNotFound
 	case gatewayErrorConflict:
 		return ErrorCodeConflict
+	case gatewayErrorCursorExpired:
+		return ErrorCodeInvalidRequest
 	default:
 		return ErrorCodeUnknown
 	}

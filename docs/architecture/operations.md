@@ -41,6 +41,19 @@ They manage keys/policies and inspect paginated request/usage history. Raw keys
 are returned only on creation. The CLI is a thin admin API client once that API
 exists; avoid duplicating business logic through direct SQLite access.
 
+`GET /admin/v1/requests` accepts `limit`, `cursor`, `key_id`, `after`, and
+`before`. Results are ordered by `completed_at DESC` (with request ID as the
+deterministic tie-breaker). A cursor is opaque, URL-safe, authenticated, and
+bound to the normalized `key_id`, `after`, and `before` values; equivalent
+RFC3339 forms that resolve to the same microsecond UTC instant therefore share
+one traversal. New records after the first page are excluded by the cursor's
+insertion fence. Cursors are not durable snapshots: if retention removes the
+bookmark row before continuation, the endpoint returns HTTP 400 with code
+`cursor_expired` and message `The pagination cursor has expired; restart the
+traversal.` Clients must restart without the expired cursor. Malformed,
+tampered, or filter-mismatched cursors return the normal structured HTTP 400
+`invalid_request` error. Unknown `key_id` values produce an empty result.
+
 ## Deployment
 
 Ship one small Go binary/container, one YAML config, and one SQLite database.

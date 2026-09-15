@@ -6,10 +6,12 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -93,6 +95,7 @@ var (
 	ErrHistoryRetention             = errors.New("request history retention failed")
 	ErrHistoryInvalidLimit          = errors.New("request history retention limit must be positive")
 	ErrHistoryInvalidCutoff         = errors.New("request history retention cutoff is invalid")
+	ErrCursorExpired                = errors.New("request history pagination cursor expired")
 )
 
 // Compatibility spellings keep the error vocabulary discoverable without
@@ -191,11 +194,13 @@ type requestListCursor struct {
 	FinishedAt       int64
 	FinishedKnown    bool
 	RequestID        string
+	FilterDigest     [sha256.Size]byte
+	DeletionSequence int64
 }
 
 const maxRequestCursorBytes = security.MaxCursorBytes
 
-var requestCursorMagic = [3]byte{'r', 'q', 1}
+var requestCursorMagic = [3]byte{'r', 'q', 3}
 
 // SetCursorSecret makes request cursors invalid after the server secret
 // changes. It is called during process wiring, before the repository is shared.
@@ -436,6 +441,7 @@ func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, f
 	if database == nil || signer == nil {
 		return nil, "", ErrHistoryRepositoryUnavailable
 	}
+	filter = normalizeRequestListFilter(filter)
 	if limit <= 0 || limit > 500 {
 		return nil, "", ErrInvalidCursor
 	}
@@ -449,12 +455,28 @@ func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, f
 	if err != nil {
 		return nil, "", err
 	}
+	if bookmark != nil {
+		digest := requestListFilterDigest(filter)
+		if subtle.ConstantTimeCompare(bookmark.FilterDigest[:], digest[:]) != 1 {
+			return nil, "", ErrInvalidCursor
+		}
+	}
 
 	snapshotSequence := int64(0)
+	deletionSequence := int64(0)
 	if bookmark != nil {
 		snapshotSequence = bookmark.SnapshotSequence
+		if err := database.QueryRowContext(ctx, `SELECT deletion_seq FROM traversal_sequences WHERE table_name = 'requests'`).Scan(&deletionSequence); err != nil {
+			return nil, "", errors.New("list requests: database read failed")
+		}
+		if deletionSequence != bookmark.DeletionSequence {
+			return nil, "", ErrCursorExpired
+		}
 	} else {
 		if err := database.QueryRowContext(ctx, `SELECT COALESCE(MAX(insertion_seq), 0) FROM requests`).Scan(&snapshotSequence); err != nil {
+			return nil, "", errors.New("list requests: database read failed")
+		}
+		if err := database.QueryRowContext(ctx, `SELECT deletion_seq FROM traversal_sequences WHERE table_name = 'requests'`).Scan(&deletionSequence); err != nil {
 			return nil, "", errors.New("list requests: database read failed")
 		}
 	}
@@ -482,6 +504,23 @@ func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, f
 		args = append(args, filter.Before.UTC().UnixMicro())
 	}
 	if bookmark != nil {
+		// A continuation is only exact while its bookmark row remains present.
+		// Retention can otherwise make the timestamp/id predicate look valid while
+		// silently changing the traversal. The explicit expiry asks the caller to
+		// restart rather than returning an approximate page.
+		bookmarkFinished := "finished_at IS NULL"
+		bookmarkArgs := []any{bookmark.RequestID, bookmark.SnapshotSequence}
+		if bookmark.FinishedKnown {
+			bookmarkFinished = "finished_at = ?"
+			bookmarkArgs = append(bookmarkArgs, bookmark.FinishedAt)
+		}
+		var present int
+		if err := database.QueryRowContext(ctx, "SELECT count(*) FROM requests WHERE request_id = ? AND insertion_seq <= ? AND "+bookmarkFinished, bookmarkArgs...).Scan(&present); err != nil {
+			return nil, "", errors.New("list requests: database read failed")
+		}
+		if present != 1 {
+			return nil, "", ErrCursorExpired
+		}
 		if bookmark.FinishedKnown {
 			conditions = append(conditions, "(finished_at IS NULL OR finished_at < ? OR (finished_at = ? AND request_id < ?))")
 			args = append(args, bookmark.FinishedAt, bookmark.FinishedAt, bookmark.RequestID)
@@ -516,7 +555,7 @@ func listRequests(database dbQueries, signer cipher.AEAD, ctx context.Context, f
 	}
 	last := result[limit-1]
 	result = result[:limit]
-	next, err := encodeRequestCursor(signer, requestListCursor{SnapshotSequence: snapshotSequence, FinishedAt: last.FinishedAt.Value, FinishedKnown: last.FinishedAt.Known, RequestID: last.RequestID})
+	next, err := encodeRequestCursor(signer, requestListCursor{SnapshotSequence: snapshotSequence, FinishedAt: last.FinishedAt.Value, FinishedKnown: last.FinishedAt.Known, RequestID: last.RequestID, FilterDigest: requestListFilterDigest(filter), DeletionSequence: deletionSequence})
 	if err != nil {
 		return nil, "", err
 	}
@@ -579,6 +618,34 @@ func validRequestKeyID(value string) bool {
 	return security.ValidateIdentifier(value)
 }
 
+func normalizeRequestListFilter(filter ListRequestsFilter) ListRequestsFilter {
+	if filter.After != nil {
+		value := filter.After.UTC().Truncate(time.Microsecond)
+		filter.After = &value
+	}
+	if filter.Before != nil {
+		value := filter.Before.UTC().Truncate(time.Microsecond)
+		filter.Before = &value
+	}
+	return filter
+}
+
+// requestListFilterDigest is included inside the authenticated cursor. The
+// explicit field separators and presence markers make the digest unambiguous,
+// while microsecond UTC timestamps match the values used by SQLite.
+func requestListFilterDigest(filter ListRequestsFilter) [sha256.Size]byte {
+	filter = normalizeRequestListFilter(filter)
+	value := filter.KeyID + "\x00" + strconv.FormatBool(filter.After != nil) + "\x00"
+	if filter.After != nil {
+		value += strconv.FormatInt(filter.After.UnixMicro(), 10)
+	}
+	value += "\x00" + strconv.FormatBool(filter.Before != nil) + "\x00"
+	if filter.Before != nil {
+		value += strconv.FormatInt(filter.Before.UnixMicro(), 10)
+	}
+	return sha256.Sum256([]byte(value))
+}
+
 // sha256Sum is kept local to avoid making cursor cryptography part of the
 // public storage API.
 func sha256Sum(value []byte) [32]byte { return sha256.Sum256(value) }
@@ -590,15 +657,20 @@ func encodeRequestCursor(signer cipher.AEAD, cursor requestListCursor) (string, 
 	if !validHistoryRequestID(cursor.RequestID) {
 		return "", ErrInvalidCursor
 	}
-	payload := make([]byte, 22+len(cursor.RequestID))
+	if cursor.FilterDigest == ([sha256.Size]byte{}) {
+		return "", ErrInvalidCursor
+	}
+	payload := make([]byte, 62+len(cursor.RequestID))
 	copy(payload, requestCursorMagic[:])
 	if cursor.FinishedKnown {
 		payload[3] = 1
 	}
 	binary.BigEndian.PutUint64(payload[4:], uint64(cursor.SnapshotSequence))
 	binary.BigEndian.PutUint64(payload[12:], uint64(cursor.FinishedAt))
-	binary.BigEndian.PutUint16(payload[20:], uint16(len(cursor.RequestID)))
-	copy(payload[22:], cursor.RequestID)
+	binary.BigEndian.PutUint64(payload[20:], uint64(cursor.DeletionSequence))
+	binary.BigEndian.PutUint16(payload[28:], uint16(len(cursor.RequestID)))
+	copy(payload[30:], cursor.RequestID)
+	copy(payload[30+len(cursor.RequestID):], cursor.FilterDigest[:])
 	nonce := make([]byte, signer.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", ErrInvalidCursor
@@ -618,15 +690,18 @@ func decodeRequestCursor(signer cipher.AEAD, value string) (*requestListCursor, 
 		return nil, ErrInvalidCursor
 	}
 	payload, err := signer.Open(nil, sealed[:signer.NonceSize()], sealed[signer.NonceSize():], nil)
-	if err != nil || len(payload) < 22 || payload[0] != requestCursorMagic[0] || payload[1] != requestCursorMagic[1] || payload[2] != requestCursorMagic[2] || (payload[3] != 0 && payload[3] != 1) {
+	if err != nil || len(payload) < 62 || payload[0] != requestCursorMagic[0] || payload[1] != requestCursorMagic[1] || payload[2] != requestCursorMagic[2] || (payload[3] != 0 && payload[3] != 1) {
 		return nil, ErrInvalidCursor
 	}
 	snapshotSequence := int64(binary.BigEndian.Uint64(payload[4:12]))
-	idLength := int(binary.BigEndian.Uint16(payload[20:]))
-	if snapshotSequence <= 0 || idLength == 0 || idLength != len(payload)-22 || idLength > security.MaxIdentifierBytes || !security.ValidateRequestID(string(payload[22:])) {
+	deletionSequence := int64(binary.BigEndian.Uint64(payload[20:28]))
+	idLength := int(binary.BigEndian.Uint16(payload[28:]))
+	if snapshotSequence <= 0 || deletionSequence < 0 || idLength == 0 || idLength != len(payload)-62 || idLength > security.MaxIdentifierBytes || !security.ValidateRequestID(string(payload[30:30+idLength])) {
 		return nil, ErrInvalidCursor
 	}
-	return &requestListCursor{SnapshotSequence: snapshotSequence, FinishedKnown: payload[3] == 1, FinishedAt: int64(binary.BigEndian.Uint64(payload[12:20])), RequestID: string(payload[22:])}, nil
+	var digest [sha256.Size]byte
+	copy(digest[:], payload[30+idLength:])
+	return &requestListCursor{SnapshotSequence: snapshotSequence, FinishedKnown: payload[3] == 1, FinishedAt: int64(binary.BigEndian.Uint64(payload[12:20])), RequestID: string(payload[30 : 30+idLength]), FilterDigest: digest, DeletionSequence: deletionSequence}, nil
 }
 
 // Persist inserts one record and its optional body captures atomically. At
