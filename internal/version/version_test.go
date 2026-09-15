@@ -42,6 +42,22 @@ func TestMetricLabelsUseStrictAllowLists(t *testing.T) {
 		t.Fatalf("valid production metadata = %#v", labels)
 	}
 
+	Version = "v1.2.3+password-secret"
+	labels = MetricLabels()
+	if labels.Version != "v1.2.3" || strings.Contains(labels.Version, "password-secret") {
+		t.Fatalf("valid build metadata was exposed in metric version: %#v", labels)
+	}
+	GoVersion = "go1.27.1-X:nodwarf5"
+	labels = MetricLabels()
+	if labels.GoVersion != "go1.27.1" {
+		t.Fatalf("custom runtime suffix was not normalized: %#v", labels)
+	}
+	GoVersion = ""
+	labels = MetricLabels()
+	if labels.GoVersion != runtimeGoReleaseCore() {
+		t.Fatalf("unset GoVersion did not default to runtime release core: %#v", labels)
+	}
+
 	for _, value := range []string{
 		"ghp_0123456789abcdef0123456789abcdef0123456789abcdef",
 		"eyJhbGciOiJIUzI1NiJ9.opaque.payload",
@@ -71,7 +87,10 @@ func TestPublicVersionFormats(t *testing.T) {
 		{name: "trimmed", value: " v1.2.3 ", want: "v1.2.3"},
 		{name: "access key canary", value: "v1.2.3-AKIA1234567890", want: defaultVersion},
 		{name: "arbitrary prerelease", value: "v1.2.3-password-abc", want: defaultVersion},
-		{name: "build metadata", value: "v1.2.3+build.1", want: defaultVersion},
+		{name: "build metadata is stripped", value: "v1.2.3+build.1", want: "v1.2.3"},
+		{name: "secret-looking build metadata is stripped", value: "v1.2.3+password-secret", want: "v1.2.3"},
+		{name: "build metadata with approved prerelease is stripped", value: "v1.2.3-rc.1+build.2026", want: "v1.2.3-rc.1"},
+		{name: "malformed build metadata", value: "v1.2.3+build..secret", want: defaultVersion},
 		{name: "bare prerelease", value: "v1.2.3-alpha", want: defaultVersion},
 		{name: "leading zero prerelease", value: "v1.2.3-rc.01", want: defaultVersion},
 		{name: "devel", value: "devel", want: defaultVersion},
@@ -97,13 +116,15 @@ func TestPublicGoVersionFormats(t *testing.T) {
 		{name: "rc", value: "go1.25rc1", want: "go1.25rc1"},
 		{name: "beta zero", value: "go1.25beta0", want: "go1.25beta0"},
 		{name: "minor only", value: "go1.25", want: "unknown"},
-		{name: "password suffix canary", value: "go1.25.1-password-abc", want: "unknown"},
-		{name: "custom toolchain suffix canary", value: "go1.25.1-X:nodwarf5", want: "unknown"},
+		{name: "password suffix is normalized to release core", value: "go1.25.1-password-secret", want: "go1.25.1"},
+		{name: "custom toolchain suffix is normalized", value: "go1.25.1-X:nodwarf5", want: "go1.25.1"},
 		{name: "build metadata", value: "go1.25.1+build.1", want: "unknown"},
 		{name: "patch beta is not runtime form", value: "go1.25.1beta1", want: "unknown"},
 		{name: "dotted beta is not runtime form", value: "go1.25beta.1", want: "unknown"},
 		{name: "leading zero beta", value: "go1.25beta01", want: "unknown"},
+		{name: "malformed no-prefix value", value: "unknown go1.25.1", want: "unknown"},
 		{name: "devel suffix", value: "devel go1.25-abcdef", want: "unknown"},
+		{name: "beta custom toolchain suffix", value: "go1.25beta1-X:nodwarf5", want: "go1.25beta1"},
 	}
 
 	for _, test := range tests {

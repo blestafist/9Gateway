@@ -32,11 +32,17 @@ type Metadata struct {
 
 // Current returns safe metadata for this process.
 func Current() Metadata {
+	goVersion := GoVersion
+	if strings.TrimSpace(goVersion) == "" {
+		// Keep an unset override aligned with the runtime release core rather
+		// than reporting an unknown toolchain for the normal default case.
+		goVersion = runtime.Version()
+	}
 	return Metadata{
 		Version:   publicVersion(Version),
 		Commit:    ShortCommit(CommitSHA),
 		BuildDate: publicBuildDate(BuildDate),
-		GoVersion: publicGoVersion(GoVersion),
+		GoVersion: publicGoVersion(goVersion),
 		OS:        publicOS(runtime.GOOS),
 		Arch:      publicArch(runtime.GOARCH),
 	}
@@ -53,13 +59,34 @@ func MetricLabels() Metadata {
 const metricValueLimit = 64
 
 var (
-	versionPattern   = regexp.MustCompile(`^(?:dev|v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.?(?:0|[1-9][0-9]*))?)$`)
-	commitPattern    = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
-	goVersionPattern = regexp.MustCompile(`^go[1-9][0-9]*\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)|(?:beta|rc)(?:0|[1-9][0-9]*))$`)
+	// The public version is deliberately narrower than the full SemVer
+	// prerelease grammar. Release tooling may use only the approved alpha,
+	// beta, and rc forms; arbitrary prerelease identifiers could contain a
+	// credential or other build-system payload.
+	versionPattern = regexp.MustCompile(`^(?:dev|v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.?(?:0|[1-9][0-9]*))?)$`)
+	buildPattern   = regexp.MustCompile(`^[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*$`)
+	commitPattern  = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+	// Go's canonical release forms are go1.M.p, go1.MbetaN, and go1.MrcN.
+	// A custom toolchain may append a hyphen suffix. Capture only the
+	// canonical prefix so the suffix can never become public metadata.
+	goVersionPattern = regexp.MustCompile(`^(go(?:[1-9][0-9]*\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|[1-9][0-9]*\.(?:0|[1-9][0-9]*)(?:beta|rc)(?:0|[1-9][0-9]*)))(?:-[^\r\n]+)?$`)
 )
 
 func publicVersion(value string) string {
 	value = strings.TrimSpace(value)
+	core, build, hasBuild := strings.Cut(value, "+")
+	if hasBuild {
+		// Validate build metadata as SemVer before dropping it. This accepts
+		// legitimate metadata, while ensuring malformed input is not treated
+		// as a version by accident. The metadata itself is never returned.
+		if !buildPattern.MatchString(build) {
+			return defaultVersion
+		}
+		value = core
+		if value == "dev" {
+			return defaultVersion
+		}
+	}
 	if len(value) <= metricValueLimit && versionPattern.MatchString(value) {
 		return value
 	}
@@ -78,8 +105,19 @@ func publicBuildDate(value string) string {
 
 func publicGoVersion(value string) string {
 	value = strings.TrimSpace(value)
-	if len(value) <= metricValueLimit && goVersionPattern.MatchString(value) {
-		return value
+	if match := goVersionPattern.FindStringSubmatch(value); match != nil && len(match[1]) <= metricValueLimit {
+		// runtime.Version can contain a custom toolchain suffix (including
+		// sensitive text). Normalize it to the canonical release core; the
+		// suffix is intentionally not validated or exposed. Invalid values
+		// remain unknown rather than allowing a substring to become public.
+		return match[1]
+	}
+	return "unknown"
+}
+
+func runtimeGoReleaseCore() string {
+	if match := goVersionPattern.FindStringSubmatch(runtime.Version()); match != nil {
+		return match[1]
 	}
 	return "unknown"
 }

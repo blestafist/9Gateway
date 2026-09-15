@@ -101,7 +101,8 @@ includes CLI, provider-side support, and other packages outside the T159 HTTP
 happy path.
 
 The live integration coverage metric is measured only by the eight real
-cross-subsystem tests:
+cross-subsystem tests. All eight tests exercise the live HTTP listener, SQLite,
+and worker wiring; none calls package APIs directly for coverage:
 
 ```text
 go test ./internal/integration -coverpkg=./internal/accounting,./internal/auth,./internal/httpserver,./internal/limiter,./internal/observability,./internal/storage -coverprofile=/tmp/9gateway-live.cover
@@ -127,7 +128,7 @@ doubles are excluded. The checker sums covered statements from the profile and
 fails below 80.0%, so a lower result cannot be relabeled as the live metric or
 hidden by changing the package set. Keep the profile paths distinct: using
 `./internal/integration` for the live command measured 47.2% before the
-additional admin-read scenario and now measures 48.9% (the exact result can
+additional admin-read scenario and now measures 49.9% (the exact result can
 vary slightly with source changes), while `./internal/...` includes the
 existing unit and behavior tests and is the aggregate milestone metric.
 The `CI/scripts/coveragecheck` command itself is not in `-coverpkg`; adding the

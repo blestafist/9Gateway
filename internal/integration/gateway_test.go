@@ -583,7 +583,7 @@ func TestT159Lifecycle(t *testing.T) {
 func TestT159AdminReadHappyPath(t *testing.T) {
 	script := newUpstreamScript()
 	gateway := newHarness(t, script, 16, 16, nil)
-	id, _ := createKey(t, gateway, "admin-read")
+	id, key := createKey(t, gateway, "admin-read")
 	updatePolicy(t, gateway, id, `{"allowed_models":["alpha"],"request_windows":[{"amount":7,"duration":"90s"}],"token_windows":[{"amount":123,"duration":"1h"}],"log_request_body":true}`)
 
 	status, data, _ := adminRequest(t, gateway, http.MethodGet, "/admin/v1/keys?limit=100", nil)
@@ -594,10 +594,18 @@ func TestT159AdminReadHappyPath(t *testing.T) {
 	if status != http.StatusOK || !bytes.Contains(data, []byte(`"request_windows":[{"amount":7,"duration":90}]`)) || !bytes.Contains(data, []byte(`"token_windows":[{"amount":123,"duration":3600}]`)) {
 		t.Fatalf("admin key detail = %d %s", status, data)
 	}
-
-	policy, err := auth.ParsePolicyJSON([]byte(`{"request_windows":[{"amount":2,"duration":"1m"}]}`))
-	if err != nil || len(policy.RequestLimits()) != 1 || policy.RequestLimits()[0].Amount != 2 {
-		t.Fatalf("request limit compatibility projection = %+v, err=%v", policy.RequestLimits(), err)
+	// Exercise the normalized request-window projection through the live request
+	// path without token admission competing with the request-limit assertion.
+	updatePolicy(t, gateway, id, `{"allowed_models":["alpha"],"request_windows":[{"amount":7,"duration":"90s"}]}`)
+	for attempt := 0; attempt < 7; attempt++ {
+		response, body := gatewayRequest(t, gateway, http.MethodPost, "/v1/chat/completions", key, `{"model":"alpha"}`, map[string]string{"Content-Type": "application/json"})
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("request-window attempt %d = %d %s", attempt+1, response.StatusCode, body)
+		}
+	}
+	response, body := gatewayRequest(t, gateway, http.MethodPost, "/v1/chat/completions", key, `{"model":"alpha"}`, map[string]string{"Content-Type": "application/json"})
+	if response.StatusCode != http.StatusTooManyRequests || !bytes.Contains(body, []byte("request_limit_exceeded")) {
+		t.Fatalf("request-window limit = %d %s", response.StatusCode, body)
 	}
 
 	// Read endpoints must fail closed independently of gateway-key
