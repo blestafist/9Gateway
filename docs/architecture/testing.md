@@ -125,12 +125,12 @@ unrounded profile is retained in the count shown beside the percentage. The
 package set contains the accounting, authentication, gateway HTTP,
 limiter, body observability, and SQLite implementations; CLI and provider test
 doubles are excluded. The checker sums covered statements from the profile and
-fails below 80.0%, so a lower result cannot be relabeled as the live metric or
-hidden by changing the package set. Keep the profile paths distinct: using
-`./internal/integration` for the live command measured 47.2% before the
-additional admin-read scenario and now measures 49.9% (the exact result can
-vary slightly with source changes), while `./internal/...` includes the
-existing unit and behavior tests and is the aggregate milestone metric.
+enforces the aggregate machine gate at 80.0% (>=80.0%), so a lower result
+cannot be relabeled as the live metric or hidden by changing the package set.
+Keep the profile paths distinct: the live command is diagnostic and non-gating;
+read its current percentage from `go tool cover` output. The `./internal/...`
+command includes the existing unit and behavior tests and is the aggregate
+milestone metric.
 The `CI/scripts/coveragecheck` command itself is not in `-coverpkg`; adding the
 checker cannot inflate the aggregate core-package result.
 Integration `TestMain`
