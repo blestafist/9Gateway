@@ -15,8 +15,8 @@ bounded safe request tracing, optional per-key body capture, structured
 completion logging, persistent request history with independent retention, and
 ordered lifecycle shutdown. Detailed telemetry is best effort and droppable;
 transport and critical accounting remain independent of its queues and sinks.
-The seven original T159 REVIEW-HANDOFF gaps are closed; other handoff review
-work remains outside this cumulative patch.
+All REVIEW-HANDOFF findings are closed in code, tests, and documentation; no
+active handoff bullets remain.
 Provider routing/translation, tool-call execution/validation, Redis,
 PostgreSQL, Web UI, and T161+ follow-on work remain out of scope.
 
@@ -31,7 +31,7 @@ now increment the primary request counter exactly once, and bounded
 `gateway_build_info` exposes safe build metadata labels.
 Transport review fix: non-SSE responses now stream through a bounded reader
 without pre-EOF spooling, and SSE event-limit coverage includes CR-only and
-mixed CR/LF delimiters split across reads. Remaining review items stay open.
+mixed CR/LF delimiters split across reads.
 
 T155 added a minimal non-root Docker image with static gateway/gwctl binaries,
 readiness healthcheck, and persistent `/data` defaults. T152 hardened semantic
@@ -39,8 +39,12 @@ admin IDs/cursors, upstream URL startup validation, structured error logging,
 and early request-line limits; T154 audited control-plane secret redaction and
 hardened credential-bearing error/header surfaces. T156-T160 completed Compose,
 startup validation, version metadata, integration coverage, documentation, and
-release-candidate preparation. Docker-daemon runtime checks remain environment
-dependent. The three stale T157 config assertions are fixed; the T143
-request-pagination review fix binds cursors to normalized filters and reports
-retained bookmark deletion as `cursor_expired` with restart guidance. No Web UI,
-provider routing, retries, Redis, or PostgreSQL.
+release-candidate preparation. The Go verification suite and build are green.
+The Docker daemon is unavailable, and image build/runtime, gateway and Compose
+health, Prometheus scraping, image-size measurement, and vulnerability scanning
+were not run and are not claimed as passed. The Compose config check could not
+run because this environment also lacks the `docker compose` plugin. The three
+stale T157 config assertions are fixed; the T143 request-pagination review fix
+binds cursors to normalized filters and reports retained bookmark deletion as
+`cursor_expired` with restart guidance. No Web UI, provider routing, retries,
+Redis, or PostgreSQL.

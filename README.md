@@ -144,12 +144,16 @@ In another shell, use the locally built CLI. It defaults to
 ```sh
 export GWCTL_ADMIN_CREDENTIAL="$ADMIN_CREDENTIAL"
 ./gwctl ping
-./gwctl keys create local-demo
+created_key="$(./gwctl keys create local-demo)"
+printf '%s\n' "$created_key"
+export API_KEY="$(printf '%s\n' "$created_key" | awk -F': ' '$1 == "Key" {print $2; exit}')"
+test -n "$API_KEY"
 ```
 
-The same `API_KEY` and `curl` request shown above can be used once the first
-key has been created. See [Deployment](docs/operations/deployment.md) for
-background binary, Docker, volume, shutdown, and build-metadata guidance.
+The raw key is printed only once; the commands above extract it and export it as
+`API_KEY` for the same `curl` request shown above. See
+[Deployment](docs/operations/deployment.md) for background binary, Docker,
+volume, shutdown, and build-metadata guidance.
 
 ## Configuration
 
