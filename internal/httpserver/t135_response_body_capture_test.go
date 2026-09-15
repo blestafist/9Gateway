@@ -85,19 +85,43 @@ func TestT135ResponseBodyCaptureRetainsFlushedSSEAndConvertedJSON(t *testing.T) 
 }
 
 func TestT135TransparentCaptureRequiresSuccessfulFlush(t *testing.T) {
-	flushErr := errors.New("flush failed")
-	underlying := &t135FlushErrorWriter{header: make(http.Header), err: flushErr}
-	recorder, err := observability.NewBodyRecorder(observability.BodyKindResponse, 16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := &completionResponseWriter{ResponseWriter: underlying, responseBodyRecorder: recorder, responseBodyAfterFlush: true}
-	if err := streamResponseBody(writer, bytes.NewBufferString("fragment")); !errors.Is(err, flushErr) {
-		t.Fatalf("stream error = %v, want %v", err, flushErr)
-	}
-	snapshot := recorder.Finalize()
-	if !snapshot.Captured || snapshot.OriginalSize != 0 || len(snapshot.Bytes) != 0 {
-		t.Fatalf("capture after failed flush = %s, want known empty snapshot", snapshot)
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "json", body: `{"id":"json"}`},
+		{name: "opaque", body: "\x00\xffopaque"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			flushErr := errors.New("flush failed")
+			underlying := &t135FlushErrorWriter{header: make(http.Header), err: flushErr}
+			recorder, err := observability.NewBodyRecorder(observability.BodyKindResponse, 16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			trace, _ := traceTestState(t)
+			writer := &completionResponseWriter{ResponseWriter: underlying, trace: trace, responseBodyRecorder: recorder, responseBodyAfterFlush: true}
+			observation := newResponseObservation(16, ContentCodingIdentity)
+			if err := streamResponseBody(writer, bytes.NewBufferString(test.body), observation); !errors.Is(err, flushErr) {
+				t.Fatalf("stream error = %v, want %v", err, flushErr)
+			} else {
+				observation.finish(err)
+			}
+			snapshot := recorder.Finalize()
+			if !snapshot.Captured || snapshot.OriginalSize != 0 || len(snapshot.Bytes) != 0 {
+				t.Fatalf("capture after failed flush = %s, want known empty snapshot", snapshot)
+			}
+			if len(observation.bytes) != 0 {
+				t.Fatalf("observation after failed flush = %q, want empty", observation.bytes)
+			}
+			record, err := trace.Final()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if delivered, known := record.DeliveredBytes.Value(); known && delivered != 0 {
+				t.Fatalf("delivered bytes after failed flush = %d/%v, want no delivered bytes", delivered, known)
+			}
+		})
 	}
 }
 

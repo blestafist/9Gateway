@@ -38,12 +38,18 @@ SSE aggregation regressions cover a non-stream client and fragmented tool calls;
 the conversion is bounded and is only selected after actual upstream response
 classification.
 
-Timing assertions use generous CI thresholds, not flaky one-millisecond targets.
-T159's 100-request test measures each request from immediately before
-`client.Do` through EOF, fails on every Do/read/close error, requires each total
-duration below 10 seconds, and independently requires mean stream-close
-overhead against a direct-upstream baseline below 50 ms. TTFB cannot mask the
-stream-close threshold.
+Timing assertions use deterministic local delays and multiple paired samples,
+not flaky one-millisecond targets. T159's performance test measures each
+request from immediately before `client.Do` through the first successfully read
+byte (TTFB), then separately from that byte through EOF and `Body.Close`
+(post-first-byte stream-close time). Direct-upstream and gateway means are
+computed over 20 sequential pairs; every `Do`, first-byte read, full-body read,
+and close error fails the test. Gateway-minus-direct overhead must be below
+10ms independently for both TTFB and post-first-byte stream-close time; these
+are separate limits and cannot be satisfied by a compound total-lifetime
+allowance. The concurrent phase uses 100 requests, requires every total
+duration (immediately before `Do` through read and close) below 10 seconds, and
+requires mean total stream-close duration below 50ms.
 
 Split and coalesced SSE tests compare the complete raw body. They must not assume
 that an upstream write, HTTP read, or TCP read corresponds to one downstream

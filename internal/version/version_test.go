@@ -1,6 +1,7 @@
 package version
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,5 +27,30 @@ func TestMetricLabelsNormalizeAndBoundLdflags(t *testing.T) {
 	}
 	if strings.Contains(labels.Version, "secret") || strings.Contains(labels.BuildDate, "Authorization") {
 		t.Fatalf("sensitive ldflag text survived normalization: %#v", labels)
+	}
+}
+
+func TestMetricLabelsUseStrictAllowLists(t *testing.T) {
+	oldVersion, oldCommit, oldBuild, oldGo := Version, CommitSHA, BuildDate, GoVersion
+	t.Cleanup(func() { Version, CommitSHA, BuildDate, GoVersion = oldVersion, oldCommit, oldBuild, oldGo })
+	Version = "v1.2.3"
+	CommitSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	BuildDate = "2026-01-02T03:04:05Z"
+	GoVersion = "go1.25.1"
+	labels := MetricLabels()
+	if labels.Version != Version || labels.Commit != CommitSHA[:7] || labels.BuildDate != BuildDate || labels.GoVersion != GoVersion || labels.OS != runtime.GOOS || labels.Arch != runtime.GOARCH {
+		t.Fatalf("valid production metadata = %#v", labels)
+	}
+
+	for _, value := range []string{
+		"ghp_0123456789abcdef0123456789abcdef0123456789abcdef",
+		"eyJhbGciOiJIUzI1NiJ9.opaque.payload",
+		"opaque-build-value-without-a-denylist-word",
+	} {
+		Version, CommitSHA, BuildDate, GoVersion = value, value, value, value
+		labels := MetricLabels()
+		if labels.Version != defaultVersion || labels.Commit != defaultCommit || labels.BuildDate != defaultBuild || labels.GoVersion != "unknown" {
+			t.Fatalf("arbitrary metadata %q survived: %#v", value, labels)
+		}
 	}
 }

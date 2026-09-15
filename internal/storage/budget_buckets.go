@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -109,7 +110,10 @@ func (repository *BudgetBucketRepository) ApplyDeltas(ctx context.Context, delta
 	if len(valid) == 0 {
 		return nil
 	}
-	unlock := lockStorageWrite(repository.database)
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("apply budget buckets: acquire write gate: %w", err)
+	}
 	defer unlock()
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
@@ -294,10 +298,15 @@ func (repository *BudgetBucketRepository) DeleteExpiredDays(ctx context.Context,
 	if ctx == nil || repository == nil || repository.database == nil {
 		return ErrBudgetBucketUnavailable
 	}
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("delete expired budget days: acquire write gate: %w", err)
+	}
+	defer unlock()
 	if err := repository.validateAll(ctx); err != nil {
 		return err
 	}
-	_, err := repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='day' AND period_start < ?`, currentDay(before).Unix())
+	_, err = repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='day' AND period_start < ?`, currentDay(before).Unix())
 	return err
 }
 
@@ -404,9 +413,14 @@ func (repository *BudgetBucketRepository) DeleteExpiredMonths(ctx context.Contex
 	if ctx == nil || repository == nil || repository.database == nil {
 		return ErrBudgetBucketUnavailable
 	}
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("delete expired budget months: acquire write gate: %w", err)
+	}
+	defer unlock()
 	if err := repository.validateAll(ctx); err != nil {
 		return err
 	}
-	_, err := repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='month' AND period_start < ?`, currentMonth(before).Unix())
+	_, err = repository.database.ExecContext(ctx, `DELETE FROM budget_buckets WHERE period_kind='month' AND period_start < ?`, currentMonth(before).Unix())
 	return err
 }

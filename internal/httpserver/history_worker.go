@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -84,10 +85,11 @@ type HistoryPersistenceWorker struct {
 	bodyLimit        int
 	metadataLimit    int
 
-	mu        sync.Mutex
-	accepting bool
-	stopOnce  sync.Once
-	abort     atomic.Bool
+	mu         sync.Mutex
+	accepting  bool
+	stopOnce   sync.Once
+	startupErr error
+	abort      atomic.Bool
 
 	accepted        atomic.Uint64
 	processed       atomic.Uint64
@@ -175,8 +177,11 @@ func (worker *HistoryPersistenceWorker) setMetrics(metrics *gatewayMetrics) {
 
 func (worker *HistoryPersistenceWorker) run() {
 	defer close(worker.done)
-	worker.retentionPass()
+	startupErr := worker.retentionPass()
+	worker.mu.Lock()
+	worker.startupErr = startupErr
 	close(worker.startupDone)
+	worker.mu.Unlock()
 	for {
 		select {
 		case job := <-worker.queue:
@@ -255,15 +260,16 @@ func (worker *HistoryPersistenceWorker) process(job HistoryPersistenceJob) {
 	}
 }
 
-func (worker *HistoryPersistenceWorker) retentionPass() {
+func (worker *HistoryPersistenceWorker) retentionPass() error {
 	worker.mu.Lock()
 	accepting := worker.accepting
 	worker.mu.Unlock()
 	if !accepting || worker.abort.Load() || worker.repository == nil {
 		if worker.repository == nil && accepting {
 			worker.retentionFailed.Add(1)
+			return storage.ErrHistoryRepositoryUnavailable
 		}
-		return
+		return nil
 	}
 	// SQLite history timestamps are stored in microseconds. Truncate before
 	// deriving retention cutoffs; passing wall-clock nanoseconds violates the
@@ -277,6 +283,7 @@ func (worker *HistoryPersistenceWorker) retentionPass() {
 	if bodyErr != nil || metadataErr != nil {
 		worker.retentionFailed.Add(1)
 	}
+	return errors.Join(bodyErr, metadataErr)
 }
 
 // Submit takes ownership of one immutable job without waiting. A false result
@@ -385,9 +392,18 @@ func (worker *HistoryPersistenceWorker) WaitReady(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case <-worker.startupDone:
-		return nil
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		worker.mu.Lock()
+		startupErr := worker.startupErr
+		worker.mu.Unlock()
+		return startupErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}

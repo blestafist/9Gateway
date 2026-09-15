@@ -172,6 +172,124 @@ func TestHistoryWorkerCounterInvariantStartupRetentionFailure(t *testing.T) {
 	}
 }
 
+func TestHistoryWorkerWaitReadyReturnsInitialRetentionFailure(t *testing.T) {
+	retentionErr := errors.New("initial retention failed")
+	repository := &failingPersistRepository{retentionError: retentionErr}
+	worker := NewHistoryPersistenceWorker(HistoryPersistenceWorkerOptions{Repository: repository})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := worker.WaitReady(ctx); !errors.Is(err, retentionErr) {
+		t.Fatalf("WaitReady error = %v, want %v", err, retentionErr)
+	}
+	if err := worker.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if worker.Stats().RetentionFailed != 1 {
+		t.Fatalf("RetentionFailed = %d, want 1", worker.Stats().RetentionFailed)
+	}
+}
+
+type blockingInitialRetentionRepository struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (repository *blockingInitialRetentionRepository) Persist(context.Context, storage.HistoryRecord, []observability.BodySnapshot) error {
+	return nil
+}
+
+func (repository *blockingInitialRetentionRepository) DeleteBodiesBefore(ctx context.Context, _ time.Time, _ int) (int64, error) {
+	select {
+	case <-repository.entered:
+	default:
+		close(repository.entered)
+	}
+	select {
+	case <-repository.release:
+		return 0, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+func (repository *blockingInitialRetentionRepository) DeleteMetadataBefore(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
+func TestHistoryWorkerWaitReadyHonorsCancellationPromptly(t *testing.T) {
+	repository := &blockingInitialRetentionRepository{entered: make(chan struct{}), release: make(chan struct{})}
+	worker := NewHistoryPersistenceWorker(HistoryPersistenceWorkerOptions{Repository: repository})
+	select {
+	case <-repository.entered:
+	case <-time.After(time.Second):
+		t.Fatal("initial retention did not start")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if err := worker.WaitReady(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WaitReady error = %v, want context canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("canceled WaitReady took %s", elapsed)
+	}
+	close(repository.release)
+	if err := worker.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistoryWorkerWaitReadyHonorsDeadlinePromptly(t *testing.T) {
+	repository := &blockingInitialRetentionRepository{entered: make(chan struct{}), release: make(chan struct{})}
+	worker := NewHistoryPersistenceWorker(HistoryPersistenceWorkerOptions{Repository: repository})
+	select {
+	case <-repository.entered:
+	case <-time.After(time.Second):
+		t.Fatal("initial retention did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := worker.WaitReady(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitReady error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("deadline WaitReady took %s", elapsed)
+	}
+	close(repository.release)
+	if err := worker.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistoryWorkerWaitReadySucceedsAfterInitialRetention(t *testing.T) {
+	worker := NewHistoryPersistenceWorker(HistoryPersistenceWorkerOptions{Repository: &failingPersistRepository{}})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := worker.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady error = %v, want nil", err)
+	}
+	if err := worker.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistoryWorkerLifecycleAccessors(t *testing.T) {
+	worker := NewHistoryPersistenceWorker(HistoryPersistenceWorkerOptions{Repository: &failingPersistRepository{}})
+	if worker.Accepted() != 0 || worker.Processed() != 0 || worker.Persisted() != 0 || worker.PersistFailed() != 0 || worker.RetentionFailed() != 0 || worker.Pending() != 0 || worker.Done() == nil {
+		t.Fatalf("initial worker stats = %#v", worker.Stats())
+	}
+	if err := worker.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if worker.Enqueue(HistoryPersistenceJob{}) {
+		t.Fatal("enqueue unexpectedly succeeded after shutdown")
+	}
+	if worker.Dropped() != 1 {
+		t.Fatalf("dropped = %d, want 1", worker.Dropped())
+	}
+}
+
 func TestHistoryWorkerCounterInvariantScheduledRetentionFailure(t *testing.T) {
 	repo := &failingRetentionRepository{failMetadata: true}
 	worker := NewHistoryPersistenceWorker(HistoryPersistenceWorkerOptions{

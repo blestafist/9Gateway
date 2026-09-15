@@ -4,9 +4,10 @@ package version
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"runtime"
 	"strings"
-	"unicode"
+	"time"
 )
 
 const (
@@ -32,12 +33,12 @@ type Metadata struct {
 // Current returns safe metadata for this process.
 func Current() Metadata {
 	return Metadata{
-		Version:   valueOrDefault(Version, defaultVersion),
+		Version:   publicVersion(Version),
 		Commit:    ShortCommit(CommitSHA),
-		BuildDate: valueOrDefault(BuildDate, defaultBuild),
-		GoVersion: valueOrDefault(GoVersion, runtime.Version()),
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
+		BuildDate: publicBuildDate(BuildDate),
+		GoVersion: publicGoVersion(GoVersion),
+		OS:        publicOS(runtime.GOOS),
+		Arch:      publicArch(runtime.GOARCH),
 	}
 }
 
@@ -46,55 +47,68 @@ func Current() Metadata {
 // Prometheus label: malformed values cannot break a scrape, create unbounded
 // label values, or carry control characters into the exposition.
 func MetricLabels() Metadata {
-	metadata := Current()
-	return Metadata{
-		Version:   metricValue(metadata.Version),
-		Commit:    metricValue(metadata.Commit),
-		BuildDate: metricValue(metadata.BuildDate),
-		GoVersion: metricValue(metadata.GoVersion),
-		OS:        metricValue(metadata.OS),
-		Arch:      metricValue(metadata.Arch),
-	}
+	return Current()
 }
 
 const metricValueLimit = 64
 
-func metricValue(value string) string {
+var (
+	versionPattern   = regexp.MustCompile(`^(?:dev|devel|v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$`)
+	commitPattern    = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+	goVersionPattern = regexp.MustCompile(`^go[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:(?:beta|rc)[0-9]+)?(?:-[0-9A-Za-z][0-9A-Za-z.+:]*)?$`)
+)
+
+func publicVersion(value string) string {
 	value = strings.TrimSpace(value)
-	if value == "" {
-		return "unknown"
+	if len(value) <= metricValueLimit && versionPattern.MatchString(value) {
+		return value
 	}
-	lower := strings.ToLower(value)
-	for _, sensitive := range []string{"secret", "password", "token", "bearer", "authorization", "api_key", "apikey", "credential"} {
-		if strings.Contains(lower, sensitive) {
-			return "unknown"
+	return defaultVersion
+}
+
+func publicBuildDate(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= metricValueLimit {
+		if _, err := time.Parse(time.RFC3339, value); err == nil {
+			return value
 		}
 	}
-	var builder strings.Builder
-	for _, character := range value {
-		if builder.Len() >= metricValueLimit {
-			break
-		}
-		if character < unicode.MaxASCII && (character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("._+-", character)) {
-			builder.WriteRune(character)
-		} else {
-			builder.WriteByte('_')
-		}
+	return defaultBuild
+}
+
+func publicGoVersion(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= metricValueLimit && goVersionPattern.MatchString(value) {
+		return value
 	}
-	if builder.Len() == 0 {
-		return "unknown"
+	return "unknown"
+}
+
+func publicOS(value string) string {
+	if value == runtime.GOOS {
+		return value
 	}
-	return builder.String()
+	return "unknown"
+}
+
+func publicArch(value string) string {
+	if value == runtime.GOARCH {
+		return value
+	}
+	return "unknown"
 }
 
 // ShortCommit returns a conventional seven-character commit identifier.
 func ShortCommit(commit string) string {
 	commit = strings.TrimSpace(commit)
-	if commit == "" {
+	if commit == "" || commit == defaultCommit {
 		return defaultCommit
 	}
-	if commit == defaultCommit || len(commit) <= 7 {
-		return commit
+	if !commitPattern.MatchString(commit) {
+		return defaultCommit
+	}
+	if len(commit) <= 7 {
+		return strings.ToLower(commit)
 	}
 	return commit[:7]
 }
@@ -108,11 +122,4 @@ func Format(writer io.Writer, program string) {
 	fmt.Fprintf(writer, "%s version %s\ncommit: %s\nbuild date: %s\ngo version: %s\nos/arch: %s/%s\n",
 		program, metadata.Version, metadata.Commit, metadata.BuildDate,
 		metadata.GoVersion, metadata.OS, metadata.Arch)
-}
-
-func valueOrDefault(value, fallback string) string {
-	if value = strings.TrimSpace(value); value == "" {
-		return fallback
-	}
-	return value
 }

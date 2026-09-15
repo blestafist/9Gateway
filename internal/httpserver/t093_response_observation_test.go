@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -87,5 +88,40 @@ func TestT093TransparentGzipObservationDoesNotRewriteWireBytes(t *testing.T) {
 	observation.finish(nil)
 	if !observation.eligible || !bytes.Equal(observation.bytes, coding) {
 		t.Fatalf("gzip observation changed captured wire bytes")
+	}
+}
+
+func TestResponseObservationWriterForwardsAndRecordsAcceptedBytes(t *testing.T) {
+	response := httptest.NewRecorder()
+	observation := newResponseObservation(64, ContentCodingIdentity)
+	writer := observation.wrap(response)
+	if unwrapped := writer.(interface{ Unwrap() http.ResponseWriter }).Unwrap(); unwrapped != response {
+		t.Fatal("observation writer did not preserve wrapped response writer")
+	}
+	if written, err := writer.Write([]byte("first")); err != nil || written != 5 {
+		t.Fatalf("Write() = %d/%v, want 5/nil", written, err)
+	}
+	if copied, err := writer.(io.ReaderFrom).ReadFrom(bytes.NewBufferString(" second")); err != nil || copied != 7 {
+		t.Fatalf("ReadFrom() = %d/%v, want 7/nil", copied, err)
+	}
+	if got := response.Body.String(); got != "first second" {
+		t.Fatalf("forwarded response = %q", got)
+	}
+	observation.finish(nil)
+	if !observation.eligible || string(observation.bytes) != "first second" {
+		t.Fatalf("observation = %#v, want complete forwarded bytes", observation)
+	}
+}
+
+func TestResponseObservationWriterReportsShortWrite(t *testing.T) {
+	underlying := &t135ShortWriteWriter{header: make(http.Header), accepted: 2}
+	observation := newResponseObservation(64, ContentCodingIdentity)
+	writer := observation.wrap(underlying)
+	written, err := writer.Write([]byte("four"))
+	if written != 2 || !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("short Write() = %d/%v, want 2/io.ErrShortWrite", written, err)
+	}
+	if string(observation.bytes) != "fo" {
+		t.Fatalf("short-write observation = %q, want accepted prefix", observation.bytes)
 	}
 }

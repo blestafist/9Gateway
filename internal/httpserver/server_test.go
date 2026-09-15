@@ -36,6 +36,21 @@ func TestNewHandlerAcceptsHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestRequestHeaderBytesCountsHTTPHostOnce(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.test/v1/models", nil)
+	request.Header.Set("X-Test", "value")
+	request.Header["Host"] = []string{"synthetic-host-must-not-be-counted"}
+	request.Host = "actual-host"
+
+	want := len("X-Test") + 2 + len("value") + 2 + len("Host") + 2 + len("actual-host") + 2
+	if got := requestHeaderBytes(request); got != want {
+		t.Fatalf("requestHeaderBytes() = %d, want %d", got, want)
+	}
+	if got := requestHeaderBytes(nil); got != 0 {
+		t.Fatalf("requestHeaderBytes(nil) = %d, want 0", got)
+	}
+}
+
 func TestHealth(t *testing.T) {
 	server := httptest.NewServer(newTransportHandler(transport.NewClient(), "http://router.example.test", "upstream-secret"))
 	t.Cleanup(server.Close)

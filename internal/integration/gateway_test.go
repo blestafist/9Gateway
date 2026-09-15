@@ -1011,48 +1011,74 @@ func (handler *blockingSlogHandler) Release() {
 func (handler *blockingSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return handler }
 func (handler *blockingSlogHandler) WithGroup(string) slog.Handler      { return handler }
 
-// TestT159StreamPerformanceRegression measures complete client-visible stream
-// lifetimes against direct provider requests. It uses means and a generous
-// local-CI tolerance rather than subtracting unrelated wall-clock timestamps;
-// the hard regression guards are mean close <50ms and no request >10s.
+// TestT159StreamPerformanceRegression measures client-visible SSE timing against
+// paired direct provider requests. TTFB and post-first-byte close overhead are
+// independent <10ms contracts; neither can hide behind the other or a compound
+// total-lifetime allowance.
 func TestT159StreamPerformanceRegression(t *testing.T) {
-	script := newUpstreamScript()
-	gateway := newHarness(t, script, 256, 256, nil)
+	const (
+		baselineSamples = 20
+		firstByteDelay  = 2 * time.Millisecond
+		eofDelay        = 2 * time.Millisecond
+	)
+	upstream := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		time.Sleep(firstByteDelay)
+		response.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := response.(http.Flusher)
+		if _, err := io.WriteString(response, "data: performance\n\n"); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(eofDelay)
+	})
+	gateway := newHarness(t, upstream, 256, 256, nil)
 	_, key := createKey(t, gateway, "performance")
 
 	type streamMeasurement struct {
-		ttfb, closeDelay time.Duration
+		ttfb  time.Duration
+		close time.Duration
+		total time.Duration
+		err   error
 	}
 	measure := func(target string, headers http.Header) streamMeasurement {
-		request, _ := http.NewRequest(http.MethodGet, target, nil)
+		request, err := http.NewRequest(http.MethodGet, target, nil)
+		if err != nil {
+			return streamMeasurement{err: err}
+		}
 		request.Header = headers.Clone()
 		started := time.Now()
 		response, err := gateway.client.Do(request)
 		if err != nil {
-			t.Fatal(err)
+			return streamMeasurement{total: time.Since(started), err: err}
 		}
-		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			closeErr := response.Body.Close()
+			return streamMeasurement{total: time.Since(started), err: fmt.Errorf("status=%d, close=%w", response.StatusCode, closeErr)}
+		}
 		var firstByte [1]byte
 		if _, err = io.ReadFull(response.Body, firstByte[:]); err != nil {
-			t.Fatal(err)
+			closeErr := response.Body.Close()
+			return streamMeasurement{total: time.Since(started), err: errors.Join(err, closeErr)}
 		}
 		first := time.Now()
-		_, err = io.ReadAll(response.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
+		_, readErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
 		closed := time.Now()
-		return streamMeasurement{ttfb: first.Sub(started), closeDelay: closed.Sub(first)}
+		return streamMeasurement{ttfb: first.Sub(started), close: closed.Sub(first), total: closed.Sub(started), err: errors.Join(readErr, closeErr)}
 	}
-	direct := make([]streamMeasurement, 5)
-	for i := range direct {
-		direct[i] = measure(gateway.upstream.URL+"/v1/sse", nil)
+	measurePair := func() (streamMeasurement, streamMeasurement) {
+		direct := measure(gateway.upstream.URL+"/v1/sse", nil)
+		gatewayRequest := make(http.Header)
+		gatewayRequest.Set("Authorization", "Bearer "+key)
+		through := measure(gateway.baseURL+"/v1/sse", gatewayRequest)
+		return direct, through
 	}
-	through := make([]streamMeasurement, 5)
-	for i := range through {
-		request, _ := http.NewRequest(http.MethodGet, gateway.baseURL+"/v1/sse", nil)
-		request.Header.Set("Authorization", "Bearer "+key)
-		through[i] = measure(request.URL.String(), request.Header)
+	direct := make([]streamMeasurement, baselineSamples)
+	through := make([]streamMeasurement, baselineSamples)
+	for i := 0; i < baselineSamples; i++ {
+		direct[i], through[i] = measurePair()
 	}
 	mean := func(values []streamMeasurement, selectValue func(streamMeasurement) time.Duration) time.Duration {
 		var total time.Duration
@@ -1061,21 +1087,28 @@ func TestT159StreamPerformanceRegression(t *testing.T) {
 		}
 		return total / time.Duration(len(values))
 	}
-	baselineClose := mean(direct, func(value streamMeasurement) time.Duration { return value.closeDelay })
-	gatewayClose := mean(through, func(value streamMeasurement) time.Duration { return value.closeDelay })
-	// The direct upstream run is the local baseline. Stream-close overhead is
-	// checked independently and cannot be hidden by a compound allowance.
-	closeOverhead := gatewayClose - baselineClose
-	if closeOverhead < 0 {
-		closeOverhead = 0
+	for i := range direct {
+		if direct[i].err != nil || through[i].err != nil {
+			t.Fatalf("paired stream %d failed: direct=%v gateway=%v", i, direct[i].err, through[i].err)
+		}
 	}
-	if closeOverhead >= 50*time.Millisecond {
-		t.Fatalf("stream-close overhead=%s (direct=%s gateway=%s)", closeOverhead, baselineClose, gatewayClose)
+	baselineTTFB := mean(direct, func(value streamMeasurement) time.Duration { return value.ttfb })
+	gatewayTTFB := mean(through, func(value streamMeasurement) time.Duration { return value.ttfb })
+	if gatewayTTFB-baselineTTFB >= 10*time.Millisecond {
+		t.Fatalf("TTFB overhead=%s (direct mean=%s gateway mean=%s)", gatewayTTFB-baselineTTFB, baselineTTFB, gatewayTTFB)
 	}
+	t.Logf("paired means: TTFB direct=%s gateway=%s overhead=%s", baselineTTFB, gatewayTTFB, gatewayTTFB-baselineTTFB)
+	baselineClose := mean(direct, func(value streamMeasurement) time.Duration { return value.close })
+	gatewayClose := mean(through, func(value streamMeasurement) time.Duration { return value.close })
+	if gatewayClose-baselineClose >= 10*time.Millisecond {
+		t.Fatalf("post-first-byte stream-close overhead=%s (direct mean=%s gateway mean=%s)", gatewayClose-baselineClose, baselineClose, gatewayClose)
+	}
+	t.Logf("paired means: post-first-byte close direct=%s gateway=%s overhead=%s", baselineClose, gatewayClose, gatewayClose-baselineClose)
 
 	const concurrent = 100
 	type streamResult struct {
 		total time.Duration
+		close time.Duration
 		err   error
 	}
 	results := make(chan streamResult, concurrent)
@@ -1092,26 +1125,40 @@ func TestT159StreamPerformanceRegression(t *testing.T) {
 				results <- streamResult{total: time.Since(started), err: err}
 				return
 			}
-			_, readErr := io.ReadAll(response.Body)
+			if response.StatusCode != http.StatusOK {
+				closeErr := response.Body.Close()
+				results <- streamResult{total: time.Since(started), err: fmt.Errorf("status=%d, close=%w", response.StatusCode, closeErr)}
+				return
+			}
+			var firstByte [1]byte
+			_, readErr := io.ReadFull(response.Body, firstByte[:])
+			first := time.Now()
+			if readErr == nil {
+				_, readErr = io.Copy(io.Discard, response.Body)
+			}
 			closeErr := response.Body.Close()
-			results <- streamResult{total: time.Since(started), err: errors.Join(readErr, closeErr)}
+			results <- streamResult{total: time.Since(started), close: time.Since(first), err: errors.Join(readErr, closeErr)}
 		}()
 	}
 	wg.Wait()
 	close(results)
 	var total time.Duration
+	var closeTotal time.Duration
 	count := 0
 	for result := range results {
 		if result.err != nil {
 			t.Fatalf("parallel stream request/read: %v", result.err)
 		}
 		total += result.total
+		closeTotal += result.close
 		count++
 		if result.total >= 10*time.Second {
 			t.Fatalf("parallel stream total took %s", result.total)
 		}
 	}
-	if count != concurrent || total/time.Duration(count) >= 50*time.Millisecond {
-		t.Fatalf("parallel stream mean=%s requests=%d want mean <50ms and %d requests", total/time.Duration(count), count, concurrent)
+	parallelClose := closeTotal / time.Duration(count)
+	if count != concurrent || parallelClose-baselineClose >= 50*time.Millisecond {
+		t.Fatalf("parallel stream mean close overhead=%s (gateway close=%s direct close=%s) total=%s requests=%d want overhead <50ms and %d requests", parallelClose-baselineClose, parallelClose, baselineClose, total/time.Duration(count), count, concurrent)
 	}
+	t.Logf("parallel means: post-first-byte close=%s overhead=%s total=%s requests=%d", parallelClose, parallelClose-baselineClose, total/time.Duration(count), count)
 }

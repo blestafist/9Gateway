@@ -724,7 +724,10 @@ func (repository *RequestHistoryRepository) Persist(ctx context.Context, record 
 	if err := ctx.Err(); err != nil {
 		return historyContextError(err, ErrHistoryWrite)
 	}
-	unlock := lockStorageWrite(repository.database)
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return historyOperationError(err, ErrHistoryWrite)
+	}
 	defer unlock()
 
 	tx, err := repository.beginner.BeginTx(ctx, nil)
@@ -806,7 +809,10 @@ func (repository *RequestHistoryRepository) DeleteBodiesBefore(ctx context.Conte
 	if repository == nil || repository.database == nil {
 		return 0, ErrHistoryRepositoryUnavailable
 	}
-	unlock := lockStorageWrite(repository.database)
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return 0, historyOperationError(err, ErrHistoryRetention)
+	}
 	defer unlock()
 	result, err := repository.database.ExecContext(ctx, `
 		DELETE FROM request_bodies
@@ -837,7 +843,10 @@ func (repository *RequestHistoryRepository) DeleteMetadataBefore(ctx context.Con
 	if repository == nil || repository.database == nil {
 		return 0, ErrHistoryRepositoryUnavailable
 	}
-	unlock := lockStorageWrite(repository.database)
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return 0, historyOperationError(err, ErrHistoryRetention)
+	}
 	defer unlock()
 	result, err := repository.database.ExecContext(ctx, `
 		DELETE FROM requests

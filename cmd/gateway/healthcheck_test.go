@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/pestit/9gateway/internal/config"
 )
 
 func TestRunHealthcheck(t *testing.T) {
@@ -17,6 +20,15 @@ func TestRunHealthcheck(t *testing.T) {
 
 	if err := runHealthcheck([]string{"--address", server.URL}); err != nil {
 		t.Fatalf("runHealthcheck() error = %v", err)
+	}
+}
+
+func TestHistoryStartupTimeoutUsesShutdownPolicy(t *testing.T) {
+	if got := historyStartupTimeout(config.Config{}); got != 30*time.Second {
+		t.Fatalf("default history startup timeout = %s, want 30s", got)
+	}
+	if got := historyStartupTimeout(config.Config{ShutdownTimeoutSeconds: 7}); got != 7*time.Second {
+		t.Fatalf("configured history startup timeout = %s, want 7s", got)
 	}
 }
 

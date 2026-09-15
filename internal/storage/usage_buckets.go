@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -82,7 +83,10 @@ func (repository *UsageBucketRepository) UpsertCommittedDeltas(ctx context.Conte
 	if len(valid) == 0 {
 		return nil
 	}
-	unlock := lockStorageWrite(repository.database)
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("upsert usage buckets: acquire write gate: %w", err)
+	}
 	defer unlock()
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
@@ -239,6 +243,11 @@ func (repository *UsageBucketRepository) CompleteLegacyMigration(ctx context.Con
 	if ctx == nil || repository == nil || repository.database == nil || repository.beginner == nil {
 		return ErrUsageBucketUnavailable
 	}
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("complete legacy migration: acquire write gate: %w", err)
+	}
+	defer unlock()
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return errors.New("complete legacy migration: begin failed")
@@ -271,6 +280,11 @@ func (repository *UsageBucketRepository) PromoteLegacy(ctx context.Context, buck
 	if amount <= 0 || validateUsageBucketIdentity(bucket.APIKeyID, bucket.BucketStart, bucket.BucketSeconds) != nil {
 		return ErrInvalidUsageBucket
 	}
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("promote legacy usage bucket: acquire write gate: %w", err)
+	}
+	defer unlock()
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return errors.New("promote legacy usage bucket: begin failed")
@@ -319,6 +333,11 @@ func (repository *UsageBucketRepository) DeleteExpired(ctx context.Context, now 
 	if repository.beginner == nil {
 		return ErrUsageBucketUnavailable
 	}
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("delete expired usage buckets: acquire write gate: %w", err)
+	}
+	defer unlock()
 	tx, err := repository.beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return errors.New("delete expired usage buckets: begin failed")

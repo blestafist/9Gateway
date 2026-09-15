@@ -15,8 +15,7 @@ bounded safe request tracing, optional per-key body capture, structured
 completion logging, persistent request history with independent retention, and
 ordered lifecycle shutdown. Detailed telemetry is best effort and droppable;
 transport and critical accounting remain independent of its queues and sinks.
-All REVIEW-HANDOFF findings are closed in code, tests, and documentation; no
-active handoff bullets remain.
+Independent review fixes: transport, storage, startup, metadata, and performance findings are closed.
 Provider routing/translation, tool-call execution/validation, Redis,
 PostgreSQL, Web UI, and T161+ follow-on work remain out of scope.
 

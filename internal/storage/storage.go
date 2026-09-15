@@ -59,28 +59,56 @@ type migration struct {
 type DB struct {
 	*sql.DB
 
-	closeOnce sync.Once
-	closeErr  error
-	writeMu   sync.Mutex
+	closeOnce     sync.Once
+	closeErr      error
+	writeGateOnce sync.Once
+	writeGate     chan struct{}
 }
 
 // lockWrite serializes transactions that read before writing. In WAL mode a
 // deferred transaction can otherwise lose its read snapshot while another
 // process-owned accumulator commits, producing SQLITE_BUSY_SNAPSHOT instead
 // of honoring busy_timeout. All repositories in this process share this gate.
-func (database *DB) lockWrite() func() {
+func (database *DB) lockWrite(ctx context.Context) (func(), error) {
 	if database == nil {
-		return func() {}
+		return func() {}, nil
 	}
-	database.writeMu.Lock()
-	return database.writeMu.Unlock
+	if ctx == nil {
+		return nil, errors.New("acquire sqlite write gate: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("acquire sqlite write gate: %w", err)
+	}
+	database.writeGateOnce.Do(func() {
+		database.writeGate = make(chan struct{}, 1)
+		database.writeGate <- struct{}{}
+	})
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("acquire sqlite write gate: %w", ctx.Err())
+	case <-database.writeGate:
+		if err := ctx.Err(); err != nil {
+			database.writeGate <- struct{}{}
+			return nil, fmt.Errorf("acquire sqlite write gate: %w", err)
+		}
+		var releaseOnce sync.Once
+		return func() {
+			releaseOnce.Do(func() { database.writeGate <- struct{}{} })
+		}, nil
+	}
 }
 
-func lockStorageWrite(database dbQueries) func() {
+func lockStorageWrite(ctx context.Context, database dbQueries) (func(), error) {
 	if writer, ok := database.(*DB); ok {
-		return writer.lockWrite()
+		return writer.lockWrite(ctx)
 	}
-	return func() {}
+	if ctx == nil {
+		return nil, errors.New("acquire sqlite write gate: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("acquire sqlite write gate: %w", err)
+	}
+	return func() {}, nil
 }
 
 var memoryDatabaseID atomic.Uint64

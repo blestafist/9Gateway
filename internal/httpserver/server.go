@@ -853,9 +853,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			responseBodyRecorder = recorder
 			if completion := completionWriterFor(response); completion != nil {
 				completion.responseBodyRecorder = recorder
-				completion.responseBodyAfterFlush = responseMode == ResponseModeSSE && !shouldAggregateSSE(request, metadata, responseMode)
+				completion.responseBodyAfterFlush = !shouldAggregateSSE(request, metadata, responseMode)
 			}
 		}
+	}
+	if completion := completionWriterFor(response); completion != nil {
+		// All transparent representations use the downstream flush as the
+		// delivered-byte boundary, whether or not body capture is enabled.
+		completion.responseBodyAfterFlush = !shouldAggregateSSE(request, metadata, responseMode)
 	}
 	if trace != nil {
 		// A malformed or ambiguous header has no provable actual mode, but the
@@ -880,9 +885,6 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			}
 			if trace != nil {
 				responseObservation.checkpointAt = trace.monotonicNow
-			}
-			if responseMode == ResponseModeJSON {
-				response = responseObservation.wrap(response)
 			}
 		}
 	}
@@ -1412,7 +1414,7 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		response.WriteHeader(upstreamResponse.StatusCode)
 		return streamResponseBody(response, &sseEventLimitReader{source: upstreamResponse.Body, limit: maxSSEEventBytes}, observation)
 	}
-	return copyBoundedNonStreamingResponse(response, upstreamResponse)
+	return copyBoundedNonStreamingResponseWithObservation(response, upstreamResponse, maxUpstreamResponseBodyBytes, observation)
 }
 
 func dispatchErrorCode(err error) string {
@@ -1431,12 +1433,16 @@ var errSSEEventTooLarge = errors.New("upstream SSE event exceeds maximum size")
 // consumed: a generic non-SSE representation is still transparent transport,
 // not a response which must be validated in full before its first byte.
 func copyBoundedNonStreamingResponse(response http.ResponseWriter, upstream *http.Response) error {
-	return copyBoundedNonStreamingResponseWithLimit(response, upstream, maxUpstreamResponseBodyBytes)
+	return copyBoundedNonStreamingResponseWithObservation(response, upstream, maxUpstreamResponseBodyBytes, nil)
 }
 
 // copyBoundedNonStreamingResponseWithLimit is split out so transport tests can
 // exercise the limit with small bodies.
 func copyBoundedNonStreamingResponseWithLimit(response http.ResponseWriter, upstream *http.Response, limit int64) error {
+	return copyBoundedNonStreamingResponseWithObservation(response, upstream, limit, nil)
+}
+
+func copyBoundedNonStreamingResponseWithObservation(response http.ResponseWriter, upstream *http.Response, limit int64, observation *responseObservation) error {
 	if limit < 0 {
 		limit = 0
 	}
@@ -1450,7 +1456,7 @@ func copyBoundedNonStreamingResponseWithLimit(response http.ResponseWriter, upst
 		response.Header().Del("Content-Length")
 	}
 	response.WriteHeader(upstream.StatusCode)
-	return streamResponseBody(response, &boundedResponseReader{source: upstream.Body, remaining: limit})
+	return streamResponseBody(response, &boundedResponseReader{source: upstream.Body, remaining: limit}, observation)
 }
 
 // boundedResponseReader probes one byte after the allowed prefix. That byte
@@ -1770,8 +1776,11 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader, observatio
 			if written != read {
 				if written > 0 && written < read {
 					if flushErr := controller.Flush(); flushErr == nil {
-						if completion != nil && completion.responseBodyAfterFlush {
-							completion.recordResponseBodyAfterFlush(buffer[:written], written)
+						if completion != nil {
+							if completion.responseBodyAfterFlush {
+								completion.recordResponseBodyAfterFlush(buffer[:written], written)
+							}
+							completion.recordDownstreamAfterFlush(written, written > 0)
 						}
 						if observation != nil {
 							observation.record(buffer[:written])
@@ -1784,8 +1793,11 @@ func streamResponseBody(response http.ResponseWriter, body io.Reader, observatio
 			if flushErr := controller.Flush(); flushErr != nil {
 				return flushErr
 			}
-			if completion != nil && completion.responseBodyAfterFlush {
-				completion.recordResponseBodyAfterFlush(buffer[:read], written)
+			if completion != nil {
+				if completion.responseBodyAfterFlush {
+					completion.recordResponseBodyAfterFlush(buffer[:read], written)
+				}
+				completion.recordDownstreamAfterFlush(written, written == read)
 			}
 			// Capture only after both the downstream write and its flush have
 			// succeeded. The read buffer is reused on the next iteration, so
@@ -2006,6 +2018,11 @@ func requestHeaderBytes(request *http.Request) int {
 	}
 	total := 0
 	for name, values := range request.Header {
+		// net/http stores the HTTP/1 Host field in Request.Host rather than in
+		// Header. Do not count a synthetic Header-host as well as that field.
+		if strings.EqualFold(name, "Host") {
+			continue
+		}
 		total += len(name) + 2
 		for _, value := range values {
 			total += len(value) + 2
@@ -2016,6 +2033,10 @@ func requestHeaderBytes(request *http.Request) int {
 		if total > maxIngressHeaderBytes {
 			return total
 		}
+	}
+	if request.Host != "" {
+		// "Host: value\r\n", including the field-name and wire framing.
+		total += len("Host") + 2 + len(request.Host) + 2
 	}
 	return total
 }
@@ -2367,7 +2388,7 @@ func (writer *completionResponseWriter) Write(body []byte) (int, error) {
 		// ignored: capture is best effort and must not affect transport.
 		_ = writer.responseBodyRecorder.WriteObserved(body, written)
 	}
-	if writer.trace != nil && written >= 0 && written <= len(body) {
+	if writer.trace != nil && !writer.responseBodyAfterFlush && written >= 0 && written <= len(body) {
 		if written > 0 || err == nil {
 			// n is the number accepted by the underlying writer, even when a
 			// short write or error accompanies it. Never substitute len(body).
@@ -2386,6 +2407,15 @@ func (writer *completionResponseWriter) recordResponseBodyAfterFlush(body []byte
 		return
 	}
 	_ = writer.responseBodyRecorder.WriteObserved(body, accepted)
+}
+
+// recordDownstreamAfterFlush publishes delivered-byte accounting only after a
+// transparent fragment has passed the downstream flush boundary.
+func (writer *completionResponseWriter) recordDownstreamAfterFlush(accepted int, successful bool) {
+	if writer == nil || writer.trace == nil || accepted < 0 {
+		return
+	}
+	writer.trace.recordDownstreamWrite(accepted, successful && accepted > 0, accepted == 0 && successful)
 }
 
 func (writer *completionResponseWriter) statusCode() int {

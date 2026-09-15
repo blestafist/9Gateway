@@ -313,7 +313,12 @@ func (repository *APIKeyRepository) Insert(ctx context.Context, record APIKeyRec
 	if record.ExpiresAt != nil {
 		expiresAt = record.ExpiresAt.Unix()
 	}
-	_, err := repository.database.ExecContext(ctx, `
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("insert api key: acquire write gate: %w", err)
+	}
+	defer unlock()
+	_, err = repository.database.ExecContext(ctx, `
 		INSERT INTO api_keys
 			(id, name, prefix, key_hash, enabled, expires_at, created_at, updated_at, policy_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -642,6 +647,11 @@ func (repository *APIKeyRepository) SetEnabled(ctx context.Context, id string, e
 	if repository == nil || repository.database == nil {
 		return ErrRepositoryUnavailable
 	}
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("update api key: acquire write gate: %w", err)
+	}
+	defer unlock()
 	result, err := repository.database.ExecContext(ctx,
 		"UPDATE api_keys SET enabled = ?, updated_at = max(updated_at, created_at, ?) WHERE id = ?",
 		boolInt(enabled), time.Now().UTC().Truncate(time.Second).Unix(), id)
@@ -676,6 +686,11 @@ func (repository *APIKeyRepository) UpdatePolicy(ctx context.Context, id string,
 	if repository == nil || repository.database == nil {
 		return ErrRepositoryUnavailable
 	}
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return fmt.Errorf("update api key policy: acquire write gate: %w", err)
+	}
+	defer unlock()
 	result, err := repository.database.ExecContext(ctx,
 		"UPDATE api_keys SET enabled = ?, policy_json = ?, updated_at = max(updated_at, created_at, ?) WHERE id = ?",
 		boolInt(enabled), policyJSON, time.Now().UTC().Truncate(time.Second).Unix(), id)
@@ -710,6 +725,11 @@ func (repository *APIKeyRepository) UpdatePolicyRecord(ctx context.Context, id s
 	// statement. In particular, cancellation cannot commit the UPDATE and then
 	// cancel a separate GetByID, leaving callers with no safe publication result.
 	updatedAt := time.Now().UTC().Truncate(time.Second).Unix()
+	unlock, err := lockStorageWrite(ctx, repository.database)
+	if err != nil {
+		return APIKeyRecord{}, fmt.Errorf("update api key policy: acquire write gate: %w", err)
+	}
+	defer unlock()
 	row := repository.database.QueryRowContext(ctx, `
 		UPDATE api_keys
 		SET enabled = ?, policy_json = ?, updated_at = max(updated_at, created_at, ?)

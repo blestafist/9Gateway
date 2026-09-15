@@ -466,6 +466,269 @@ func TestUsageBucketMigrationRollsBackOnFailure(t *testing.T) {
 	}
 }
 
+func TestMigrationV11ToV12InitializesAndAdvancesDeletionSequence(t *testing.T) {
+	database, err := sql.Open("sqlite", dataSource(":memory:", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	migrations := mustEmbeddedMigrations(t)
+	if err := runMigrations(context.Background(), database, migrations[:11]); err != nil {
+		t.Fatalf("create version eleven schema: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO requests (request_id, upstream_started) VALUES ('0123456789abcdef0123456789abcdef', 0)`); err != nil {
+		t.Fatalf("insert v11 request: %v", err)
+	}
+	if err := runMigrations(context.Background(), database, migrations); err != nil {
+		t.Fatalf("apply version twelve migration: %v", err)
+	}
+	var sequence int64
+	if err := database.QueryRow(`SELECT deletion_seq FROM traversal_sequences WHERE table_name = 'requests'`).Scan(&sequence); err != nil {
+		t.Fatalf("read initialized deletion sequence: %v", err)
+	}
+	if sequence != 0 {
+		t.Fatalf("initialized deletion sequence = %d, want 0", sequence)
+	}
+	if _, err := database.Exec(`DELETE FROM requests WHERE request_id = '0123456789abcdef0123456789abcdef'`); err != nil {
+		t.Fatalf("delete v11 request: %v", err)
+	}
+	if err := database.QueryRow(`SELECT deletion_seq FROM traversal_sequences WHERE table_name = 'requests'`).Scan(&sequence); err != nil {
+		t.Fatalf("read advanced deletion sequence: %v", err)
+	}
+	if sequence != 1 {
+		t.Fatalf("advanced deletion sequence = %d, want 1", sequence)
+	}
+}
+
+func TestSQLiteWriteGateCancellationDoesNotStartOrLeakWrite(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO api_keys (id,name,prefix,key_hash,enabled,created_at,updated_at,policy_json) VALUES ('gate-key','name','gate-prefix',zeroblob(32),1,1,1,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewUsageBucketRepository(database)
+	release, err := lockStorageWrite(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- repository.UpsertCommittedDelta(ctx, UsageBucketDelta{
+			APIKeyID: "gate-key", BucketStart: time.Unix(0, 0).UTC(), BucketSeconds: 60,
+			BucketAmount: 10, CommittedDelta: 1,
+		})
+	}()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled gated write error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled gated write did not return promptly")
+	}
+	var count int
+	if err := database.QueryRow(`SELECT count(*) FROM usage_bucket_identities`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("canceled gated write inserted %d rows", count)
+	}
+	release()
+	if err := repository.UpsertCommittedDelta(context.Background(), UsageBucketDelta{
+		APIKeyID: "gate-key", BucketStart: time.Unix(0, 0).UTC(), BucketSeconds: 60,
+		BucketAmount: 10, CommittedDelta: 1,
+	}); err != nil {
+		t.Fatalf("write after canceled waiter: %v", err)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM usage_bucket_identities`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("write after canceled waiter inserted %d rows, want 1", count)
+	}
+}
+
+func TestSQLiteWriteGateBoundaryAndAccumulatorDone(t *testing.T) {
+	var nilDatabase *DB
+	unlock, err := nilDatabase.lockWrite(context.Background())
+	if err != nil {
+		t.Fatalf("nil DB write gate error = %v", err)
+	}
+	unlock()
+	if _, err := nilDatabase.lockWrite(nil); err != nil {
+		t.Fatalf("nil DB should not require a context: %v", err)
+	}
+	unlock, err = lockStorageWrite(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("nil query handle write gate error = %v", err)
+	}
+	unlock()
+	if _, err := lockStorageWrite(nil, nil); err == nil {
+		t.Fatal("nil query handle accepted nil context")
+	}
+
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	firstUnlock, err := lockStorageWrite(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstUnlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := lockStorageWrite(ctx, database); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled write gate error = %v", err)
+	}
+
+	usage := NewUsageAggregateAccumulator(nil)
+	budget := NewBudgetAccumulator(nil)
+	if usage.Done() == nil || budget.Done() == nil {
+		t.Fatal("accumulator Done returned nil")
+	}
+	if err := usage.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLiteWriteGateWaitsAndReleasesAfterContextCancellation(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	release, err := lockStorageWrite(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deferred := make(chan error, 1)
+	go func() {
+		unlock, gateErr := lockStorageWrite(ctx, database)
+		if gateErr == nil {
+			unlock()
+		}
+		deferred <- gateErr
+	}()
+	cancel()
+	select {
+	case gateErr := <-deferred:
+		if !errors.Is(gateErr, context.Canceled) {
+			t.Fatalf("waiting gate error = %v", gateErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting gate did not honor cancellation")
+	}
+	release()
+	unlock, err := lockStorageWrite(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+}
+
+func TestSQLiteWriteGateReleasesOnceWhenContextCancelsAfterAdmission(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	unlock, err := lockStorageWrite(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	unlock()
+	unlock()
+	secondUnlock, err := lockStorageWrite(context.Background(), database)
+	if err != nil {
+		t.Fatalf("write gate remained occupied after idempotent release: %v", err)
+	}
+	secondUnlock()
+}
+
+func TestLegacyPromotionSerializesWithGatedUsageWrite(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO api_keys (id,name,prefix,key_hash,enabled,created_at,updated_at,policy_json) VALUES ('concurrent-key','name','concurrent-prefix',zeroblob(32),1,1,1,'{}'); INSERT INTO usage_buckets VALUES ('concurrent-key',0,60,7,1,1); UPDATE usage_bucket_migration_state SET legacy_rows_present=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewUsageBucketRepository(database)
+	legacy, err := repository.LoadLegacyUnexpired(context.Background(), time.Unix(1, 0).UTC())
+	if err != nil || len(legacy) != 1 {
+		t.Fatalf("legacy rows = %v/%d", err, len(legacy))
+	}
+	release, err := lockStorageWrite(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 2)
+	results := make(chan error, 2)
+	go func() {
+		closeStarted := func() { started <- struct{}{} }
+		closeStarted()
+		results <- repository.PromoteLegacy(context.Background(), legacy[0], 100)
+	}()
+	go func() {
+		started <- struct{}{}
+		results <- repository.UpsertCommittedDelta(context.Background(), UsageBucketDelta{
+			APIKeyID: "concurrent-key", BucketStart: time.Unix(0, 0).UTC(), BucketSeconds: 60,
+			BucketAmount: 100, CommittedDelta: 7,
+		})
+	}()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			release()
+			t.Fatal("concurrent writers did not reach synchronization barrier")
+		}
+	}
+	release()
+	for range 2 {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("serialized concurrent write error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("serialized concurrent writer did not return")
+		}
+	}
+	var identityTokens int64
+	if err := database.QueryRow(`SELECT committed_tokens FROM usage_bucket_identities WHERE api_key_id='concurrent-key' AND bucket_start=0 AND bucket_seconds=60 AND bucket_amount=100`).Scan(&identityTokens); err != nil {
+		t.Fatal(err)
+	}
+	if identityTokens != 7 && identityTokens != 14 {
+		t.Fatalf("serialized identity committed tokens = %d, want 7 or 14", identityTokens)
+	}
+	var legacyRows int
+	if err := database.QueryRow(`SELECT count(*) FROM usage_buckets WHERE api_key_id='concurrent-key'`).Scan(&legacyRows); err != nil {
+		t.Fatal(err)
+	}
+	if legacyRows != 0 {
+		t.Fatalf("legacy rows after promotion = %d, want 0", legacyRows)
+	}
+}
+
 func mustEmbeddedMigrations(t *testing.T) []migration {
 	t.Helper()
 	migrations, err := embeddedMigrations()

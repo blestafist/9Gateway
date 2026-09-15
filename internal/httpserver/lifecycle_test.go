@@ -95,4 +95,7 @@ func TestRequestLifecycleStopsWithoutAdmittedHandlers(t *testing.T) {
 	if err := lifecycle.Wait(context.Background()); err != nil {
 		t.Fatal("empty lifecycle did not stop: ", err)
 	}
+	if err := lifecycle.Wait(nil); err != nil {
+		t.Fatal("nil context did not use background wait: ", err)
+	}
 }

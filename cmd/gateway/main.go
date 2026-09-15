@@ -55,12 +55,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var historyWorker *httpserver.HistoryPersistenceWorker
 	shutdownStarted := false
 	defer func() {
 		// shutdownGateway owns the final close once the listener has started. If
 		// shutdown is forced while a handler survives, deliberately leave the
 		// database open: a deferred close here would race that handler.
-		if !shutdownStarted {
+		if !shutdownStarted && (historyWorker == nil || historyWorkerReadyToClose(historyWorker)) {
 			if err := database.Close(); err != nil {
 				slog.Default().Error("SQLite shutdown failed", "error", err)
 			}
@@ -208,13 +209,16 @@ func run() error {
 	upstreamClient := transport.NewClient()
 	completionLogger := httpserver.NewCompletionLogger(slog.Default(), cfg.Observability.TelemetryQueueCapacity)
 	usageObservationWorker := httpserver.NewUsageObservationWorker(httpserver.UsageObservationWorkerOptions{Capacity: cfg.Observability.TelemetryQueueCapacity})
-	historyWorker := httpserver.NewHistoryPersistenceWorker(httpserver.HistoryPersistenceWorkerOptions{
+	historyWorker = httpserver.NewHistoryPersistenceWorker(httpserver.HistoryPersistenceWorkerOptions{
 		Repository:       historyRepository,
 		Capacity:         cfg.Observability.TelemetryQueueCapacity,
 		RequestRetention: time.Duration(cfg.Observability.RequestRetentionSeconds) * time.Second,
 		BodyRetention:    time.Duration(cfg.Observability.BodyRetentionSeconds) * time.Second,
 	})
-	if err := historyWorker.WaitReady(context.Background()); err != nil {
+	startupContext, startupCancel := context.WithTimeout(context.Background(), historyStartupTimeout(cfg))
+	err = historyWorker.WaitReady(startupContext)
+	startupCancel()
+	if err != nil {
 		cleanupStartup(database, usageObservationWorker, aggregateAccumulator, budgetAccumulator, completionLogger, historyWorker)
 		return err
 	}
@@ -282,6 +286,7 @@ var errShutdownDeadline = errors.New("gateway shutdown deadline exceeded; depend
 const (
 	defaultHealthcheckAddress = "http://127.0.0.1:8080/ready"
 	healthcheckTimeout        = 2 * time.Second
+	maxHistoryStartupTimeout  = 30 * time.Second
 )
 
 // runHealthcheck is intentionally a small, dependency-free probe for the
@@ -347,12 +352,35 @@ func readinessURL(address string) (string, error) {
 }
 
 func cleanupStartup(_ *storage.DB, usage *httpserver.UsageObservationWorker, token *storage.UsageAggregateAccumulator, budget *storage.BudgetAccumulator, completion *httpserver.CompletionLogger, history *httpserver.HistoryPersistenceWorker) {
-	ctx := context.Background()
+	cleanupTimeout := time.Duration(config.DefaultShutdownTimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
 	_ = usage.Shutdown(ctx)
 	_ = token.Shutdown(ctx)
 	_ = budget.Shutdown(ctx)
 	_ = completion.Shutdown(ctx)
 	_ = history.Shutdown(ctx)
+}
+
+func historyStartupTimeout(cfg config.Config) time.Duration {
+	seconds := cfg.ShutdownTimeoutSeconds
+	if seconds <= 0 {
+		seconds = config.DefaultShutdownTimeoutSeconds
+	}
+	timeout := time.Duration(seconds) * time.Second
+	if timeout > maxHistoryStartupTimeout {
+		return maxHistoryStartupTimeout
+	}
+	return timeout
+}
+
+func historyWorkerReadyToClose(worker *httpserver.HistoryPersistenceWorker) bool {
+	select {
+	case <-worker.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 // shutdownGateway coordinates the process-owned dependencies under one

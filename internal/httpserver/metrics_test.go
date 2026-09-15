@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -122,6 +123,37 @@ func TestMetricsIngressRejectionsIncrementPrimaryCounterOnce(t *testing.T) {
 				t.Fatalf("series missing: %s", text)
 			}
 		})
+	}
+}
+
+func TestMetricsIngressRejectsOversizedHostFromHTTP11Wire(t *testing.T) {
+	metrics := newGatewayMetrics()
+	handler := httptest.NewServer(withIngressLimitsAndMetrics(metrics, withMetrics(metrics, http.NotFoundHandler())))
+	t.Cleanup(handler.Close)
+
+	connection, err := net.Dial("tcp", handler.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	before := primaryMetricTotal(t, metrics)
+	host := strings.Repeat("h", maxIngressHeaderBytes)
+	if _, err := io.WriteString(connection, "GET /v1/models HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := io.ReadAll(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(wire, []byte("HTTP/1.1 431 ")) {
+		t.Fatalf("raw oversized Host response = %q, want canonical 431", wire)
+	}
+	if got := primaryMetricTotal(t, metrics) - before; got != 1 {
+		t.Fatalf("primary metric delta = %d, want exactly one", got)
+	}
+	text := metricsText(t, metrics)
+	if !strings.Contains(text, `gateway_requests_total{route="models",method="GET",status="431",outcome="pre_upstream"} 1`) {
+		t.Fatalf("oversized Host primary outcome missing: %s", text)
 	}
 }
 
