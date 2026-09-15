@@ -6,6 +6,7 @@ import (
 	"io"
 	"runtime"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -38,6 +39,52 @@ func Current() Metadata {
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
 	}
+}
+
+// MetricLabels returns bounded, exposition-safe build metadata. Build fields
+// are supplied by release ldflags, so do not place their raw values in a
+// Prometheus label: malformed values cannot break a scrape, create unbounded
+// label values, or carry control characters into the exposition.
+func MetricLabels() Metadata {
+	metadata := Current()
+	return Metadata{
+		Version:   metricValue(metadata.Version),
+		Commit:    metricValue(metadata.Commit),
+		BuildDate: metricValue(metadata.BuildDate),
+		GoVersion: metricValue(metadata.GoVersion),
+		OS:        metricValue(metadata.OS),
+		Arch:      metricValue(metadata.Arch),
+	}
+}
+
+const metricValueLimit = 64
+
+func metricValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	lower := strings.ToLower(value)
+	for _, sensitive := range []string{"secret", "password", "token", "bearer", "authorization", "api_key", "apikey", "credential"} {
+		if strings.Contains(lower, sensitive) {
+			return "unknown"
+		}
+	}
+	var builder strings.Builder
+	for _, character := range value {
+		if builder.Len() >= metricValueLimit {
+			break
+		}
+		if character < unicode.MaxASCII && (character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("._+-", character)) {
+			builder.WriteRune(character)
+		} else {
+			builder.WriteByte('_')
+		}
+	}
+	if builder.Len() == 0 {
+		return "unknown"
+	}
+	return builder.String()
 }
 
 // ShortCommit returns a conventional seven-character commit identifier.

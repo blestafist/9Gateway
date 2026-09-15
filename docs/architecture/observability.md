@@ -48,5 +48,17 @@ telemetry admission and drain both detailed sinks before SQLite closes.
 
 Core metrics cover request counts and activity, duration, TTFT, stream-close
 delay, token/cost totals, rejections, upstream errors, cancellations, and dropped
-telemetry. Never use request ID as a label; avoid unbounded key/model label
-cardinality.
+telemetry. `gateway_requests_total{route,method,status,outcome}` is the primary
+count: every request handled by the gateway, including URI/query and declared
+body-size ingress rejections, contributes exactly once. Ingress rejections may
+also appear in `gateway_rejected_requests_total`; that auxiliary counter must
+not be added to the primary count. `route`, `method`, `status`, and `outcome`
+come from bounded canonical vocabularies and never contain request paths,
+queries, credentials, model names, or error text.
+
+`gateway_build_info{version,commit,build_date,go_version,os,arch}` is a gauge
+with value `1`. Its values are normalized and length-bounded before exposition;
+arbitrary release `-ldflags -X` contents cannot create invalid or unbounded
+label values. The exposition also retains the human-readable
+`# gateway version ...` comment for compatibility. Never use request ID as a
+label; avoid unbounded key/model label cardinality.

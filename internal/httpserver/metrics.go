@@ -137,6 +137,25 @@ func (metrics *gatewayMetrics) observe(record CompletionRecord) {
 	}
 }
 
+// observeIngressRejection accounts for a request which was rejected before the
+// request-ID/trace middleware could construct a completion record. Keeping
+// this at the same canonical index as normal observations makes the primary
+// counter one request counter rather than a best-effort proxy lifecycle count.
+func (metrics *gatewayMetrics) observeIngressRejection(request *http.Request, status int) {
+	if metrics == nil {
+		return
+	}
+	method := 0
+	route := RouteClassUnknown
+	if request != nil {
+		method = metricMethodIndex(request.Method)
+		if request.URL != nil {
+			route = ClassifyRoute(request.Method, request.URL.Path)
+		}
+	}
+	metrics.requests.values[metricRouteIndex(route)][method][metricStatusIndexValue(status)][metricOutcomeIndex(TerminalOutcomePreUpstream)].Add(1)
+}
+
 func (metrics *gatewayMetrics) telemetryResult(result string) {
 	if metrics != nil {
 		if index, ok := telemetryIndex(result); ok {
@@ -244,7 +263,11 @@ func serveMetrics(response http.ResponseWriter, metrics *gatewayMetrics) {
 	response.Header().Set("Content-Type", metricsContentType)
 	response.WriteHeader(http.StatusOK)
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "# gateway version %s\n", version.Current().Version)
+	// Keep the historical human-readable comment; queryable build metadata is
+	// emitted separately below with stricter label normalization. Use the same
+	// safe version value so an ldflag cannot inject exposition lines.
+	fmt.Fprintf(&builder, "# gateway version %s\n", version.MetricLabels().Version)
+	writeBuildInfo(&builder)
 	if metrics == nil {
 		_, _ = response.Write([]byte(builder.String()))
 		return
@@ -265,6 +288,15 @@ func serveMetrics(response http.ResponseWriter, metrics *gatewayMetrics) {
 	writeSimpleHistogram(&builder, "gateway_upstream_duration_seconds", "Upstream response-header duration in seconds.", &metrics.upstreamDur.values[0], "")
 	writeSimpleHistogram(&builder, "gateway_ttfb_seconds", "Time to first downstream response byte in seconds.", &metrics.ttfb.values[0], "")
 	_, _ = response.Write([]byte(builder.String()))
+}
+
+func writeBuildInfo(builder *strings.Builder) {
+	metadata := version.MetricLabels()
+	fmt.Fprintf(builder, "# HELP gateway_build_info Build information for this gateway process.\n# TYPE gateway_build_info gauge\ngateway_build_info")
+	writeMetricLabels(builder,
+		[]string{"version", "commit", "build_date", "go_version", "os", "arch"},
+		[]string{metadata.Version, metadata.Commit, metadata.BuildDate, metadata.GoVersion, metadata.OS, metadata.Arch})
+	builder.WriteString(" 1\n")
 }
 
 func escapeMetricLabel(value string) string {
@@ -394,6 +426,13 @@ func routeMetricName(index int) string { return RouteClass(index).String() }
 func metricStatusIndex(status OptionalStatus) int {
 	if value, known := status.Value(); known && value >= 100 && value <= 599 {
 		return value
+	}
+	return 0
+}
+
+func metricStatusIndexValue(status int) int {
+	if status >= 100 && status <= 599 {
+		return status
 	}
 	return 0
 }

@@ -24,6 +24,9 @@ retention passes are capped at 1000 rows while T140 verifies log/persistence
 scalars, policy bodies, and restart retention. Storage review fixes for T136-T139:
 lifecycle timestamp ordering constraints, indexed retention by completion time,
 and an enforced schema/config body-size compatibility constant (schema version 9).
+Metrics review fix: early URI/query and declared body-size ingress rejections
+now increment the primary request counter exactly once, and bounded
+`gateway_build_info` exposes safe build metadata labels.
 Transport review fix: non-SSE responses now stream through a bounded reader
 without pre-EOF spooling, and SSE event-limit coverage includes CR-only and
 mixed CR/LF delimiters split across reads. Remaining review items stay open.

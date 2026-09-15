@@ -6,12 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pestit/9gateway/internal/version"
 	"github.com/prometheus/common/expfmt"
 )
 
@@ -47,10 +49,14 @@ func TestMetricsExposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, family := range []string{"gateway_requests_total", "gateway_request_errors_total", "gateway_upstream_requests_total", "gateway_telemetry_jobs_total", "gateway_active_requests", "gateway_telemetry_queue_depth", "gateway_request_duration_seconds", "gateway_upstream_duration_seconds", "gateway_ttfb_seconds"} {
+	for _, family := range []string{"gateway_requests_total", "gateway_request_errors_total", "gateway_upstream_requests_total", "gateway_telemetry_jobs_total", "gateway_active_requests", "gateway_telemetry_queue_depth", "gateway_request_duration_seconds", "gateway_upstream_duration_seconds", "gateway_ttfb_seconds", "gateway_build_info"} {
 		if !strings.Contains(text, "# TYPE "+family) {
 			t.Errorf("missing family %s", family)
 		}
+	}
+	metadata := version.MetricLabels()
+	if !strings.Contains(text, `gateway_build_info{version="`+metadata.Version+`",commit="`+metadata.Commit+`",build_date="`+metadata.BuildDate+`",go_version="`+metadata.GoVersion+`",os="`+runtime.GOOS+`",arch="`+runtime.GOARCH+`"} 1`) {
+		t.Errorf("build info missing or malformed: %s", text)
 	}
 	if !strings.Contains(text, `gateway_requests_total{route="chat_completions",method="POST",status="200",outcome="complete"} 1`) {
 		t.Errorf("request series missing: %s", text)
@@ -64,6 +70,75 @@ func TestMetricsExposition(t *testing.T) {
 	if strings.Contains(text, "0123456789abcdef") {
 		t.Error("request id leaked")
 	}
+}
+
+func TestMetricsIngressRejectionsIncrementPrimaryCounterOnce(t *testing.T) {
+	metrics := newGatewayMetrics()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withIngressLimitsAndMetrics(metrics, withMetrics(metrics, next))
+
+	requests := []struct {
+		name string
+		make func() *http.Request
+		want string
+	}{
+		{name: "URI", make: func() *http.Request {
+			request := httptest.NewRequest(http.MethodGet, "/v1/"+strings.Repeat("p", maxRequestURIBytes), nil)
+			return request
+		}, want: `route="generic",method="GET",status="431",outcome="pre_upstream"`},
+		{name: "query", make: func() *http.Request {
+			request := httptest.NewRequest(http.MethodGet, "/v1/models?"+strings.Repeat("q", maxQueryBytes+1), nil)
+			return request
+		}, want: `route="models",method="GET",status="431",outcome="pre_upstream"`},
+		{name: "declared body", make: func() *http.Request {
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			request.ContentLength = maxInboundRequestBodyBytes + 1
+			return request
+		}, want: `route="chat_completions",method="POST",status="413",outcome="pre_upstream"`},
+		{name: "header", make: func() *http.Request {
+			request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			request.Header.Set("X-Oversized", strings.Repeat("h", maxIngressHeaderBytes))
+			return request
+		}, want: `route="models",method="GET",status="431",outcome="pre_upstream"`},
+	}
+	for _, test := range requests {
+		t.Run(test.name, func(t *testing.T) {
+			before := primaryMetricTotal(t, metrics)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, test.make())
+			wantStatus := http.StatusRequestHeaderFieldsTooLarge
+			if test.name == "declared body" {
+				wantStatus = http.StatusRequestEntityTooLarge
+			}
+			if response.Code != wantStatus {
+				t.Fatalf("status = %d", response.Code)
+			}
+			after := primaryMetricTotal(t, metrics)
+			if got := after - before; got != 1 {
+				t.Fatalf("primary counter delta = %d, want 1", got)
+			}
+			text := metricsText(t, metrics)
+			if !strings.Contains(text, "gateway_requests_total{"+test.want+"}") {
+				t.Fatalf("series missing: %s", text)
+			}
+		})
+	}
+}
+
+func primaryMetricTotal(t *testing.T, metrics *gatewayMetrics) uint64 {
+	t.Helper()
+	families, err := (&expfmt.TextParser{}).TextToMetricFamilies(bytes.NewReader([]byte(metricsText(t, metrics))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	family := families["gateway_requests_total"]
+	var total uint64
+	if family != nil {
+		for _, metric := range family.Metric {
+			total += uint64(metric.GetCounter().GetValue())
+		}
+	}
+	return total
 }
 
 func TestMetricsActiveGaugeCountsBlockedRequestOnce(t *testing.T) {

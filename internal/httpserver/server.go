@@ -1944,6 +1944,11 @@ func newHandlerWithCompletionLoggerAndHistory(completionLogger *CompletionLogger
 const (
 	maxRequestURIBytes = 8 * 1024
 	maxQueryBytes      = 4 * 1024
+	// Keep the application-visible bound aligned with the production server's
+	// MaxHeaderBytes. The net/http parser may reject a connection before a
+	// handler exists; requests that reach this boundary are still accounted for
+	// with the same canonical 431 ingress rejection as URI/query overflow.
+	maxIngressHeaderBytes = 16 * 1024
 )
 
 // withIngressLimits runs before routing, authentication, and any request-body
@@ -1962,13 +1967,19 @@ func withIngressLimitsAndMetrics(metrics *gatewayMetrics, next http.Handler) htt
 				requestURI += "?" + request.URL.RawQuery
 			}
 		}
-		if len(requestURI) > maxRequestURIBytes || request.URL == nil || len(request.URL.RawQuery) > maxQueryBytes {
+		if len(requestURI) > maxRequestURIBytes || request.URL == nil || len(request.URL.RawQuery) > maxQueryBytes || requestHeaderBytes(request) > maxIngressHeaderBytes {
+			if metrics != nil {
+				metrics.observeIngressRejection(request, http.StatusRequestHeaderFieldsTooLarge)
+			}
 			writeGatewayErrorStatus(response, http.StatusRequestHeaderFieldsTooLarge, gatewayErrorInvalidRequest, gatewayErrorDefinitions[gatewayErrorInvalidRequest], "")
 			return
 		}
 		bodyRoute := strings.HasPrefix(request.URL.Path, "/v1/") || strings.HasPrefix(request.URL.Path, "/admin/")
 		if bodyRoute {
 			if request.ContentLength > maxInboundRequestBodyBytes {
+				if metrics != nil {
+					metrics.observeIngressRejection(request, http.StatusRequestEntityTooLarge)
+				}
 				recordBodyTooLargeMetric(metrics)
 				writeGatewayError(response, gatewayErrorBodyTooLarge, "")
 				return
@@ -1981,6 +1992,26 @@ func withIngressLimitsAndMetrics(metrics *gatewayMetrics, next http.Handler) htt
 		}
 		next.ServeHTTP(response, request)
 	})
+}
+
+func requestHeaderBytes(request *http.Request) int {
+	if request == nil {
+		return 0
+	}
+	total := 0
+	for name, values := range request.Header {
+		total += len(name) + 2
+		for _, value := range values {
+			total += len(value) + 2
+			if total > maxIngressHeaderBytes {
+				return total
+			}
+		}
+		if total > maxIngressHeaderBytes {
+			return total
+		}
+	}
+	return total
 }
 
 func isRequestBodyTooLarge(err error) bool {
