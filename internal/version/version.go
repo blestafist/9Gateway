@@ -53,9 +53,9 @@ func MetricLabels() Metadata {
 const metricValueLimit = 64
 
 var (
-	versionPattern   = regexp.MustCompile(`^(?:dev|devel|v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$`)
+	versionPattern   = regexp.MustCompile(`^(?:dev|v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.?(?:0|[1-9][0-9]*))?)$`)
 	commitPattern    = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
-	goVersionPattern = regexp.MustCompile(`^go[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:(?:beta|rc)[0-9]+)?(?:-[0-9A-Za-z][0-9A-Za-z.+:]*)?$`)
+	goVersionPattern = regexp.MustCompile(`^go[1-9][0-9]*\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)|(?:beta|rc)(?:0|[1-9][0-9]*))$`)
 )
 
 func publicVersion(value string) string {

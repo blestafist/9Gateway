@@ -96,22 +96,42 @@ go test -coverpkg=./internal/... ./internal/...
 ```
 
 It reports package-level coverage for every internal package and is useful for
-spotting unexercised subsystems, but it includes CLI and provider-side support
-packages that are not part of the T159 HTTP happy path. The acceptance contract
-for this task uses the scoped aggregate command below and requires at least
-80.0% total statement coverage.
+spotting unexercised subsystems. It is not an acceptance percentage: it
+includes CLI, provider-side support, and other packages outside the T159 HTTP
+happy path.
 
-The meaningful integration coverage command is:
+The live integration coverage metric is measured only by the eight real
+cross-subsystem tests:
 
 ```text
-go test ./internal/... -coverpkg=./internal/accounting,./internal/auth,./internal/httpserver,./internal/limiter,./internal/observability,./internal/storage -coverprofile=/tmp/9gateway-integration.cover
-go tool cover -func=/tmp/9gateway-integration.cover
+go test ./internal/integration -coverpkg=./internal/accounting,./internal/auth,./internal/httpserver,./internal/limiter,./internal/observability,./internal/storage -coverprofile=/tmp/9gateway-live.cover
+go tool cover -func=/tmp/9gateway-live.cover
 ```
 
-The package set contains the accounting, authentication, gateway HTTP,
-limiter, body observability, and SQLite implementations exercised by the live
-happy path; CLI and provider test doubles are excluded. The acceptance gate is
-an aggregate total of at least 80.0%; the reported percentage is expected to
-vary with the checked-out source and test selection. Integration `TestMain`
+This is a diagnostic metric for code reached by live HTTP, SQLite, and worker
+wiring. It is intentionally not the T159 80% gate: transport integration does
+not exercise every branch of the storage compatibility and limiter APIs. The
+aggregate T159 happy-path verification runs all internal behavior tests while
+instrumenting the same explicit, meaningful package set:
+
+```text
+go test ./internal/... -coverpkg=./internal/accounting,./internal/auth,./internal/httpserver,./internal/limiter,./internal/observability,./internal/storage -coverprofile=/tmp/9gateway-aggregate.cover && go run ./CI/scripts/coveragecheck -profile=/tmp/9gateway-aggregate.cover -min=80.0
+go tool cover -func=/tmp/9gateway-aggregate.cover
+```
+
+The checker reports the same one-decimal rounding as `go tool cover`; the
+unrounded profile is retained in the count shown beside the percentage. The
+package set contains the accounting, authentication, gateway HTTP,
+limiter, body observability, and SQLite implementations; CLI and provider test
+doubles are excluded. The checker sums covered statements from the profile and
+fails below 80.0%, so a lower result cannot be relabeled as the live metric or
+hidden by changing the package set. Keep the profile paths distinct: using
+`./internal/integration` for the live command measured 47.2% before the
+additional admin-read scenario and now measures 48.9% (the exact result can
+vary slightly with source changes), while `./internal/...` includes the
+existing unit and behavior tests and is the aggregate milestone metric.
+The `CI/scripts/coveragecheck` command itself is not in `-coverpkg`; adding the
+checker cannot inflate the aggregate core-package result.
+Integration `TestMain`
 runs goleak with no broad ignores; every test closes its listeners, transports,
 workers, and SQLite handle before leak verification.

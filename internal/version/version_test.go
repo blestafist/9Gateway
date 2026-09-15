@@ -54,3 +54,63 @@ func TestMetricLabelsUseStrictAllowLists(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicVersionFormats(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "dev", value: "dev", want: "dev"},
+		{name: "semver", value: "v1.2.3", want: "v1.2.3"},
+		{name: "semver without v", value: "1.2.3", want: "1.2.3"},
+		{name: "alpha", value: "v1.2.3-alpha1", want: "v1.2.3-alpha1"},
+		{name: "alpha dotted", value: "v1.2.3-alpha.1", want: "v1.2.3-alpha.1"},
+		{name: "beta", value: "v1.2.3-beta2", want: "v1.2.3-beta2"},
+		{name: "rc", value: "v1.2.3-rc.3", want: "v1.2.3-rc.3"},
+		{name: "trimmed", value: " v1.2.3 ", want: "v1.2.3"},
+		{name: "access key canary", value: "v1.2.3-AKIA1234567890", want: defaultVersion},
+		{name: "arbitrary prerelease", value: "v1.2.3-password-abc", want: defaultVersion},
+		{name: "build metadata", value: "v1.2.3+build.1", want: defaultVersion},
+		{name: "bare prerelease", value: "v1.2.3-alpha", want: defaultVersion},
+		{name: "leading zero prerelease", value: "v1.2.3-rc.01", want: defaultVersion},
+		{name: "devel", value: "devel", want: defaultVersion},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := publicVersion(test.value); got != test.want {
+				t.Fatalf("publicVersion(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPublicGoVersionFormats(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "release", value: "go1.25.1", want: "go1.25.1"},
+		{name: "beta", value: "go1.25beta1", want: "go1.25beta1"},
+		{name: "rc", value: "go1.25rc1", want: "go1.25rc1"},
+		{name: "beta zero", value: "go1.25beta0", want: "go1.25beta0"},
+		{name: "minor only", value: "go1.25", want: "unknown"},
+		{name: "password suffix canary", value: "go1.25.1-password-abc", want: "unknown"},
+		{name: "custom toolchain suffix canary", value: "go1.25.1-X:nodwarf5", want: "unknown"},
+		{name: "build metadata", value: "go1.25.1+build.1", want: "unknown"},
+		{name: "patch beta is not runtime form", value: "go1.25.1beta1", want: "unknown"},
+		{name: "dotted beta is not runtime form", value: "go1.25beta.1", want: "unknown"},
+		{name: "leading zero beta", value: "go1.25beta01", want: "unknown"},
+		{name: "devel suffix", value: "devel go1.25-abcdef", want: "unknown"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := publicGoVersion(test.value); got != test.want {
+				t.Fatalf("publicGoVersion(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+}

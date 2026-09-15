@@ -295,6 +295,10 @@ func (script *upstreamScript) ServeHTTP(response http.ResponseWriter, request *h
 }
 
 func adminRequest(t *testing.T, gateway *gatewayHarness, method, path string, body any) (int, []byte, http.Header) {
+	return adminRequestWithSecret(t, gateway, method, path, body, adminSecret)
+}
+
+func adminRequestWithSecret(t *testing.T, gateway *gatewayHarness, method, path string, body any, secret string) (int, []byte, http.Header) {
 	t.Helper()
 	var input io.Reader
 	if body != nil {
@@ -308,7 +312,7 @@ func adminRequest(t *testing.T, gateway *gatewayHarness, method, path string, bo
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+adminSecret)
+	request.Header.Set("Authorization", "Bearer "+secret)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := gateway.client.Do(request)
 	if err != nil {
@@ -569,6 +573,43 @@ func TestT159Lifecycle(t *testing.T) {
 	gateway.close()
 	if _, err := gateway.client.Get(gateway.baseURL + "/v1/models"); err == nil {
 		t.Fatal("request unexpectedly succeeded after graceful shutdown")
+	}
+}
+
+// TestT159AdminReadHappyPath exercises the live read side of the control
+// plane after key publication.  Creation and policy update alone do not cover
+// the key list/detail serializers or the normalized request-window projection
+// used by operators inspecting a running gateway.
+func TestT159AdminReadHappyPath(t *testing.T) {
+	script := newUpstreamScript()
+	gateway := newHarness(t, script, 16, 16, nil)
+	id, _ := createKey(t, gateway, "admin-read")
+	updatePolicy(t, gateway, id, `{"allowed_models":["alpha"],"request_windows":[{"amount":7,"duration":"90s"}],"token_windows":[{"amount":123,"duration":"1h"}],"log_request_body":true}`)
+
+	status, data, _ := adminRequest(t, gateway, http.MethodGet, "/admin/v1/keys?limit=100", nil)
+	if status != http.StatusOK || !bytes.Contains(data, []byte(`"id":"`+id+`"`)) {
+		t.Fatalf("admin key list = %d %s", status, data)
+	}
+	status, data, _ = adminRequest(t, gateway, http.MethodGet, "/admin/v1/keys/"+id, nil)
+	if status != http.StatusOK || !bytes.Contains(data, []byte(`"request_windows":[{"amount":7,"duration":90}]`)) || !bytes.Contains(data, []byte(`"token_windows":[{"amount":123,"duration":3600}]`)) {
+		t.Fatalf("admin key detail = %d %s", status, data)
+	}
+
+	policy, err := auth.ParsePolicyJSON([]byte(`{"request_windows":[{"amount":2,"duration":"1m"}]}`))
+	if err != nil || len(policy.RequestLimits()) != 1 || policy.RequestLimits()[0].Amount != 2 {
+		t.Fatalf("request limit compatibility projection = %+v, err=%v", policy.RequestLimits(), err)
+	}
+
+	// Read endpoints must fail closed independently of gateway-key
+	// authentication; these are operator-facing authorization and not-found
+	// paths, and should remain covered by the real listener as well.
+	status, _, _ = adminRequestWithSecret(t, gateway, http.MethodGet, "/admin/v1/keys", nil, "wrong-admin-secret")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unauthorized admin list status=%d", status)
+	}
+	status, _, _ = adminRequest(t, gateway, http.MethodGet, "/admin/v1/keys/00000000000000000000000000000000", nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("unknown admin key status=%d", status)
 	}
 }
 
