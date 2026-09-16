@@ -33,6 +33,9 @@ now increment the primary request counter exactly once, and bounded
 Transport review fix: non-SSE responses now stream through a bounded reader
 without pre-EOF spooling, and SSE event-limit coverage includes CR-only and
 mixed CR/LF delimiters split across reads.
+Upstream redirect review fix: the transport client returns upstream 3xx
+responses unchanged and never follows their `Location`; live behavior tests
+cover 301, 302, 307, and 308 redirects to same-origin and cross-origin targets.
 
 T155 added a minimal non-root Docker image with static gateway/gwctl binaries,
 readiness healthcheck, and persistent `/data` defaults. T152 hardened semantic

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -14,6 +15,9 @@ func TestNewClientUsesPooledTransportWithoutTotalTimeout(t *testing.T) {
 	}
 	if client.Timeout != 0 {
 		t.Fatalf("client timeout = %s, want no total timeout", client.Timeout)
+	}
+	if err := client.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("CheckRedirect() error = %v, want http.ErrUseLastResponse", err)
 	}
 	if !transport.DisableCompression {
 		t.Fatal("transport automatic compression must be disabled")

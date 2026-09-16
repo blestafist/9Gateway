@@ -831,6 +831,11 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		trace.SetUpstreamHeaders(upstreamResponse.StatusCode)
 	}
 	responseMode := classifyResponseHeader(upstreamResponse.Header)
+	if upstreamResponse.StatusCode >= http.StatusMultipleChoices && upstreamResponse.StatusCode < http.StatusBadRequest {
+		// A redirect is an upstream instruction for the client. It must never
+		// enter the SSE compatibility conversion path, even with an SSE MIME type.
+		responseMode = ResponseModeOpaque
+	}
 	actualResponseMode := classifyActualResponseHeader(upstreamResponse.Header)
 	if trace != nil {
 		if actualResponseMode != ResponseModeUnknown {
@@ -1321,6 +1326,9 @@ func dispatchResponseResultWithLeaseAndObservationAndPricing(response http.Respo
 		request = requests[0]
 	}
 	responseMode := classifyResponseHeader(upstreamResponse.Header)
+	if upstreamResponse.StatusCode >= http.StatusMultipleChoices && upstreamResponse.StatusCode < http.StatusBadRequest {
+		responseMode = ResponseModeOpaque
+	}
 	if shouldAggregateSSE(request, metadata, responseMode) {
 		aggregationBody, closeAggregationBody, requiresDrain, err := aggregationReaderWithDrain(upstreamResponse)
 		if err != nil {
