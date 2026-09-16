@@ -1,13 +1,14 @@
 # Current Work
 
-Current milestone: admin read API, CLI, readiness/metrics, packaging
-(`T141`-`T160`) — complete.
+Current milestone: embedded Web UI (`T161`-`T180`).
 
 Done: `T001`-`T160`.
 
-Current: none; milestone complete.
+Current: `T161` - scaffold the embedded Web UI build.
 
-Queued: `T161+` only, explicitly out of scope for this release.
+Queued: `T162`-`T180`, in dependency order from visual foundation and secure
+browser access through analytics, key/request workflows, quality gates, and
+release integration.
 
 The gateway now provides complete admin read API, CLI tool, health/metrics endpoints, graceful shutdown, security hardening, and production packaging.
 It also provides transparent policy enforcement, token and budget accounting,
@@ -18,8 +19,10 @@ transport and critical accounting remain independent of its queues and sinks.
 Independent review fixes: transport, storage, startup, metadata, performance,
 and coverage-checker findings are closed; the aggregate core-package coverage
 gate is machine-enforced.
-Provider routing/translation, tool-call execution/validation, Redis,
-PostgreSQL, Web UI, and T161+ follow-on work remain out of scope.
+Provider routing/translation, tool-call execution/validation, Redis, and
+PostgreSQL remain out of scope. The active Web UI milestone covers only
+9Gateway-owned operations: health, usage, keys, requests, captured bodies, and
+safe runtime diagnostics.
 
 Review fixes: history shutdown now forms a SQLite-close completion barrier,
 body captures transfer immutable ownership without defensive re-cloning,
@@ -60,3 +63,27 @@ there is no shorter response-header or streaming-idle timeout, and client
 cancellation still immediately cancels upstream. Docker live tests against
 9router covered GPT Luna, Claude Sonnet 5, and Antigravity Gemini 3.8 in both
 streaming modes, including long-form responses.
+
+Web UI direction: React/TypeScript/Vite in `web/`, built into and served by the
+Go binary under `/ui/`. The visual target is a dense, responsive dark-first
+operations console with a complete light theme, based on screenshots kept in
+`docs/ui/reference/`. It must not reproduce unsupported 9router provider/routing
+screens. Browser authentication uses short-lived HttpOnly server sessions; the
+admin credential must never be persisted in frontend-accessible storage.
+Resource budgets are part of acceptance: strict lazy-loaded bundle limits,
+bounded pages/charts/DOM/cache, no heavy visual effects or remote fonts, polling
+only for visible Overview/System pages at 30s/60s minimum intervals, and at most
+two concurrent bounded server aggregation queries. UI work must not regress the
+proxy transport hot path.
+Usage analytics includes `1h`, `Today`, `24h`, `7d`, `30d`, `90d`, `1y`, custom,
+and `All retained` ranges. Long ranges use automatically coarser bounded buckets;
+`All retained` explicitly reflects SQLite history still present after retention.
+Its product direction is "Bifrost-lite": KPI cards, one tabbed primary chart for
+requests/tokens/cost/latency, and one tabbed ranking card for models/keys/outcomes.
+No realtime stream, exports, provider catalog, dimension sprawl, or multiple
+heavy charts mounted at once.
+Frontend architecture is feature-first: app composition, narrowly shared UI/
+transport primitives, and isolated Overview, Usage, Keys, Requests, System, and
+Auth modules with lazy public route entries. Cross-feature internal imports and
+monolithic global API/types/component files are prohibited so each task can be
+implemented with a small local context.
