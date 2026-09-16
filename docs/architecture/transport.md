@@ -49,9 +49,11 @@ gateway does not claim arbitrary secret scanning or body redaction here.
 ## Upstream Client
 
 Use one long-lived `http.Client` and `http.Transport` with connection pooling and
-keep-alive. Do not set a small `MaxConnsPerHost` that serializes requests. Avoid
-a short total client timeout for streaming; use dial, TLS handshake, response
-header, idle connection, and request-context deadlines independently.
+keep-alive. Do not set a small `MaxConnsPerHost` that serializes requests. Each
+upstream request has one one-hour request-context safety ceiling. There is no
+short response-header or streaming idle timeout: before that ceiling, upstream
+EOF/error or downstream client cancellation controls the active connection.
+The idle-connection timeout applies only to unused pooled connections.
 
 Disable Go's automatic compression negotiation and decompression on the upstream
 transport. Forward a client's `Accept-Encoding` normally and preserve the exact

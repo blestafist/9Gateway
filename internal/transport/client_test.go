@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestNewClientUsesPooledTransportWithoutTotalTimeout(t *testing.T) {
+func TestNewClientUsesPooledTransportWithRequestContextTimeout(t *testing.T) {
 	client := NewClient()
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -25,8 +25,11 @@ func TestNewClientUsesPooledTransportWithoutTotalTimeout(t *testing.T) {
 	if transport.MaxIdleConnsPerHost < 2 {
 		t.Fatalf("max idle connections per host = %d, want concurrent reuse", transport.MaxIdleConnsPerHost)
 	}
-	if transport.IdleConnTimeout <= 0 || transport.TLSHandshakeTimeout <= 0 || transport.ResponseHeaderTimeout <= 0 {
-		t.Fatal("transport phase timeouts must be configured")
+	if transport.DialContext == nil || transport.TLSHandshakeTimeout != UpstreamRequestTimeout {
+		t.Fatal("connection setup must use the one-hour safety ceiling")
+	}
+	if transport.ResponseHeaderTimeout != 0 {
+		t.Fatalf("response header timeout = %s, want request-context timeout only", transport.ResponseHeaderTimeout)
 	}
 	if transport.IdleConnTimeout == time.Duration(0) {
 		t.Fatal("idle connection timeout is not configured")

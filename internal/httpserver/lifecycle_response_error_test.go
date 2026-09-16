@@ -2,12 +2,14 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTransparentDispatchFailuresSetResponseErrorTerminal(t *testing.T) {
@@ -109,6 +111,42 @@ func TestSSEConversionFailureKeepsConversionCodeAndResponseErrorTerminal(t *test
 		t.Fatal("conversion response leaked upstream body")
 	}
 }
+
+func TestActiveSSEGatewayDeadlineIsUpstreamTimeout(t *testing.T) {
+	proxy := newProxyHandler(&http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       &deadlineResponseBody{ctx: request.Context()},
+		}, nil
+	})}, "http://router.example.test", "upstream-secret")
+	proxy.upstreamRequestTimeout = 20 * time.Millisecond
+	var trace *RequestTraceState
+	handler := withRequestID(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		trace = TraceFromContext(request.Context())
+		route(proxy).ServeHTTP(response, request)
+	}))
+	handler.ServeHTTP(&lifecycleFailureResponseWriter{}, httptest.NewRequest(http.MethodGet, "http://gateway.example.test/v1/stream", nil))
+
+	record, err := trace.FreezeBase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Terminal.Outcome != TerminalOutcomeUpstreamError || record.ErrorCode != ErrorCodeUpstreamTimeout {
+		t.Fatalf("terminal/code = %q/%q, want %q/%q", record.Terminal.Outcome, record.ErrorCode, TerminalOutcomeUpstreamError, ErrorCodeUpstreamTimeout)
+	}
+}
+
+type deadlineResponseBody struct {
+	ctx context.Context
+}
+
+func (body *deadlineResponseBody) Read([]byte) (int, error) {
+	<-body.ctx.Done()
+	return 0, body.ctx.Err()
+}
+
+func (*deadlineResponseBody) Close() error { return nil }
 
 func lifecycleResponse(t *testing.T, contentType, body string) *http.Response {
 	t.Helper()

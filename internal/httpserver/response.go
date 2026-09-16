@@ -62,7 +62,7 @@ func classifyActualResponseHeader(header http.Header) ResponseMode {
 // shouldAggregateSSE reports whether a known generation request asked for a
 // non-streaming response while upstream actually returned SSE.
 func shouldAggregateSSE(request *http.Request, metadata *openai.RequestMetadata, responseMode ResponseMode) bool {
-	if request == nil || request.URL == nil || request.Method != http.MethodPost || (request.URL.Path != "/v1/chat/completions" && request.URL.Path != "/v1/responses") {
+	if request == nil || request.URL == nil || request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" {
 		return false
 	}
 	return metadata != nil && metadata.Stream != nil && !*metadata.Stream && responseMode == ResponseModeSSE

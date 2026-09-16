@@ -27,6 +27,7 @@ import (
 	"github.com/pestit/9gateway/internal/protocol/openai"
 	"github.com/pestit/9gateway/internal/security"
 	"github.com/pestit/9gateway/internal/storage"
+	"github.com/pestit/9gateway/internal/transport"
 )
 
 const requestIDHeader = "X-Gateway-Request-ID"
@@ -373,6 +374,7 @@ type proxyHandler struct {
 	leaseCoordinator       *limiter.ResourceLeaseCoordinator
 	usageObservationWorker *UsageObservationWorker
 	responseDispatch       responseDispatchFunc
+	upstreamRequestTimeout time.Duration
 }
 
 type responseDispatchFunc func(http.ResponseWriter, *http.Response, *openai.RequestMetadata)
@@ -429,7 +431,7 @@ func newProxyHandlerWithLimitersAndTokenLimiter(client *http.Client, baseURL, ap
 	if tokenLimiter == nil {
 		tokenLimiter = limiter.NewTokenLimiter(nil)
 	}
-	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, tokenLimiter: tokenLimiter, tokenConfig: tokenConfig, leaseCoordinator: limiter.NewResourceLeaseCoordinator(concurrencyLimiter, tokenLimiter, tokenConfig.BudgetLimiter), pricingResolver: tokenConfig.PricingResolver}
+	return &proxyHandler{client: client, baseURL: parsedURL, apiKey: apiKey, requestLimiter: requestLimiter, concurrencyLimiter: concurrencyLimiter, tokenLimiter: tokenLimiter, tokenConfig: tokenConfig, leaseCoordinator: limiter.NewResourceLeaseCoordinator(concurrencyLimiter, tokenLimiter, tokenConfig.BudgetLimiter), pricingResolver: tokenConfig.PricingResolver, upstreamRequestTimeout: transport.UpstreamRequestTimeout}
 }
 
 func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -500,7 +502,12 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			request.Body = clientBodyCapture.wrap(request.Body)
 		}
 	}
-	proxyContext, cancelUpstream := context.WithCancel(request.Context())
+	upstreamTimeout := handler.upstreamRequestTimeout
+	if upstreamTimeout <= 0 {
+		upstreamTimeout = transport.UpstreamRequestTimeout
+	}
+	proxyContext := request.Context()
+	cancelUpstream := func() {}
 	// Restricted inspection may block while reading a client body. Reserve a
 	// provisional slot for that phase and promote it into the full lifecycle
 	// lease only after model/request/token admission. A rejected request never
@@ -743,6 +750,9 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		writeGatewayError(response, gatewayErrorInvalidAPIKey, "")
 		return
 	}
+	// Start the safety ceiling only when upstream work is about to begin. Time
+	// spent receiving or inspecting the client upload does not shorten it.
+	proxyContext, cancelUpstream = context.WithTimeout(request.Context(), upstreamTimeout)
 	upstreamRequest, err := http.NewRequestWithContext(proxyContext, request.Method, targetURL.String(), requestBody)
 	if err != nil {
 		setTerminal(TerminalOutcomePreUpstream)
@@ -799,10 +809,10 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			writeGatewayError(response, gatewayErrorBodyTooLarge, "")
 			return
 		}
-		if proxyContext.Err() != nil {
+		if request.Context().Err() != nil {
 			setTerminal(TerminalOutcomeCancelled)
 			writeGatewayError(response, gatewayErrorCancellation, "")
-		} else if timeoutError(err) {
+		} else if errors.Is(proxyContext.Err(), context.DeadlineExceeded) || timeoutError(err) {
 			setTerminal(TerminalOutcomeUpstreamError)
 			writeGatewayError(response, gatewayErrorUpstreamTimeout, "")
 		} else {
@@ -898,7 +908,14 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		responseObservation.finish(dispatchErr)
 	}
 	if dispatchErr != nil {
-		if proxyContext.Err() != nil || errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
+		if request.Context().Err() != nil {
+			setTerminal(TerminalOutcomeCancelled)
+		} else if errors.Is(proxyContext.Err(), context.DeadlineExceeded) {
+			if trace != nil {
+				trace.SetErrorCode(ErrorCodeUpstreamTimeout)
+			}
+			setTerminal(TerminalOutcomeUpstreamError)
+		} else if errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
 			setTerminal(TerminalOutcomeCancelled)
 		} else {
 			// A dispatch failure is terminal independently of whether writing the
@@ -915,8 +932,15 @@ func (handler *proxyHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			setTerminal(TerminalOutcomeResponseError)
 		}
 	} else {
-		if proxyContext.Err() != nil {
+		if request.Context().Err() != nil {
 			setTerminal(TerminalOutcomeCancelled)
+			return
+		}
+		if errors.Is(proxyContext.Err(), context.DeadlineExceeded) {
+			if trace != nil {
+				trace.SetErrorCode(ErrorCodeUpstreamTimeout)
+			}
+			setTerminal(TerminalOutcomeUpstreamError)
 			return
 		}
 		if upstreamResponse.StatusCode >= http.StatusBadRequest {
@@ -1038,11 +1062,10 @@ func shouldInspectRequestMetadata(request *http.Request) bool {
 	if !authenticated {
 		return true
 	}
-	// An unrestricted policy has no model decision to make. The two known
-	// generation endpoints with a declared body length still need bounded
-	// metadata inspection to honor the explicit stream:false SSE compatibility
-	// contract. Chunked uploads and all generic /v1 routes remain byte-streaming
-	// and are not read ahead solely to discover their size.
+	// An unrestricted policy has no model decision to make. Known generation
+	// endpoints with a declared body length still need bounded metadata inspection
+	// to honor the explicit stream:false SSE compatibility contract. Chunked
+	// uploads and generic /v1 routes remain streaming and are not read ahead.
 	_, budgetLimited := principal.Policy.TotalBudget()
 	_, dayLimited := principal.Policy.DailyBudget()
 	_, monthLimited := principal.Policy.MonthlyBudget()

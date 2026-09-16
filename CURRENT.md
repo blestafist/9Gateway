@@ -52,3 +52,11 @@ stale T157 config assertions are fixed; the T143 request-pagination review fix
 binds cursors to normalized filters and reports retained bookmark deletion as
 `cursor_expired` with restart guidance. No Web UI, provider routing, retries,
 Redis, or PostgreSQL.
+
+Post-release transport validation: explicit `stream:false` chat requests now
+buffer bounded upstream SSE into one JSON response, while `stream:true` remains
+transparent. Active upstream requests use a single one-hour safety deadline;
+there is no shorter response-header or streaming-idle timeout, and client
+cancellation still immediately cancels upstream. Docker live tests against
+9router covered GPT Luna, Claude Sonnet 5, and Antigravity Gemini 3.8 in both
+streaming modes, including long-form responses.

@@ -132,7 +132,7 @@ func TestShouldAggregateSSE(t *testing.T) {
 		want bool
 	}{
 		{name: "eligible chat completions", path: "/v1/chat/completions", want: true},
-		{name: "eligible responses", path: "/v1/responses", want: true},
+		{name: "responses require their own decoder", path: "/v1/responses", want: false},
 		{name: "unknown endpoint", path: "/v1/unknown", want: false},
 	} {
 		for _, stream := range []struct {
