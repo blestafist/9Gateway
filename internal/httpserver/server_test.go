@@ -674,6 +674,59 @@ data: [DONE]
 	}
 }
 
+func TestProxyConvertsAuthenticatedNonStreamChatSSEWithCompleteMessage(t *testing.T) {
+	clock := &requestLimitTestClock{now: time.Unix(0, 0).UTC()}
+	key, authenticator := requestLimitTestAuthenticator(t, []byte("complete-message"), "complete-message", `{}`, clock)
+	const stream = `data: {"id":"chat-complete","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, stream)
+	}))
+	t.Cleanup(upstream.Close)
+
+	gateway := httptest.NewServer(NewHandlerWithAuthenticator(transport.NewClient(), upstream.URL, "upstream-secret", authenticator, nil))
+	t.Cleanup(gateway.Close)
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","stream":false}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+key.RawKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST chat completions: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response body: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/json" || !json.Valid(body) {
+		t.Fatalf("status/content type/body = %d/%q/%q, want 200/application/json/valid JSON", response.StatusCode, response.Header.Get("Content-Type"), body)
+	}
+	if bytes.Contains(body, []byte("[DONE]")) {
+		t.Fatalf("converted response contains SSE terminator: %q", body)
+	}
+	var decoded struct {
+		ID      string `json:"id"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal converted response: %v", err)
+	}
+	if decoded.ID != "chat-complete" || len(decoded.Choices) != 1 || decoded.Choices[0].Message.Content != "hello" {
+		t.Fatalf("converted response = %#v", decoded)
+	}
+}
+
 func TestProxyReturnsIdentityChatSSEAfterDONEWithoutWaitingForUpstreamEOF(t *testing.T) {
 	const stream = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n: bytes after done\n\n"
 	started := make(chan struct{})

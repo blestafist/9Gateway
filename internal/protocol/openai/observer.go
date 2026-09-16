@@ -168,6 +168,7 @@ func (observer *Observer) Observe(event streaming.SSEEvent) error {
 type streamChoice struct {
 	Index        json.RawMessage `json:"index"`
 	Delta        json.RawMessage `json:"delta"`
+	Message      json.RawMessage `json:"message"`
 	FinishReason json.RawMessage `json:"finish_reason"`
 }
 
@@ -206,6 +207,11 @@ func (observer *Observer) observeChoices(raw json.RawMessage) {
 
 		observation := ChoiceObservation{Index: decodeInt(choice.Index)}
 		observation.Delta = decodeDelta(choice.Delta)
+		if len(choice.Delta) == 0 {
+			// Some upstreams wrap an already-complete chat completion in an SSE
+			// event before [DONE]. Treat its message as one complete delta.
+			observation.Delta = decodeDelta(choice.Message)
+		}
 		if len(choice.FinishReason) > 0 {
 			observation.FinishReasonPresent = true
 			observation.FinishReason = decodeStringPointer(choice.FinishReason)

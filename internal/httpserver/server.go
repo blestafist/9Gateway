@@ -1038,13 +1038,15 @@ func shouldInspectRequestMetadata(request *http.Request) bool {
 	if !authenticated {
 		return true
 	}
-	// An unrestricted policy has no model decision to make. Token-window keys
-	// still inspect eligible bodies for admission; all other requests remain
-	// byte-transparent and are not read solely to discover their size.
+	// An unrestricted policy has no model decision to make. The two known
+	// generation endpoints with a declared body length still need bounded
+	// metadata inspection to honor the explicit stream:false SSE compatibility
+	// contract. Chunked uploads and all generic /v1 routes remain byte-streaming
+	// and are not read ahead solely to discover their size.
 	_, budgetLimited := principal.Policy.TotalBudget()
 	_, dayLimited := principal.Policy.DailyBudget()
 	_, monthLimited := principal.Policy.MonthlyBudget()
-	return len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited || dayLimited || monthLimited
+	return eligibleTokenRequest(request) && request.ContentLength >= 0 || len(principal.Policy.AllowedModels()) != 0 || len(principal.Policy.DeniedModels()) != 0 || len(principal.Policy.TokenWindows()) != 0 || budgetLimited || dayLimited || monthLimited
 }
 
 // shouldInspectRequestMetadataForTelemetry is deliberately narrower than the
