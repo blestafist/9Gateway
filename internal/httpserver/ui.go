@@ -26,6 +26,8 @@ func newUIHandler(staticFS fs.FS) http.Handler {
 }
 
 func (h *uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+
 	// Only GET and HEAD methods are supported for UI serving.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")

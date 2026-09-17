@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/security"
+	"github.com/pestit/9gateway/internal/session"
 	"github.com/pestit/9gateway/internal/storage"
 )
 
@@ -462,6 +465,14 @@ func newAPIKeyID() (string, error) {
 }
 
 func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	handler.initSessions()
+	setSecurityHeaders(response)
+
+	if request.URL.Path == "/admin/ui/v1/session" {
+		handler.serveSession(response, request)
+		return
+	}
+
 	if request.Method == http.MethodGet && isRequestBodyPath(request.URL.Path) {
 		handler.getRequestBody(response, request)
 		return
@@ -490,8 +501,7 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		writeAdminError(response, http.StatusNotFound, gatewayErrorNotFound, "")
 		return
 	}
-	if !adminBearerMatches(request, handler.credential) {
-		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	if !handler.authenticate(response, request) {
 		return
 	}
 
@@ -543,8 +553,7 @@ func isRequestBodyPath(path string) bool {
 }
 
 func (handler *adminHandler) getRequestBody(response http.ResponseWriter, request *http.Request) {
-	if !adminBearerMatches(request, handler.credential) {
-		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	if !handler.authenticate(response, request) {
 		return
 	}
 	const prefix = "/admin/v1/requests/"
@@ -655,8 +664,7 @@ func adminRequestListItemFromRecord(record storage.RequestListRecord) adminReque
 }
 
 func (handler *adminHandler) listRequests(response http.ResponseWriter, request *http.Request) {
-	if !adminBearerMatches(request, handler.credential) {
-		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	if !handler.authenticate(response, request) {
 		return
 	}
 	lister, ok := handler.service.repository.(requestPageLister)
@@ -718,8 +726,7 @@ func (handler *adminHandler) listRequests(response http.ResponseWriter, request 
 }
 
 func (handler *adminHandler) getRequest(response http.ResponseWriter, request *http.Request) {
-	if !adminBearerMatches(request, handler.credential) {
-		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	if !handler.authenticate(response, request) {
 		return
 	}
 	const prefix = "/admin/v1/requests/"
@@ -798,8 +805,7 @@ func parseAdminListTime(query map[string][]string, name string) (*time.Time, err
 
 func (handler *adminHandler) getKey(response http.ResponseWriter, request *http.Request) {
 	const prefix = "/admin/v1/keys/"
-	if !adminBearerMatches(request, handler.credential) {
-		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	if !handler.authenticate(response, request) {
 		return
 	}
 	id := strings.TrimPrefix(request.URL.Path, prefix)
@@ -856,8 +862,7 @@ func adminKeyDetailFromRecord(record storage.KeyDetailRecord) adminKeyDetailItem
 }
 
 func (handler *adminHandler) listKeys(response http.ResponseWriter, request *http.Request) {
-	if !adminBearerMatches(request, handler.credential) {
-		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	if !handler.authenticate(response, request) {
 		return
 	}
 	lister, ok := handler.service.repository.(apiKeyPageLister)
@@ -945,8 +950,7 @@ func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request 
 		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid key id")
 		return
 	}
-	if !adminBearerMatches(request, handler.credential) {
-		writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	if !handler.authenticate(response, request) {
 		return
 	}
 	body, err := decodeAdminPolicyRequest(response, request)
@@ -977,8 +981,336 @@ func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request 
 }
 
 type adminHandler struct {
-	credential string
-	service    *adminKeyService
+	credential      string
+	service         *adminKeyService
+	sessionStore    *session.Store
+	rateLimiter     *session.LoginRateLimiter
+	trustedProxies  []*net.IPNet
+	sessionInitOnce sync.Once
+}
+
+var (
+	errDuplicateSessionCookie = errors.New("duplicate session cookie")
+	errDuplicateCSRFToken     = errors.New("duplicate csrf token")
+)
+
+func getSessionCookie(request *http.Request) (*http.Cookie, error) {
+	var found *http.Cookie
+	for _, c := range request.Cookies() {
+		if c.Name == session.CookieName {
+			if found != nil {
+				return nil, errDuplicateSessionCookie
+			}
+			found = c
+		}
+	}
+	if found == nil {
+		return nil, http.ErrNoCookie
+	}
+	return found, nil
+}
+
+func getCSRFToken(request *http.Request) (string, error) {
+	var tokens []string
+	if vals := request.Header.Values("X-CSRF-Token"); len(vals) > 0 {
+		tokens = append(tokens, vals...)
+	}
+	if vals := request.Header.Values("X-Gateway-CSRF-Token"); len(vals) > 0 {
+		tokens = append(tokens, vals...)
+	}
+	if len(tokens) > 1 {
+		return "", errDuplicateCSRFToken
+	}
+	if len(tokens) == 1 {
+		return tokens[0], nil
+	}
+	return "", nil
+}
+
+func (handler *adminHandler) initSessions() {
+	handler.sessionInitOnce.Do(func() {
+		if handler.sessionStore == nil {
+			handler.sessionStore = session.NewStore(session.StoreOptions{})
+		}
+		if handler.rateLimiter == nil {
+			handler.rateLimiter = session.NewLoginRateLimiter(session.RateLimiterOptions{})
+		}
+		if handler.trustedProxies == nil {
+			if env := os.Getenv("GATEWAY_TRUSTED_PROXIES"); env != "" {
+				proxies, err := session.ParseTrustedProxies(strings.Split(env, ","))
+				if err == nil {
+					handler.trustedProxies = proxies
+				}
+			}
+		}
+	})
+}
+
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+}
+
+func isUnsafeHTTPMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		return true
+	default:
+		return false
+	}
+}
+
+func (handler *adminHandler) isSameOrigin(request *http.Request) bool {
+	if request.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
+	origin := request.Header.Get("Origin")
+	if origin == "" {
+		origin = request.Header.Get("Referer")
+	}
+	if origin == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+
+	if !strings.EqualFold(parsed.Host, request.Host) {
+		return false
+	}
+
+	if session.IsSecureRequest(request, handler.trustedProxies) && parsed.Scheme != "https" {
+		return false
+	}
+
+	return true
+}
+
+func (handler *adminHandler) authenticate(response http.ResponseWriter, request *http.Request) bool {
+	authHeaders := request.Header.Values("Authorization")
+	cookie, cookieErr := getSessionCookie(request)
+	if errors.Is(cookieErr, errDuplicateSessionCookie) {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "duplicate session cookies are not permitted")
+		return false
+	}
+	hasCookie := cookieErr == nil && cookie != nil && cookie.Value != ""
+	hasAuth := len(authHeaders) > 0
+
+	if len(authHeaders) > 1 {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "multiple Authorization headers are not permitted")
+		return false
+	}
+
+	if hasAuth && hasCookie {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "request must not include both Authorization header and session cookie")
+		return false
+	}
+
+	if hasAuth {
+		if !adminBearerMatches(request, handler.credential) {
+			writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+			return false
+		}
+		return true
+	}
+
+	if hasCookie {
+		sess := handler.sessionStore.Get(cookie.Value)
+		if sess == nil {
+			session.ClearSessionCookie(response, request, handler.trustedProxies)
+			writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid or expired session")
+			return false
+		}
+
+		if isUnsafeHTTPMethod(request.Method) {
+			if !handler.isSameOrigin(request) {
+				writeAdminError(response, http.StatusForbidden, "forbidden", "cross-origin request rejected")
+				return false
+			}
+			csrfToken, csrfErr := getCSRFToken(request)
+			if errors.Is(csrfErr, errDuplicateCSRFToken) {
+				writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "duplicate CSRF token headers are not permitted")
+				return false
+			}
+			if !handler.sessionStore.ValidateCSRF(cookie.Value, csrfToken) {
+				writeAdminError(response, http.StatusForbidden, "invalid_csrf_token", "invalid or missing CSRF token")
+				return false
+			}
+		}
+		return true
+	}
+
+	writeAdminError(response, http.StatusUnauthorized, "unauthorized", "invalid admin credentials")
+	return false
+}
+
+func (handler *adminHandler) serveSession(response http.ResponseWriter, request *http.Request) {
+	authHeaders := request.Header.Values("Authorization")
+	cookie, cookieErr := getSessionCookie(request)
+	if errors.Is(cookieErr, errDuplicateSessionCookie) {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "duplicate session cookies are not permitted")
+		return
+	}
+	hasCookie := cookieErr == nil && cookie != nil && cookie.Value != ""
+	if len(authHeaders) > 1 || (len(authHeaders) > 0 && hasCookie) {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "request must not include ambiguous credentials")
+		return
+	}
+
+	switch request.Method {
+	case http.MethodPost:
+		handler.handleSessionLogin(response, request)
+	case http.MethodGet:
+		handler.handleSessionGet(response, request)
+	case http.MethodDelete:
+		handler.handleSessionLogout(response, request)
+	default:
+		response.Header().Set("Allow", "GET, POST, DELETE")
+		writeAdminError(response, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
+type adminSessionLoginRequest struct {
+	Credential      string `json:"credential"`
+	AdminCredential string `json:"admin_credential"`
+	Password        string `json:"password"`
+}
+
+func (handler *adminHandler) handleSessionLogin(response http.ResponseWriter, request *http.Request) {
+	clientIP := session.ClientIPFromRemoteAddr(request.RemoteAddr)
+	if !handler.rateLimiter.Allow(clientIP) {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limit_exceeded", "Too many failed login attempts. Please try again later.")
+		return
+	}
+
+	cookie, cookieErr := getSessionCookie(request)
+	if errors.Is(cookieErr, errDuplicateSessionCookie) {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "duplicate session cookies are not permitted")
+		return
+	}
+
+	if request.Body == nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "request body is required")
+		return
+	}
+	if !isJSONMediaType(request.Header) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "application/json media type is required")
+		return
+	}
+
+	request.Body = http.MaxBytesReader(response, request.Body, adminRequestBodyLimit)
+	defer request.Body.Close()
+
+	var body adminSessionLoginRequest
+	decoder := json.NewDecoder(request.Body)
+	if err := decoder.Decode(&body); err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "malformed JSON request")
+		return
+	}
+	cred := body.Credential
+	if cred == "" {
+		cred = body.AdminCredential
+	}
+	if cred == "" {
+		cred = body.Password
+	}
+
+	presentedDigest := sha256.Sum256([]byte(cred))
+	expectedDigest := sha256.Sum256([]byte(handler.credential))
+	matched := subtle.ConstantTimeCompare(presentedDigest[:], expectedDigest[:]) == 1
+
+	if !matched || strings.TrimSpace(cred) == "" {
+		handler.rateLimiter.RecordFailure(clientIP)
+		writeAdminError(response, http.StatusUnauthorized, "invalid_api_key", "Incorrect API key provided.")
+		return
+	}
+
+	handler.rateLimiter.RecordSuccess(clientIP)
+
+	if cookieErr == nil && cookie != nil && cookie.Value != "" {
+		handler.sessionStore.Revoke(cookie.Value)
+	}
+
+	sess, err := handler.sessionStore.Create()
+	if err != nil {
+		writeAdminError(response, http.StatusInternalServerError, "gateway_internal_error", "session creation failed")
+		return
+	}
+
+	session.SetSessionCookie(response, request, sess.ID, int(handler.sessionStore.AbsoluteTimeout().Seconds()), handler.trustedProxies)
+
+	writeAdminJSON(response, http.StatusOK, map[string]any{
+		"authenticated":   true,
+		"csrf_token":      sess.CSRFToken,
+		"idle_expires_at": sess.IdleExpiresAt(handler.sessionStore.IdleTimeout()).Format(time.RFC3339),
+		"expires_at":      sess.AbsoluteExpiresAt(handler.sessionStore.AbsoluteTimeout()).Format(time.RFC3339),
+	})
+}
+
+func (handler *adminHandler) handleSessionGet(response http.ResponseWriter, request *http.Request) {
+	cookie, err := getSessionCookie(request)
+	if errors.Is(err, errDuplicateSessionCookie) {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "duplicate session cookies are not permitted")
+		return
+	}
+	if err != nil || cookie == nil || cookie.Value == "" {
+		writeAdminJSON(response, http.StatusOK, map[string]any{
+			"authenticated": false,
+		})
+		return
+	}
+
+	sess := handler.sessionStore.Get(cookie.Value)
+	if sess == nil {
+		session.ClearSessionCookie(response, request, handler.trustedProxies)
+		writeAdminJSON(response, http.StatusOK, map[string]any{
+			"authenticated": false,
+		})
+		return
+	}
+
+	writeAdminJSON(response, http.StatusOK, map[string]any{
+		"authenticated":   true,
+		"csrf_token":      sess.CSRFToken,
+		"idle_expires_at": sess.IdleExpiresAt(handler.sessionStore.IdleTimeout()).Format(time.RFC3339),
+		"expires_at":      sess.AbsoluteExpiresAt(handler.sessionStore.AbsoluteTimeout()).Format(time.RFC3339),
+	})
+}
+
+func (handler *adminHandler) handleSessionLogout(response http.ResponseWriter, request *http.Request) {
+	cookie, err := getSessionCookie(request)
+	if errors.Is(err, errDuplicateSessionCookie) {
+		writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "duplicate session cookies are not permitted")
+		return
+	}
+	if err == nil && cookie != nil && cookie.Value != "" {
+		sess := handler.sessionStore.GetWithoutTouch(cookie.Value)
+		if sess != nil {
+			if !handler.isSameOrigin(request) {
+				writeAdminError(response, http.StatusForbidden, "forbidden", "cross-origin request rejected")
+				return
+			}
+			csrfToken, csrfErr := getCSRFToken(request)
+			if errors.Is(csrfErr, errDuplicateCSRFToken) {
+				writeAdminError(response, http.StatusBadRequest, "ambiguous_credentials", "duplicate CSRF token headers are not permitted")
+				return
+			}
+			if subtle.ConstantTimeCompare([]byte(sess.CSRFToken), []byte(csrfToken)) != 1 {
+				writeAdminError(response, http.StatusForbidden, "invalid_csrf_token", "invalid or missing CSRF token")
+				return
+			}
+			handler.sessionStore.Revoke(cookie.Value)
+		}
+	}
+
+	session.ClearSessionCookie(response, request, handler.trustedProxies)
+	writeAdminJSON(response, http.StatusOK, map[string]any{
+		"authenticated": false,
+	})
 }
 
 func adminBearerMatches(request *http.Request, credential string) bool {

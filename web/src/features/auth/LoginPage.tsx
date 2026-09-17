@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   Card,
   CardHeader,
@@ -10,10 +11,53 @@ import {
   Alert,
 } from "../../shared/ui";
 import { Lock, ShieldCheck, Eye, EyeOff } from "lucide-react";
+import { useAuth } from "./AuthContext";
 
 export const LoginPage: React.FC = () => {
-  const [adminToken, setAdminToken] = useState("");
+  const [credential, setCredential] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const errorRef = useRef<HTMLDivElement>(null);
+  const { isAuthenticated, login } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // Extract originally requested route if redirected from a protected route
+  const fromState = (location.state as { from?: { pathname: string; search?: string } })?.from;
+  const returnTo = fromState ? `${fromState.pathname}${fromState.search || ""}` : "/overview";
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate(returnTo, { replace: true });
+    }
+  }, [isAuthenticated, navigate, returnTo]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const secret = credential.trim();
+    if (!secret || isSubmitting) return;
+
+    // Clear credential in local component state immediately
+    setCredential("");
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      await login(secret);
+      navigate(returnTo, { replace: true });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Authentication failed";
+      setError(msg);
+      // Focus the error alert for screen reader announcements and keyboard users
+      setTimeout(() => {
+        errorRef.current?.focus();
+      }, 50);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <div className="gw-login-container" data-testid="login-page">
@@ -30,44 +74,78 @@ export const LoginPage: React.FC = () => {
           </div>
         </CardHeader>
 
-        <CardContent>
-          <div className="gw-form-stack">
-            <Input
-              type={showPassword ? "text" : "password"}
-              label="Admin Credential"
-              placeholder="gw_admin_••••••••"
-              value={adminToken}
-              onChange={(e) => setAdminToken(e.target.value)}
-              leftIcon={<Lock size={16} />}
-              rightIcon={
-                <button
-                  type="button"
-                  aria-label={showPassword ? "Hide credential" : "Show credential"}
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="gw-input-reveal-btn"
+        <form onSubmit={handleSubmit} method="post" action="#" noValidate>
+          <CardContent>
+            <div className="gw-form-stack">
+              {/* Hidden username input for password manager semantics */}
+              <input
+                type="text"
+                name="username"
+                defaultValue="admin"
+                autoComplete="username"
+                style={{ display: "none" }}
+                tabIndex={-1}
+                readOnly
+                aria-hidden="true"
+              />
+
+              {error && (
+                <div
+                  ref={errorRef}
+                  tabIndex={-1}
+                  style={{ outline: "none" }}
+                  data-testid="login-error-container"
                 >
-                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              }
-              helperText="Admin credential configured via GATEWAY_ADMIN_KEY."
-            />
+                  <Alert
+                    variant="danger"
+                    title="Authentication Error"
+                    aria-live="assertive"
+                    data-testid="login-alert"
+                  >
+                    {error}
+                  </Alert>
+                </div>
+              )}
 
-            <Alert variant="info" title="Authentication Placeholder (T163)">
-              Secure browser sessions, HttpOnly cookies, and CSRF protection will connect in T164.
-            </Alert>
-          </div>
-        </CardContent>
+              <Input
+                id="admin-credential"
+                name="password"
+                type={showPassword ? "text" : "password"}
+                label="Admin Credential"
+                placeholder="gw_admin_••••••••"
+                value={credential}
+                onChange={(e) => {
+                  setCredential(e.target.value);
+                  if (error) setError(null);
+                }}
+                autoComplete="current-password"
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                required
+                disabled={isSubmitting}
+                leftIcon={<Lock size={16} />}
+                actionIcon={showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                actionLabel={showPassword ? "Hide credential" : "Show credential"}
+                onActionClick={() => setShowPassword(!showPassword)}
+                helperText="Admin credential configured via GATEWAY_ADMIN_KEY."
+              />
+            </div>
+          </CardContent>
 
-        <CardFooter>
-          <Button
-            variant="primary"
-            style={{ width: "100%" }}
-            disabled
-            title="Session authentication connects in T164"
-          >
-            Sign In
-          </Button>
-        </CardFooter>
+          <CardFooter>
+            <Button
+              type="submit"
+              variant="primary"
+              style={{ width: "100%" }}
+              disabled={isSubmitting || !credential.trim()}
+              isLoading={isSubmitting}
+              data-testid="login-submit-btn"
+            >
+              {isSubmitting ? "Signing in..." : "Sign In"}
+            </Button>
+          </CardFooter>
+        </form>
       </Card>
     </div>
   );

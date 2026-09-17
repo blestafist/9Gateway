@@ -2,12 +2,25 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T163`.
+Done: `T001`-`T164`.
 
-Current: `T164` - add secure browser sessions and the login flow.
+Current: `T165` - implement the typed admin data layer.
 
-Queued: `T165`-`T180`, in dependency order from typed admin data layer through
-analytics, key/request workflows, quality gates, and release integration.
+Queued: `T166`-`T180`, in dependency order from admin overview aggregation API
+through analytics, key/request workflows, quality gates, and release integration.
+
+T164 implemented secure browser session management and the operator login flow.
+The gateway issues cryptographically random, bounded, in-memory sessions with
+idle and absolute expiry, mapped to an opaque HttpOnly SameSite=Strict cookie
+scoped to `/admin` (`/admin/ui/v1/session` and `/admin/v1/*`, excluding `/v1/*` proxy
+and `/ui/*`). Secure derives from direct TLS or trusted reverse proxies
+(`GATEWAY_TRUSTED_PROXIES`). Sessions rotate upon login and revoke on explicit
+logout, expiry, or gateway process restart. Admin Bearer authentication remains
+unaffected, while cookie-authenticated mutations require strict same-origin validation
+and session-bound CSRF tokens. Failed logins are rate-limited via a bounded
+in-memory limiter. The frontend provides accessible login, protected route redirection
+with returnTo recovery, explicit logout, and zero persistence or DOM leakage of
+credentials or session identifiers.
 
 T163 built the responsive operations console shell and routing below `/ui/`
 using React Router with lazy feature entries for Overview, Usage, API Keys,

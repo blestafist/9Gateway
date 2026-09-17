@@ -1,8 +1,9 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Sun, Moon, ChevronRight, User } from "lucide-react";
+import { Sun, Moon, ChevronRight, User, LogOut } from "lucide-react";
 import { IconButton, StatusPill } from "../../shared/ui";
 import { useTheme } from "../../shared/theme";
+import { useAuth } from "../../features/auth";
 
 const ROUTE_DESCRIPTIONS: Record<string, { title: string; subtitle: string }> = {
   "/": {
@@ -35,7 +36,7 @@ const ROUTE_DESCRIPTIONS: Record<string, { title: string; subtitle: string }> = 
   },
   "/login": {
     title: "Sign In",
-    subtitle: "Operator console authentication placeholder",
+    subtitle: "Authenticate with your admin credential to access the console",
   },
   "/components": {
     title: "Component Catalog",
@@ -46,6 +47,7 @@ const ROUTE_DESCRIPTIONS: Record<string, { title: string; subtitle: string }> = 
 export const PageHeader: React.FC = () => {
   const location = useLocation();
   const { theme, toggleTheme } = useTheme();
+  const { isAuthenticated, logout } = useAuth();
 
   const currentPath = location.pathname.replace(/\/$/, "") || "/";
   const info = ROUTE_DESCRIPTIONS[currentPath] || {
@@ -91,14 +93,27 @@ export const PageHeader: React.FC = () => {
           data-testid="theme-toggle-header"
         />
 
-        <Link to="/login" title="Operator Sign In" style={{ textDecoration: "none" }}>
+        {isAuthenticated ? (
           <IconButton
-            icon={<User size={18} />}
-            aria-label="Operator sign in"
+            icon={<LogOut size={18} />}
+            aria-label="Sign out"
+            title="Sign out of console"
             variant="secondary"
             size="md"
+            onClick={() => void logout()}
+            data-testid="logout-btn"
           />
-        </Link>
+        ) : (
+          <Link to="/login" title="Operator Sign In" style={{ textDecoration: "none" }}>
+            <IconButton
+              icon={<User size={18} />}
+              aria-label="Operator sign in"
+              variant="secondary"
+              size="md"
+              data-testid="login-link-btn"
+            />
+          </Link>
+        )}
       </div>
     </header>
   );

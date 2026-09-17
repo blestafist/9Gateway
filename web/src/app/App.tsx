@@ -1,13 +1,20 @@
 import React from "react";
 import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "../shared/theme";
+import { AuthProvider } from "../features/auth";
 import { AppRoutes } from "./AppRoutes";
 
 export interface AppProps {
   initialEntries?: string[];
+  initialAuthState?: {
+    isAuthenticated: boolean;
+    csrfToken?: string;
+    idleExpiresAt?: string;
+    expiresAt?: string;
+  };
 }
 
-export const App: React.FC<AppProps> = ({ initialEntries }) => {
+export const App: React.FC<AppProps> = ({ initialEntries, initialAuthState }) => {
   const isTestOrNonUiPath =
     typeof window !== "undefined" && !window.location.pathname.startsWith("/ui");
 
@@ -15,7 +22,9 @@ export const App: React.FC<AppProps> = ({ initialEntries }) => {
     return (
       <ThemeProvider>
         <MemoryRouter initialEntries={initialEntries} basename="/ui">
-          <AppRoutes />
+          <AuthProvider initialAuthState={initialAuthState}>
+            <AppRoutes />
+          </AuthProvider>
         </MemoryRouter>
       </ThemeProvider>
     );
@@ -25,7 +34,9 @@ export const App: React.FC<AppProps> = ({ initialEntries }) => {
     return (
       <ThemeProvider>
         <MemoryRouter initialEntries={["/ui/overview"]} basename="/ui">
-          <AppRoutes />
+          <AuthProvider initialAuthState={initialAuthState}>
+            <AppRoutes />
+          </AuthProvider>
         </MemoryRouter>
       </ThemeProvider>
     );
@@ -34,7 +45,9 @@ export const App: React.FC<AppProps> = ({ initialEntries }) => {
   return (
     <ThemeProvider>
       <BrowserRouter basename="/ui">
-        <AppRoutes />
+        <AuthProvider initialAuthState={initialAuthState}>
+          <AppRoutes />
+        </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>
   );

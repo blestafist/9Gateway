@@ -7,26 +7,31 @@ import (
 )
 
 const (
-	gatewayErrorInvalidAPIKey       = "invalid_api_key"
-	gatewayErrorKeyDisabled         = "key_disabled"
-	gatewayErrorKeyExpired          = "key_expired"
-	gatewayErrorModelNotAllowed     = "model_not_allowed"
-	gatewayErrorRequestLimit        = "request_limit_exceeded"
-	gatewayErrorConcurrencyLimit    = "concurrency_limit_exceeded"
-	gatewayErrorTokenLimit          = "token_limit_exceeded"
-	gatewayErrorBudgetLimit         = "budget_exceeded"
-	gatewayErrorInvalidRequest      = "invalid_request"
-	gatewayErrorBodyTooLarge        = "body_too_large"
-	gatewayErrorNotFound            = "not_found"
-	gatewayErrorUpstreamConnection  = "upstream_connection_error"
-	gatewayErrorUpstreamTimeout     = "upstream_timeout"
-	gatewayErrorResponseTransport   = "response_transport_error"
-	gatewayErrorConversion          = "conversion_error"
-	gatewayErrorCancellation        = "cancelled"
-	gatewayErrorUnsupportedResponse = "unsupported_response"
-	gatewayErrorInternal            = "gateway_internal_error"
-	gatewayErrorConflict            = "conflict"
-	gatewayErrorCursorExpired       = "cursor_expired"
+	gatewayErrorInvalidAPIKey        = "invalid_api_key"
+	gatewayErrorKeyDisabled          = "key_disabled"
+	gatewayErrorKeyExpired           = "key_expired"
+	gatewayErrorModelNotAllowed      = "model_not_allowed"
+	gatewayErrorRequestLimit         = "request_limit_exceeded"
+	gatewayErrorConcurrencyLimit     = "concurrency_limit_exceeded"
+	gatewayErrorTokenLimit           = "token_limit_exceeded"
+	gatewayErrorBudgetLimit          = "budget_exceeded"
+	gatewayErrorInvalidRequest       = "invalid_request"
+	gatewayErrorBodyTooLarge         = "body_too_large"
+	gatewayErrorNotFound             = "not_found"
+	gatewayErrorUpstreamConnection   = "upstream_connection_error"
+	gatewayErrorUpstreamTimeout      = "upstream_timeout"
+	gatewayErrorResponseTransport    = "response_transport_error"
+	gatewayErrorConversion           = "conversion_error"
+	gatewayErrorCancellation         = "cancelled"
+	gatewayErrorUnsupportedResponse  = "unsupported_response"
+	gatewayErrorInternal             = "gateway_internal_error"
+	gatewayErrorConflict             = "conflict"
+	gatewayErrorCursorExpired        = "cursor_expired"
+	gatewayErrorAmbiguousCredentials = "ambiguous_credentials"
+	gatewayErrorInvalidCSRFToken     = "invalid_csrf_token"
+	gatewayErrorForbidden            = "forbidden"
+	gatewayErrorRateLimitExceeded    = "rate_limit_exceeded"
+	gatewayErrorMethodNotAllowed     = "method_not_allowed"
 )
 
 type gatewayErrorBody struct {
@@ -47,26 +52,31 @@ type gatewayErrorDefinition struct {
 }
 
 var gatewayErrorDefinitions = map[string]gatewayErrorDefinition{
-	gatewayErrorInvalidAPIKey:       {"Incorrect API key provided.", "authentication_error", http.StatusUnauthorized},
-	gatewayErrorKeyDisabled:         {"API key is disabled.", "authentication_error", http.StatusUnauthorized},
-	gatewayErrorKeyExpired:          {"API key has expired.", "authentication_error", http.StatusUnauthorized},
-	gatewayErrorModelNotAllowed:     {"The requested model is not allowed.", "permission_error", http.StatusForbidden},
-	gatewayErrorRequestLimit:        {"Request limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
-	gatewayErrorConcurrencyLimit:    {"Concurrency limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
-	gatewayErrorTokenLimit:          {"Token limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
-	gatewayErrorBudgetLimit:         {"Budget exceeded.", "rate_limit_error", http.StatusTooManyRequests},
-	gatewayErrorInvalidRequest:      {"Invalid request.", "invalid_request_error", http.StatusBadRequest},
-	gatewayErrorBodyTooLarge:        {"Request body exceeds the 10 MiB limit.", "invalid_request_error", http.StatusRequestEntityTooLarge},
-	gatewayErrorNotFound:            {"The requested resource was not found.", "invalid_request_error", http.StatusNotFound},
-	gatewayErrorUpstreamConnection:  {"Unable to connect to the upstream service.", "upstream_error", http.StatusBadGateway},
-	gatewayErrorUpstreamTimeout:     {"The upstream service timed out.", "upstream_error", http.StatusGatewayTimeout},
-	gatewayErrorResponseTransport:   {"The upstream response could not be delivered.", "upstream_error", http.StatusBadGateway},
-	gatewayErrorConversion:          {"The upstream response could not be converted.", "upstream_error", http.StatusBadGateway},
-	gatewayErrorCancellation:        {"The request was cancelled.", "request_error", 499},
-	gatewayErrorUnsupportedResponse: {"The upstream response is not supported.", "upstream_error", http.StatusBadGateway},
-	gatewayErrorInternal:            {"An internal gateway error occurred.", "server_error", http.StatusInternalServerError},
-	gatewayErrorConflict:            {"The requested change conflicts with active work.", "conflict_error", http.StatusConflict},
-	gatewayErrorCursorExpired:       {"The pagination cursor has expired; restart the traversal.", "invalid_request_error", http.StatusBadRequest},
+	gatewayErrorInvalidAPIKey:        {"Incorrect API key provided.", "authentication_error", http.StatusUnauthorized},
+	gatewayErrorKeyDisabled:          {"API key is disabled.", "authentication_error", http.StatusUnauthorized},
+	gatewayErrorKeyExpired:           {"API key has expired.", "authentication_error", http.StatusUnauthorized},
+	gatewayErrorModelNotAllowed:      {"The requested model is not allowed.", "permission_error", http.StatusForbidden},
+	gatewayErrorRequestLimit:         {"Request limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
+	gatewayErrorConcurrencyLimit:     {"Concurrency limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
+	gatewayErrorTokenLimit:           {"Token limit exceeded.", "rate_limit_error", http.StatusTooManyRequests},
+	gatewayErrorBudgetLimit:          {"Budget exceeded.", "rate_limit_error", http.StatusTooManyRequests},
+	gatewayErrorInvalidRequest:       {"Invalid request.", "invalid_request_error", http.StatusBadRequest},
+	gatewayErrorBodyTooLarge:         {"Request body exceeds the 10 MiB limit.", "invalid_request_error", http.StatusRequestEntityTooLarge},
+	gatewayErrorNotFound:             {"The requested resource was not found.", "invalid_request_error", http.StatusNotFound},
+	gatewayErrorUpstreamConnection:   {"Unable to connect to the upstream service.", "upstream_error", http.StatusBadGateway},
+	gatewayErrorUpstreamTimeout:      {"The upstream service timed out.", "upstream_error", http.StatusGatewayTimeout},
+	gatewayErrorResponseTransport:    {"The upstream response could not be delivered.", "upstream_error", http.StatusBadGateway},
+	gatewayErrorConversion:           {"The upstream response could not be converted.", "upstream_error", http.StatusBadGateway},
+	gatewayErrorCancellation:         {"The request was cancelled.", "request_error", 499},
+	gatewayErrorUnsupportedResponse:  {"The upstream response is not supported.", "upstream_error", http.StatusBadGateway},
+	gatewayErrorInternal:             {"An internal gateway error occurred.", "server_error", http.StatusInternalServerError},
+	gatewayErrorConflict:             {"The requested change conflicts with active work.", "conflict_error", http.StatusConflict},
+	gatewayErrorCursorExpired:        {"The pagination cursor has expired; restart the traversal.", "invalid_request_error", http.StatusBadRequest},
+	gatewayErrorAmbiguousCredentials: {"Request must not provide both Authorization header and session cookie.", "invalid_request_error", http.StatusBadRequest},
+	gatewayErrorInvalidCSRFToken:     {"Invalid or missing CSRF token.", "permission_error", http.StatusForbidden},
+	gatewayErrorForbidden:            {"The requested action is forbidden.", "permission_error", http.StatusForbidden},
+	gatewayErrorRateLimitExceeded:    {"Too many failed login attempts. Please try again later.", "rate_limit_error", http.StatusTooManyRequests},
+	gatewayErrorMethodNotAllowed:     {"Method not allowed.", "invalid_request_error", http.StatusMethodNotAllowed},
 }
 
 // gatewayErrorTraceRecorder is deliberately tiny so error writing remains
@@ -115,8 +125,12 @@ func safeErrorCodeForGatewayCode(code string) SafeErrorCode {
 		return ErrorCodeNotFound
 	case gatewayErrorConflict:
 		return ErrorCodeConflict
-	case gatewayErrorCursorExpired:
+	case gatewayErrorCursorExpired, gatewayErrorAmbiguousCredentials, gatewayErrorMethodNotAllowed:
 		return ErrorCodeInvalidRequest
+	case gatewayErrorInvalidCSRFToken, gatewayErrorForbidden:
+		return ErrorCodeModelNotAllowed
+	case gatewayErrorRateLimitExceeded:
+		return ErrorCodeRequestLimit
 	default:
 		return ErrorCodeUnknown
 	}

@@ -11,7 +11,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("renders skip link and targets main content", () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
 
     const skipLink = screen.getByRole("link", { name: /skip to main content/i });
     expect(skipLink).toBeInTheDocument();
@@ -23,7 +23,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("renders desktop navigation with strictly allowed items only", () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
 
     const sidebarNav = screen.getByRole("navigation", { name: "Main Navigation" });
     expect(sidebarNav).toBeInTheDocument();
@@ -46,7 +46,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("marks the active route with aria-current='page'", async () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
 
     await waitFor(() => {
       const overviewLink = screen.getByRole("link", { name: "Overview" });
@@ -58,7 +58,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("synchronizes document title and breadcrumbs with the active route", async () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
 
     await waitFor(() => {
       expect(document.title).toBe("Overview | 9Gateway");
@@ -70,7 +70,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("navigates directly to /ui/usage and renders usage placeholder", async () => {
-    render(<App initialEntries={["/ui/usage"]} />);
+    render(<App initialEntries={["/ui/usage"]} initialAuthState={{ isAuthenticated: true }} />);
 
     await waitFor(() => {
       expect(screen.getByTestId("usage-page")).toBeInTheDocument();
@@ -82,7 +82,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("navigates directly to /ui/keys and renders API Keys placeholder", async () => {
-    render(<App initialEntries={["/ui/keys"]} />);
+    render(<App initialEntries={["/ui/keys"]} initialAuthState={{ isAuthenticated: true }} />);
 
     await waitFor(() => {
       expect(screen.getByTestId("keys-page")).toBeInTheDocument();
@@ -94,7 +94,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("redirects /ui/api-keys alias directly to /keys", async () => {
-    render(<App initialEntries={["/ui/api-keys"]} />);
+    render(<App initialEntries={["/ui/api-keys"]} initialAuthState={{ isAuthenticated: true }} />);
 
     await waitFor(() => {
       expect(screen.getByTestId("keys-page")).toBeInTheDocument();
@@ -103,7 +103,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("navigates directly to /ui/requests and renders requests table shell", async () => {
-    render(<App initialEntries={["/ui/requests"]} />);
+    render(<App initialEntries={["/ui/requests"]} initialAuthState={{ isAuthenticated: true }} />);
 
     await waitFor(() => {
       expect(screen.getByTestId("requests-page")).toBeInTheDocument();
@@ -115,7 +115,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("navigates directly to /ui/system and renders system diagnostics", async () => {
-    render(<App initialEntries={["/ui/system"]} />);
+    render(<App initialEntries={["/ui/system"]} initialAuthState={{ isAuthenticated: true }} />);
 
     await waitFor(() => {
       expect(screen.getByTestId("system-page")).toBeInTheDocument();
@@ -155,7 +155,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("toggles desktop sidebar compact state and persists preference in localStorage", () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
 
     const sidebar = screen.getByTestId("sidebar");
     const toggleBtn = screen.getByTestId("sidebar-toggle-btn");
@@ -179,7 +179,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("persists only allowed preferences in localStorage and never credentials or secret telemetry", () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
 
     // Trigger theme toggle and sidebar toggle
     const themeBtn = screen.getByTestId("theme-toggle-header");
@@ -200,7 +200,7 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("opens and operates mobile drawer with keyboard and focus handling", async () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
 
     const menuBtn = screen.getByTestId("mobile-menu-btn");
     expect(menuBtn).toHaveAttribute("aria-expanded", "false");
@@ -246,7 +246,7 @@ describe("T163 Shell & Navigation", () => {
 
 describe("T163 Layout & Responsive Structural Verifications", () => {
   it("uses overflow-x: hidden on shell root to prevent document horizontal scrollbar", () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
     const shell = screen.getByTestId("app-shell");
     expect(shell).toHaveClass("gw-shell-container");
   });
@@ -256,7 +256,7 @@ describe("T163 Layout & Responsive Structural Verifications", () => {
     for (const width of viewports) {
       window.innerWidth = width;
       fireEvent(window, new Event("resize"));
-      const { unmount } = render(<App initialEntries={["/ui/overview"]} />);
+      const { unmount } = render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
       expect(screen.getByTestId("app-shell")).toBeInTheDocument();
       expect(screen.getByTestId("page-header")).toBeInTheDocument();
       unmount();
@@ -264,9 +264,263 @@ describe("T163 Layout & Responsive Structural Verifications", () => {
   });
 
   it("renders reserved connection and version info", () => {
-    render(<App initialEntries={["/ui/overview"]} />);
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
     expect(screen.getByTestId("sidebar-status-area")).toBeInTheDocument();
     expect(screen.getByText("Online")).toBeInTheDocument();
     expect(screen.getByText("v0.1.0-dev")).toBeInTheDocument();
+  });
+});
+
+describe("T164 Authentication & Session Management", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    document.title = "9Gateway";
+    vi.restoreAllMocks();
+  });
+
+  it("redirects unauthenticated user from protected routes to /ui/login with state.from", async () => {
+    render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: false }} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+      expect(document.title).toBe("Sign In | 9Gateway");
+    });
+  });
+
+  it("renders accessible login form with password manager semantics and toggle reveal", async () => {
+    render(<App initialEntries={["/ui/login"]} initialAuthState={{ isAuthenticated: false }} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    });
+
+    // Hidden username field for password manager compatibility
+    const hiddenUsername = document.querySelector('input[name="username"]');
+    expect(hiddenUsername).toBeInTheDocument();
+    expect(hiddenUsername).toHaveAttribute("autoComplete", "username");
+
+    // Admin Credential password input
+    const passwordInput = screen.getByLabelText(/Admin Credential/i);
+    expect(passwordInput).toBeInTheDocument();
+    expect(passwordInput).toHaveAttribute("type", "password");
+    expect(passwordInput).toHaveAttribute("autoComplete", "current-password");
+
+    // Reveal toggle
+    const toggleBtn = screen.getByRole("button", { name: "Show credential" });
+    expect(toggleBtn).toBeInTheDocument();
+
+    fireEvent.click(toggleBtn);
+    expect(passwordInput).toHaveAttribute("type", "text");
+    expect(screen.getByRole("button", { name: "Hide credential" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide credential" }));
+    expect(passwordInput).toHaveAttribute("type", "password");
+  });
+
+  it("immediately clears credential input from local state upon submission", async () => {
+    // Mock login endpoint
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        authenticated: true,
+        csrf_token: "csrf-token-123",
+        idle_expires_at: new Date(Date.now() + 1800000).toISOString(),
+        expires_at: new Date(Date.now() + 43200000).toISOString(),
+      }),
+    } as Response);
+
+    render(<App initialEntries={["/ui/login"]} initialAuthState={{ isAuthenticated: false }} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    });
+
+    const passwordInput = screen.getByLabelText(/Admin Credential/i) as HTMLInputElement;
+    fireEvent.change(passwordInput, { target: { value: "super-secret-admin-pass" } });
+    expect(passwordInput.value).toBe("super-secret-admin-pass");
+
+    const submitBtn = screen.getByTestId("login-submit-btn");
+    fireEvent.click(submitBtn);
+
+    // Immediately cleared in component state
+    expect(passwordInput.value).toBe("");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("overview-page")).toBeInTheDocument();
+    });
+  });
+
+  it("handles failed login with generic non-enumerating error and moves focus to alert", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({
+        error: {
+          code: "invalid_api_key",
+          message: "Incorrect API key provided.",
+        },
+      }),
+    } as Response);
+
+    render(<App initialEntries={["/ui/login"]} initialAuthState={{ isAuthenticated: false }} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    });
+
+    const passwordInput = screen.getByLabelText(/Admin Credential/i);
+    fireEvent.change(passwordInput, { target: { value: "wrong-password" } });
+
+    const submitBtn = screen.getByTestId("login-submit-btn");
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      const alert = screen.getByRole("alert");
+      expect(alert).toBeInTheDocument();
+      expect(alert).toHaveAttribute("aria-live", "assertive");
+      expect(alert).toHaveTextContent("Incorrect API key provided.");
+    });
+  });
+
+  it("handles rate limit exceeded (429) on failed attempts", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        error: {
+          code: "rate_limit_exceeded",
+          message: "Too many failed login attempts. Please try again later.",
+        },
+      }),
+    } as Response);
+
+    render(<App initialEntries={["/ui/login"]} initialAuthState={{ isAuthenticated: false }} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    });
+
+    const passwordInput = screen.getByLabelText(/Admin Credential/i);
+    fireEvent.change(passwordInput, { target: { value: "spam-guess" } });
+
+    fireEvent.click(screen.getByTestId("login-submit-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Too many failed login attempts. Please try again later."
+      );
+    });
+  });
+
+  it("navigates to returnTo route on successful login", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        authenticated: true,
+        csrf_token: "csrf-tok-abc",
+        idle_expires_at: new Date(Date.now() + 1800000).toISOString(),
+        expires_at: new Date(Date.now() + 43200000).toISOString(),
+      }),
+    } as Response);
+
+    // Access /ui/usage unauthenticated -> redirected to login with returnTo = /ui/usage
+    render(<App initialEntries={["/ui/usage"]} initialAuthState={{ isAuthenticated: false }} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    });
+
+    const passwordInput = screen.getByLabelText(/Admin Credential/i);
+    fireEvent.change(passwordInput, { target: { value: "valid-admin-credential" } });
+    fireEvent.click(screen.getByTestId("login-submit-btn"));
+
+    // Upon login, redirected back to originally requested /ui/usage
+    await waitFor(() => {
+      expect(screen.getByTestId("usage-page")).toBeInTheDocument();
+      expect(document.title).toBe("Usage & Analytics | 9Gateway");
+    });
+  });
+
+  it("supports explicit logout from PageHeader and sends CSRF token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ authenticated: false }),
+    } as Response);
+    globalThis.fetch = fetchMock;
+
+    render(
+      <App
+        initialEntries={["/ui/overview"]}
+        initialAuthState={{
+          isAuthenticated: true,
+          csrfToken: "active-csrf-token",
+        }}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("logout-btn")).toBeInTheDocument();
+    });
+
+    const logoutBtn = screen.getByTestId("logout-btn");
+    expect(logoutBtn).toHaveAttribute("aria-label", "Sign out");
+
+    fireEvent.click(logoutBtn);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/admin/ui/v1/session",
+        expect.objectContaining({
+          method: "DELETE",
+          headers: expect.objectContaining({
+            "X-CSRF-Token": "active-csrf-token",
+          }),
+        })
+      );
+      // Once logged out, user is redirected to login page
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    });
+  });
+
+  it("never persists credentials, CSRF token, or session ID in localStorage or sessionStorage", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        authenticated: true,
+        csrf_token: "csrf-super-secret-token",
+        idle_expires_at: new Date(Date.now() + 1800000).toISOString(),
+        expires_at: new Date(Date.now() + 43200000).toISOString(),
+      }),
+    } as Response);
+
+    render(<App initialEntries={["/ui/login"]} initialAuthState={{ isAuthenticated: false }} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    });
+
+    const passwordInput = screen.getByLabelText(/Admin Credential/i);
+    fireEvent.change(passwordInput, { target: { value: "gw_admin_secret_credential" } });
+    fireEvent.click(screen.getByTestId("login-submit-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("overview-page")).toBeInTheDocument();
+    });
+
+    // Check all storage
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i) || "";
+      const val = localStorage.getItem(key) || "";
+      expect(val).not.toContain("gw_admin_secret_credential");
+      expect(val).not.toContain("csrf-super-secret-token");
+    }
+
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i) || "";
+      const val = sessionStorage.getItem(key) || "";
+      expect(val).not.toContain("gw_admin_secret_credential");
+      expect(val).not.toContain("csrf-super-secret-token");
+    }
   });
 });

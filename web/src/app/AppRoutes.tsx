@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { AppShell } from "./shell/AppShell";
 import { RouteErrorBoundary } from "./shell/RouteErrorBoundary";
 import { RouteLoadingFallback } from "./shell/RouteLoadingFallback";
+import { ProtectedRoute } from "./ProtectedRoute";
 
 const OverviewPage = lazy(() => import("../features/overview"));
 const UsagePage = lazy(() => import("../features/usage"));
@@ -25,17 +26,23 @@ const renderLazyRoute = (Component: React.ComponentType) => (
   </RouteErrorBoundary>
 );
 
+const renderProtectedLazyRoute = (Component: React.ComponentType) => (
+  <ProtectedRoute>
+    {renderLazyRoute(Component)}
+  </ProtectedRoute>
+);
+
 export const AppRoutes: React.FC = () => {
   return (
     <Routes>
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/overview" replace />} />
-        <Route path="overview" element={renderLazyRoute(OverviewPage)} />
-        <Route path="usage" element={renderLazyRoute(UsagePage)} />
-        <Route path="keys" element={renderLazyRoute(KeysPage)} />
+        <Route path="overview" element={renderProtectedLazyRoute(OverviewPage)} />
+        <Route path="usage" element={renderProtectedLazyRoute(UsagePage)} />
+        <Route path="keys" element={renderProtectedLazyRoute(KeysPage)} />
         <Route path="api-keys" element={<Navigate to="/keys" replace />} />
-        <Route path="requests" element={renderLazyRoute(RequestsPage)} />
-        <Route path="system" element={renderLazyRoute(SystemPage)} />
+        <Route path="requests" element={renderProtectedLazyRoute(RequestsPage)} />
+        <Route path="system" element={renderProtectedLazyRoute(SystemPage)} />
         <Route path="login" element={renderLazyRoute(LoginPage)} />
 
         {import.meta.env.DEV && ComponentCatalog && (
