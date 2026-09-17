@@ -104,3 +104,25 @@ Do commit in style as commit history (git log) presents. Do it after completing 
 ---
 
 Update planning files / docs by yourself if you want sth to remember. Do not turn it into a huge docs. Current focus only
+
+## Provider Subagent Recovery
+
+The Gemini subagent provider may fail with `400: Requests ending with a
+model turn are not supported` after a tool-heavy session. The worker often
+completes substantial changes before the error surfaces.
+
+Recovery steps:
+
+1. On the first 400, inspect the shared worktree (`git status`, `git diff
+   --stat`) before starting anything else — changes may already be applied.
+2. Attempt at most one short resume using the same `task_id`.
+3. If the same 400 immediately repeats, abandon that session.
+4. Start a fresh worker with a narrow prompt: preserve current partial work,
+   start with `git status --short` and `git diff --stat`, run targeted
+   failing tests, fix only remaining issues, and do final verification.
+5. Do not tell the fresh worker to broadly rediscover or rewrite the task.
+6. Do not read or dump `package-lock.json`, generated `web/dist`, huge diffs,
+   or full successful test output into context.
+7. Split broad tasks into source implementation and final integration where
+   practical.
+
