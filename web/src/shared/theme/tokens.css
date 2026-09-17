@@ -1,0 +1,258 @@
+/* 9Gateway Console Design Tokens & Base Theme */
+
+:root {
+  /* Typography Stacks */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* Font Sizes (rem-based for 200% text zoom robustness) */
+  --font-size-xs: 0.6875rem; /* 11px */
+  --font-size-sm: 0.75rem;   /* 12px */
+  --font-size-base: 0.875rem;/* 14px */
+  --font-size-md: 1.0rem;    /* 16px */
+  --font-size-lg: 1.125rem;  /* 18px */
+  --font-size-xl: 1.5rem;    /* 24px */
+  --font-size-2xl: 1.875rem; /* 30px */
+
+  /* Line Heights */
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.625;
+
+  /* Spacing Scale (8px rhythm) */
+  --space-0-5: 0.125rem; /* 2px */
+  --space-1: 0.25rem;    /* 4px */
+  --space-1-5: 0.375rem; /* 6px */
+  --space-2: 0.5rem;     /* 8px */
+  --space-2-5: 0.625rem; /* 10px */
+  --space-3: 0.75rem;    /* 12px */
+  --space-4: 1.0rem;     /* 16px */
+  --space-5: 1.25rem;    /* 20px */
+  --space-6: 1.5rem;     /* 24px */
+  --space-8: 2.0rem;     /* 32px */
+  --space-10: 2.5rem;    /* 40px */
+  --space-12: 3.0rem;    /* 48px */
+
+  /* Radii */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  /* Transitions & Timing */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 200ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Focus Ring */
+  --focus-ring-offset: 2px;
+  --focus-ring-width: 2px;
+
+  /* Z-Index Hierarchy */
+  --z-base: 1;
+  --z-sticky: 10;
+  --z-drawer: 40;
+  --z-modal-backdrop: 50;
+  --z-modal: 60;
+  --z-toast: 100;
+  --z-tooltip: 110;
+}
+
+/* Dark Theme (Default) */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces & Canvas */
+  --bg-canvas: #0d0f12;
+  --bg-grid-line: rgba(255, 255, 255, 0.028);
+  --bg-surface-1: #15171e;
+  --bg-surface-2: #1c1e27;
+  --bg-surface-3: #252834;
+  --bg-overlay: rgba(0, 0, 0, 0.75);
+
+  /* Borders & Dividers */
+  --border-subtle: #1f222d;
+  --border-default: #2a2d3b;
+  --border-strong: #3e4356;
+  --border-focus: #f06a4b;
+
+  /* Typography */
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-on-accent: #ffffff;
+  --text-inverse: #0f172a;
+
+  /* Brand / Primary Accent (Warm Coral) */
+  --accent-primary: #f06a4b;
+  --accent-hover: #fa7b5e;
+  --accent-active: #de5839;
+  --accent-subtle: rgba(240, 106, 75, 0.14);
+  --accent-border: rgba(240, 106, 75, 0.35);
+
+  /* Telemetry / Metric Roles */
+  --metric-requests: #f8fafc;
+  --metric-tokens-in: #f06a4b;
+  --metric-tokens-cache: #3b82f6;
+  --metric-tokens-out: #10b981;
+  --metric-cost: #f59e0b;
+
+  /* Semantic Feedback */
+  --status-success: #10b981;
+  --status-success-subtle: rgba(16, 185, 129, 0.12);
+  --status-success-border: rgba(16, 185, 129, 0.32);
+
+  --status-warning: #f59e0b;
+  --status-warning-subtle: rgba(245, 158, 11, 0.12);
+  --status-warning-border: rgba(245, 158, 11, 0.32);
+
+  --status-danger: #ef4444;
+  --status-danger-subtle: rgba(239, 68, 68, 0.14);
+  --status-danger-border: rgba(239, 68, 68, 0.35);
+
+  --status-info: #3b82f6;
+  --status-info-subtle: rgba(59, 130, 246, 0.12);
+  --status-info-border: rgba(59, 130, 246, 0.32);
+
+  --status-neutral: #64748b;
+  --status-neutral-subtle: rgba(100, 116, 139, 0.12);
+  --status-neutral-border: rgba(100, 116, 139, 0.32);
+
+  /* Elevation Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.65);
+}
+
+/* Light Theme (Designed counterpart) */
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Surfaces & Canvas */
+  --bg-canvas: #f8fafc;
+  --bg-grid-line: rgba(15, 23, 42, 0.04);
+  --bg-surface-1: #ffffff;
+  --bg-surface-2: #f1f5f9;
+  --bg-surface-3: #e2e8f0;
+  --bg-overlay: rgba(15, 23, 42, 0.55);
+
+  /* Borders & Dividers */
+  --border-subtle: #f1f5f9;
+  --border-default: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --border-focus: #dc4f2f;
+
+  /* Typography */
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-on-accent: #ffffff;
+  --text-inverse: #f8fafc;
+
+  /* Brand / Primary Accent */
+  --accent-primary: #e05638;
+  --accent-hover: #cc4527;
+  --accent-active: #b5381d;
+  --accent-subtle: rgba(224, 86, 56, 0.08);
+  --accent-border: rgba(224, 86, 56, 0.28);
+
+  /* Telemetry / Metric Roles */
+  --metric-requests: #0f172a;
+  --metric-tokens-in: #d9492b;
+  --metric-tokens-cache: #2563eb;
+  --metric-tokens-out: #059669;
+  --metric-cost: #d97706;
+
+  /* Semantic Feedback */
+  --status-success: #059669;
+  --status-success-subtle: rgba(5, 150, 105, 0.08);
+  --status-success-border: rgba(5, 150, 105, 0.28);
+
+  --status-warning: #d97706;
+  --status-warning-subtle: rgba(217, 119, 6, 0.08);
+  --status-warning-border: rgba(217, 119, 6, 0.28);
+
+  --status-danger: #dc2626;
+  --status-danger-subtle: rgba(220, 38, 38, 0.08);
+  --status-danger-border: rgba(220, 38, 38, 0.28);
+
+  --status-info: #2563eb;
+  --status-info-subtle: rgba(37, 99, 235, 0.08);
+  --status-info-border: rgba(37, 99, 235, 0.28);
+
+  --status-neutral: #64748b;
+  --status-neutral-subtle: rgba(100, 116, 139, 0.08);
+  --status-neutral-border: rgba(100, 116, 139, 0.28);
+
+  /* Elevation Shadows */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 8px 24px rgba(15, 23, 42, 0.14);
+}
+
+/* Global Reset & Base */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
+  color: var(--text-primary);
+  background-color: var(--bg-canvas);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Focus Visibility Standard */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--border-focus);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Subtle Technical Grid Texture */
+.bg-grid-canvas {
+  background-color: var(--bg-canvas);
+  background-image:
+    linear-gradient(to right, var(--bg-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--bg-grid-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* High Contrast Mode Override */
+@media (prefers-contrast: more) {
+  :root,
+  [data-theme="dark"],
+  [data-theme="light"] {
+    --border-default: #475569;
+    --border-subtle: #334155;
+    --border-strong: #94a3b8;
+    --focus-ring-width: 3px;
+  }
+}
+
+/* Reduced Motion Override */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

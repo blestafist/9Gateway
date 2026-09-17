@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import "./shared/theme/tokens.css";
 import { App } from "./app";
 
 const rootElement = document.getElementById("root");

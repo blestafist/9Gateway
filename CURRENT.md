@@ -2,13 +2,25 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T161`.
+Done: `T001`-`T162`.
 
-Current: `T162` - establish the visual system and component primitives.
+Current: `T163` - build the responsive application shell.
 
-Queued: `T163`-`T180`, in dependency order from visual foundation and secure
-browser access through analytics, key/request workflows, quality gates, and
-release integration.
+Queued: `T164`-`T180`, in dependency order from secure browser access through
+analytics, key/request workflows, quality gates, and release integration.
+
+T162 established the operations-console visual design system and composable UI
+primitives in `web/src/shared/ui` and `docs/ui/design-system.md`. The visual
+direction uses charcoal/slate surfaces, restrained warm-coral brand accents,
+semantic telemetry roles (neutral requests, coral input tokens, blue cached
+tokens, green output tokens, and amber cost derived from reference screenshots),
+a subtle CSS grid background texture, and compact density. Primitives include
+Button, IconButton, Input, Select, Checkbox, Switch, Badge, Card, Tabs, Tooltip,
+Dialog, Drawer, Table shell, Skeleton, EmptyState, Alert, and Toast region with
+polite/assertive live-region semantics. A dev-only component catalog is
+accessible at `/ui/components` and tree-shaken from production builds. Focus
+trapping/restoration, high-contrast mode, reduced-motion, and theme bootstrapping
+without flash are verified by unit tests.
 
 The gateway now provides complete admin read API, CLI tool, health/metrics endpoints, graceful shutdown, security hardening, and production packaging.
 It also provides transparent policy enforcement, token and budget accounting,
