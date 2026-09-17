@@ -1,4 +1,6 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
+import { setCsrfTokenProvider, setUnauthorizedListener } from "../../shared/transport";
+import { clearAdminCache } from "../../shared/query";
 
 export interface SessionState {
   authenticated: boolean;
@@ -49,12 +51,34 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({
     initialAuthState?.expiresAt || null
   );
 
+  const csrfTokenRef = useRef(csrfToken);
+  useEffect(() => {
+    csrfTokenRef.current = csrfToken;
+  }, [csrfToken]);
+
+  useEffect(() => {
+    setCsrfTokenProvider(() => csrfTokenRef.current);
+    return () => {
+      setCsrfTokenProvider(null);
+    };
+  }, []);
+
   const expireSession = useCallback(() => {
     setIsAuthenticated(false);
     setCsrfToken(null);
     setIdleExpiresAt(null);
     setExpiresAt(null);
+    clearAdminCache();
   }, []);
+
+  useEffect(() => {
+    setUnauthorizedListener(() => {
+      expireSession();
+    });
+    return () => {
+      setUnauthorizedListener(null);
+    };
+  }, [expireSession]);
 
   const checkSession = useCallback(async (): Promise<boolean> => {
     try {
@@ -149,6 +173,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({
       setCsrfToken(null);
       setIdleExpiresAt(null);
       setExpiresAt(null);
+      clearAdminCache();
     }
   }, [csrfToken]);
 

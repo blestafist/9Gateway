@@ -2,12 +2,22 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T164`.
+Done: `T001`-`T165`.
 
-Current: `T165` - implement the typed admin data layer.
+Current: `T166` - add the admin overview aggregation API.
 
-Queued: `T166`-`T180`, in dependency order from admin overview aggregation API
-through analytics, key/request workflows, quality gates, and release integration.
+Queued: `T167`-`T180`, in dependency order from analytics overview screen
+through usage analytics, key/request workflows, quality gates, and release integration.
+
+T165 implemented the typed admin data layer:
+bounded typed HTTP transport with SameSite CSRF handling, generation barriers for
+superseded queries and logout cache purges, concurrency-bounded request scheduling
+(max 4 concurrent reads, 1 concurrent mutation), safe idempotent GET retry policy
+(never retrying mutations or offline states), TanStack Query configuration with
+cache clearing on auth transitions, feature-owned runtime response validation and
+fixtures for Keys, Requests, and System APIs, robust telemetry formatters for
+durations, costs, tokens, and bytes, and cursor pagination helpers that exclude
+opaque cursors and credentials from browser history and shareable URLs.
 
 T164 implemented secure browser session management and the operator login flow.
 The gateway issues cryptographically random, bounded, in-memory sessions with

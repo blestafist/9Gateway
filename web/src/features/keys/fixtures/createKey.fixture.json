@@ -1,0 +1,10 @@
+{
+  "id": "key-0191eb0b62bc7b7489a2434685ef3b65",
+  "name": "New Service Key",
+  "prefix": "sk-5ca93214",
+  "enabled": true,
+  "expires_at": "2030-01-01T00:00:00Z",
+  "created_at": "2026-09-17T12:00:00Z",
+  "key": "sk-5ca932147ff0114e9870abcd1234efgh",
+  "policy": {}
+}

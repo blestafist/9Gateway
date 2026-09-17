@@ -1,0 +1,35 @@
+{
+  "keys": [
+    {
+      "id": "key-0191eb0b62bc7b7489a2434685ef3b63",
+      "name": "Production Bot Key",
+      "display_prefix": "sk-c47a98b1",
+      "enabled": true,
+      "created_at": "2026-09-01T12:00:00Z",
+      "updated_at": "2026-09-01T12:00:00Z",
+      "expires_at": "2030-01-01T00:00:00Z",
+      "policy_summary": {
+        "allow_models": true,
+        "deny_models": false,
+        "log_request_body": true,
+        "log_response_body": false
+      }
+    },
+    {
+      "id": "key-0191eb0b62bc7b7489a2434685ef3b64",
+      "name": "Dev Playground Key",
+      "display_prefix": "sk-b16f39e8",
+      "enabled": false,
+      "created_at": "2026-09-10T08:30:00Z",
+      "updated_at": "2026-09-15T09:00:00Z",
+      "expires_at": null,
+      "policy_summary": {
+        "allow_models": false,
+        "deny_models": false,
+        "log_request_body": false,
+        "log_response_body": false
+      }
+    }
+  ],
+  "next_cursor": "eyJpZCI6ImtleS0wMTkxZWIwYjYyYmM3Yjc0ODlhMjQzNDY4NWVmM2I2NCJ9"
+}

@@ -1,0 +1,8 @@
+{
+  "request_id": "0191eb0b62bc7b7489a2434685ef3b600191eb0b62bc7b7489a2434685ef3b60",
+  "kind": "client_request",
+  "original_size": 256,
+  "truncated": false,
+  "content_type": "application/json",
+  "data": "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+}

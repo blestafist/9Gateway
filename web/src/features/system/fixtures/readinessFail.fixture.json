@@ -1,0 +1,29 @@
+{
+  "ready": false,
+  "checks": {
+    "database": {
+      "name": "database",
+      "status": "fail",
+      "message": "readiness database message"
+    },
+    "schema": {
+      "name": "schema",
+      "status": "pass"
+    },
+    "usage_worker": {
+      "name": "usage_worker",
+      "status": "pass"
+    },
+    "upstream_url": {
+      "name": "upstream_url",
+      "status": "pass"
+    },
+    "lifecycle": {
+      "name": "lifecycle",
+      "status": "fail",
+      "message": "gateway is draining"
+    }
+  },
+  "version": "v0.1.0-rc1",
+  "commit": "abcdef123456"
+}

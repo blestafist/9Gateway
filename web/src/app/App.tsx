@@ -1,6 +1,7 @@
 import React from "react";
 import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "../shared/theme";
+import { AdminQueryProvider } from "../shared/query";
 import { AuthProvider } from "../features/auth";
 import { AppRoutes } from "./AppRoutes";
 
@@ -21,11 +22,13 @@ export const App: React.FC<AppProps> = ({ initialEntries, initialAuthState }) =>
   if (initialEntries && initialEntries.length > 0) {
     return (
       <ThemeProvider>
-        <MemoryRouter initialEntries={initialEntries} basename="/ui">
-          <AuthProvider initialAuthState={initialAuthState}>
-            <AppRoutes />
-          </AuthProvider>
-        </MemoryRouter>
+        <AdminQueryProvider>
+          <MemoryRouter initialEntries={initialEntries} basename="/ui">
+            <AuthProvider initialAuthState={initialAuthState}>
+              <AppRoutes />
+            </AuthProvider>
+          </MemoryRouter>
+        </AdminQueryProvider>
       </ThemeProvider>
     );
   }
@@ -33,22 +36,26 @@ export const App: React.FC<AppProps> = ({ initialEntries, initialAuthState }) =>
   if (isTestOrNonUiPath) {
     return (
       <ThemeProvider>
-        <MemoryRouter initialEntries={["/ui/overview"]} basename="/ui">
-          <AuthProvider initialAuthState={initialAuthState}>
-            <AppRoutes />
-          </AuthProvider>
-        </MemoryRouter>
+        <AdminQueryProvider>
+          <MemoryRouter initialEntries={["/ui/overview"]} basename="/ui">
+            <AuthProvider initialAuthState={initialAuthState}>
+              <AppRoutes />
+            </AuthProvider>
+          </MemoryRouter>
+        </AdminQueryProvider>
       </ThemeProvider>
     );
   }
 
   return (
     <ThemeProvider>
-      <BrowserRouter basename="/ui">
-        <AuthProvider initialAuthState={initialAuthState}>
-          <AppRoutes />
-        </AuthProvider>
-      </BrowserRouter>
+      <AdminQueryProvider>
+        <BrowserRouter basename="/ui">
+          <AuthProvider initialAuthState={initialAuthState}>
+            <AppRoutes />
+          </AuthProvider>
+        </BrowserRouter>
+      </AdminQueryProvider>
     </ThemeProvider>
   );
 };
