@@ -326,10 +326,13 @@ func route(proxy http.Handler) http.Handler {
 	// exercise proxy behavior without constructing gateway credentials. Exported
 	// constructors never use it; public constructors always pass an
 	// authenticator (or fail closed when one is absent).
+	ui := newUIHandler(nil)
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/health":
 			health(response, request)
+		case request.URL.Path == "/ui" || strings.HasPrefix(request.URL.Path, "/ui/"):
+			ui.ServeHTTP(response, request)
 		case strings.HasPrefix(request.URL.Path, "/v1/"):
 			proxy.ServeHTTP(response, request)
 		default:
@@ -348,12 +351,15 @@ func routeWithAdmin(proxy http.Handler, admin http.Handler, authenticators ...*a
 
 func routeWithAuthenticator(proxy http.Handler, admin http.Handler, authenticator *auth.Authenticator) http.Handler {
 	publicV1 := withGatewayAuthentication(authenticator, proxy)
+	ui := newUIHandler(nil)
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/health":
 			health(response, request)
 		case admin != nil && strings.HasPrefix(request.URL.Path, "/admin/"):
 			admin.ServeHTTP(response, request)
+		case request.URL.Path == "/ui" || strings.HasPrefix(request.URL.Path, "/ui/"):
+			ui.ServeHTTP(response, request)
 		case strings.HasPrefix(request.URL.Path, "/v1/"):
 			publicV1.ServeHTTP(response, request)
 		default:

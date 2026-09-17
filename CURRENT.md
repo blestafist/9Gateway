@@ -2,11 +2,11 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T160`.
+Done: `T001`-`T161`.
 
-Current: `T161` - scaffold the embedded Web UI build.
+Current: `T162` - establish the visual system and component primitives.
 
-Queued: `T162`-`T180`, in dependency order from visual foundation and secure
+Queued: `T163`-`T180`, in dependency order from visual foundation and secure
 browser access through analytics, key/request workflows, quality gates, and
 release integration.
 
