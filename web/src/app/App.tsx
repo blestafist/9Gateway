@@ -1,65 +1,42 @@
-import React, { Suspense, lazy } from "react";
-import { SmokeStatus } from "../features/smoke";
+import React from "react";
+import { BrowserRouter, MemoryRouter } from "react-router-dom";
+import { ThemeProvider } from "../shared/theme";
+import { AppRoutes } from "./AppRoutes";
 
-// Lazily load ComponentCatalog only in development
-const ComponentCatalog = import.meta.env.DEV
-  ? lazy(() => import("../features/component-catalog"))
-  : null;
+export interface AppProps {
+  initialEntries?: string[];
+}
 
-export const App: React.FC = () => {
-  const isDev = Boolean(import.meta.env.DEV);
-  const pathname = typeof window !== "undefined" ? window.location.pathname : "";
-  const hash = typeof window !== "undefined" ? window.location.hash : "";
-  const search = typeof window !== "undefined" ? window.location.search : "";
+export const App: React.FC<AppProps> = ({ initialEntries }) => {
+  const isTestOrNonUiPath =
+    typeof window !== "undefined" && !window.location.pathname.startsWith("/ui");
 
-  const isCatalogRoute =
-    isDev &&
-    (pathname === "/ui/components" ||
-      pathname.endsWith("/ui/components") ||
-      hash === "#/ui/components" ||
-      search.includes("view=components"));
-
-  if (isCatalogRoute && ComponentCatalog) {
+  if (initialEntries && initialEntries.length > 0) {
     return (
-      <Suspense
-        fallback={
-          <div style={{ padding: "2rem", color: "var(--text-secondary)" }}>
-            Loading component catalog...
-          </div>
-        }
-      >
-        <ComponentCatalog />
-      </Suspense>
+      <ThemeProvider>
+        <MemoryRouter initialEntries={initialEntries} basename="/ui">
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>
+    );
+  }
+
+  if (isTestOrNonUiPath) {
+    return (
+      <ThemeProvider>
+        <MemoryRouter initialEntries={["/ui/overview"]} basename="/ui">
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>
     );
   }
 
   return (
-    <main
-      style={{
-        fontFamily: "var(--font-sans, system-ui, sans-serif)",
-        padding: "2rem",
-        maxWidth: "600px",
-        margin: "0 auto",
-      }}
-    >
-      <h1>9Gateway</h1>
-      <p>Embedded Web UI console smoke page.</p>
-      <SmokeStatus status="operational" />
-      {isDev && (
-        <div style={{ marginTop: "1.5rem" }}>
-          <a
-            href="/ui/components"
-            style={{
-              color: "var(--accent-primary, #f06a4b)",
-              textDecoration: "underline",
-              fontSize: "0.875rem",
-            }}
-          >
-            Open Development Component Catalog (/ui/components)
-          </a>
-        </div>
-      )}
-    </main>
+    <ThemeProvider>
+      <BrowserRouter basename="/ui">
+        <AppRoutes />
+      </BrowserRouter>
+    </ThemeProvider>
   );
 };
 

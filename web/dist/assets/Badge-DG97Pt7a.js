@@ -1,0 +1,1 @@
+import{j as a}from"./index-r2_fCMZz.js";const l=({variant:s="default",size:e="md",dot:d=!1,children:n,className:t="",...o})=>{const r=["gw-badge",`gw-badge--${s}`,`gw-badge--${e}`,t].filter(Boolean).join(" ");return a.jsxs("span",{className:r,...o,children:[d&&a.jsx("span",{className:"gw-badge-dot","aria-hidden":"true"}),a.jsx("span",{children:n})]})};export{l as B};

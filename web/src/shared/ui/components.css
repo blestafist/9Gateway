@@ -813,6 +813,15 @@
   animation: gw-slide-left var(--transition-normal);
 }
 
+.gw-drawer--left {
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  max-width: 320px;
+  animation: gw-slide-right var(--transition-normal);
+}
+
 .gw-drawer--bottom {
   left: 0;
   right: 0;
@@ -834,6 +843,11 @@
 
 @keyframes gw-slide-left {
   from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes gw-slide-right {
+  from { transform: translateX(-100%); }
   to { transform: translateX(0); }
 }
 

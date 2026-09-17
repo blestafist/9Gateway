@@ -2,12 +2,25 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T162`.
+Done: `T001`-`T163`.
 
-Current: `T163` - build the responsive application shell.
+Current: `T164` - add secure browser sessions and the login flow.
 
-Queued: `T164`-`T180`, in dependency order from secure browser access through
+Queued: `T165`-`T180`, in dependency order from typed admin data layer through
 analytics, key/request workflows, quality gates, and release integration.
+
+T163 built the responsive operations console shell and routing below `/ui/`
+using React Router with lazy feature entries for Overview, Usage, API Keys,
+Requests, System, Login, and Not Found. Navigation is strictly limited to
+9Gateway operations (Overview, Usage, API Keys, Requests, System), excluding
+unsupported 9router provider/routing features. Shell features desktop sidebar,
+compact collapsed mode with tooltips, mobile navigation drawer with Escape/focus
+handling, page header, breadcrumbs, `aria-current="page"` semantics, skip link
+targeting `#main-content`, and reserved connection/version indicators.
+Only theme and sidebar collapsed preference are stored in localStorage; no
+credentials or secret telemetry are persisted. Per-route loading skeletons and
+error boundaries preserve shell stability during lazy chunk arrival or failure,
+and the development component catalog remains tree-shaken from production builds.
 
 T162 established the operations-console visual design system and composable UI
 primitives in `web/src/shared/ui` and `docs/ui/design-system.md`. The visual
