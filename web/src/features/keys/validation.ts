@@ -16,11 +16,23 @@ export function validateKeyPolicySummary(raw: unknown): KeyPolicySummary {
   if (!isObject(raw)) {
     throw new ValidationError("Key policy summary must be an object");
   }
+  if (typeof raw.allow_models !== "boolean") {
+    throw new ValidationError("Key policy summary allow_models must be a boolean");
+  }
+  if (typeof raw.deny_models !== "boolean") {
+    throw new ValidationError("Key policy summary deny_models must be a boolean");
+  }
+  if (typeof raw.log_request_body !== "boolean") {
+    throw new ValidationError("Key policy summary log_request_body must be a boolean");
+  }
+  if (typeof raw.log_response_body !== "boolean") {
+    throw new ValidationError("Key policy summary log_response_body must be a boolean");
+  }
   return {
-    allow_models: Boolean(raw.allow_models),
-    deny_models: Boolean(raw.deny_models),
-    log_request_body: Boolean(raw.log_request_body),
-    log_response_body: Boolean(raw.log_response_body),
+    allow_models: raw.allow_models,
+    deny_models: raw.deny_models,
+    log_request_body: raw.log_request_body,
+    log_response_body: raw.log_response_body,
   };
 }
 
@@ -53,10 +65,9 @@ export function validateKeyListItem(raw: unknown): AdminKeyListItem {
     throw new ValidationError("Key updated_at must be a string");
   }
 
-  const expires_at =
-    raw.expires_at === null || typeof raw.expires_at === "string"
-      ? raw.expires_at
-      : null;
+  if (raw.expires_at !== null && raw.expires_at !== undefined && typeof raw.expires_at !== "string") {
+    throw new ValidationError("Key expires_at must be a string, null, or undefined");
+  }
 
   return {
     id: raw.id,
@@ -65,7 +76,7 @@ export function validateKeyListItem(raw: unknown): AdminKeyListItem {
     enabled: raw.enabled,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
-    expires_at,
+    expires_at: typeof raw.expires_at === "string" ? raw.expires_at : null,
     policy_summary: validateKeyPolicySummary(raw.policy_summary),
   };
 }
@@ -80,12 +91,14 @@ export function validateKeyListResponse(raw: unknown): AdminKeyListResponse {
   }
 
   const keys = raw.keys.map((k) => validateKeyListItem(k));
-  const next_cursor =
-    typeof raw.next_cursor === "string" ? raw.next_cursor : undefined;
+
+  if (raw.next_cursor !== undefined && raw.next_cursor !== null && typeof raw.next_cursor !== "string") {
+    throw new ValidationError("Key list next_cursor must be a string or undefined");
+  }
 
   return {
     keys,
-    next_cursor,
+    next_cursor: typeof raw.next_cursor === "string" ? raw.next_cursor : undefined,
   };
 }
 
@@ -94,32 +107,98 @@ export function validateKeyPolicy(raw: unknown): AdminKeyPolicy {
     throw new ValidationError("Key policy must be an object");
   }
 
+  if (raw.allowed_models !== undefined) {
+    if (!Array.isArray(raw.allowed_models) || !raw.allowed_models.every((m) => typeof m === "string")) {
+      throw new ValidationError("Key policy allowed_models must be an array of strings");
+    }
+  }
+
+  if (raw.denied_models !== undefined) {
+    if (!Array.isArray(raw.denied_models) || !raw.denied_models.every((m) => typeof m === "string")) {
+      throw new ValidationError("Key policy denied_models must be an array of strings");
+    }
+  }
+
+  if (raw.request_windows !== undefined) {
+    if (!Array.isArray(raw.request_windows)) {
+      throw new ValidationError("Key policy request_windows must be an array");
+    }
+    for (const w of raw.request_windows) {
+      if (!isObject(w)) {
+        throw new ValidationError("Key policy request_windows item must be an object");
+      }
+      if (typeof w.amount !== "number" || Number.isNaN(w.amount)) {
+        throw new ValidationError("Key policy request_windows amount must be a number");
+      }
+      if (typeof w.duration !== "number" || Number.isNaN(w.duration)) {
+        throw new ValidationError("Key policy request_windows duration must be a number");
+      }
+    }
+  }
+
+  if (raw.token_windows !== undefined) {
+    if (!Array.isArray(raw.token_windows)) {
+      throw new ValidationError("Key policy token_windows must be an array");
+    }
+    for (const w of raw.token_windows) {
+      if (!isObject(w)) {
+        throw new ValidationError("Key policy token_windows item must be an object");
+      }
+      if (typeof w.amount !== "number" || Number.isNaN(w.amount)) {
+        throw new ValidationError("Key policy token_windows amount must be a number");
+      }
+      if (typeof w.duration !== "number" || Number.isNaN(w.duration)) {
+        throw new ValidationError("Key policy token_windows duration must be a number");
+      }
+    }
+  }
+
+  if (raw.token_mode !== undefined && typeof raw.token_mode !== "string") {
+    throw new ValidationError("Key policy token_mode must be a string");
+  }
+
+  if (
+    raw.max_concurrent_requests !== undefined &&
+    (typeof raw.max_concurrent_requests !== "number" || Number.isNaN(raw.max_concurrent_requests))
+  ) {
+    throw new ValidationError("Key policy max_concurrent_requests must be a number");
+  }
+
+  if (raw.budget_limits !== undefined) {
+    if (!Array.isArray(raw.budget_limits)) {
+      throw new ValidationError("Key policy budget_limits must be an array");
+    }
+    for (const b of raw.budget_limits) {
+      if (!isObject(b)) {
+        throw new ValidationError("Key policy budget_limits item must be an object");
+      }
+      if (typeof b.period !== "string") {
+        throw new ValidationError("Key policy budget_limits period must be a string");
+      }
+      if (typeof b.amount_micros !== "number" || Number.isNaN(b.amount_micros)) {
+        throw new ValidationError("Key policy budget_limits amount_micros must be a number");
+      }
+    }
+  }
+
+  if (typeof raw.log_request_body !== "boolean") {
+    throw new ValidationError("Key policy log_request_body must be a boolean");
+  }
+
+  if (typeof raw.log_response_body !== "boolean") {
+    throw new ValidationError("Key policy log_response_body must be a boolean");
+  }
+
   return {
-    allowed_models: Array.isArray(raw.allowed_models)
-      ? raw.allowed_models.filter((m): m is string => typeof m === "string")
-      : [],
-    denied_models: Array.isArray(raw.denied_models)
-      ? raw.denied_models.filter((m): m is string => typeof m === "string")
-      : [],
-    request_windows: Array.isArray(raw.request_windows)
-      ? raw.request_windows
-          .filter(isObject)
-          .map((w) => ({ amount: Number(w.amount) || 0, duration: Number(w.duration) || 0 }))
-      : [],
-    token_windows: Array.isArray(raw.token_windows)
-      ? raw.token_windows
-          .filter(isObject)
-          .map((w) => ({ amount: Number(w.amount) || 0, duration: Number(w.duration) || 0 }))
-      : [],
+    allowed_models: (raw.allowed_models as string[]) || [],
+    denied_models: (raw.denied_models as string[]) || [],
+    request_windows: (raw.request_windows as { amount: number; duration: number }[]) || [],
+    token_windows: (raw.token_windows as { amount: number; duration: number }[]) || [],
     token_mode: typeof raw.token_mode === "string" ? raw.token_mode : "total",
-    max_concurrent_requests: Number(raw.max_concurrent_requests) || 0,
-    budget_limits: Array.isArray(raw.budget_limits)
-      ? raw.budget_limits
-          .filter(isObject)
-          .map((b) => ({ period: String(b.period || ""), amount_micros: Number(b.amount_micros) || 0 }))
-      : [],
-    log_request_body: Boolean(raw.log_request_body),
-    log_response_body: Boolean(raw.log_response_body),
+    max_concurrent_requests: typeof raw.max_concurrent_requests === "number" ? raw.max_concurrent_requests : 0,
+    budget_limits: (raw.budget_limits as { period: string; amount_micros: number }[]) || [],
+    log_request_body: raw.log_request_body,
+    log_response_body: raw.log_response_body,
   };
 }
 
@@ -132,13 +211,41 @@ export function validateKeyDetail(raw: unknown): AdminKeyDetail {
     throw new ValidationError("Key id must be a non-empty string");
   }
 
+  if (typeof raw.name !== "string") {
+    throw new ValidationError("Key name must be a string");
+  }
+
+  if (typeof raw.display_prefix !== "string") {
+    throw new ValidationError("Key display_prefix must be a string");
+  }
+
+  if (typeof raw.enabled !== "boolean") {
+    throw new ValidationError("Key enabled must be a boolean");
+  }
+
+  if (typeof raw.created_at !== "string") {
+    throw new ValidationError("Key created_at must be a string");
+  }
+
+  if (typeof raw.updated_at !== "string") {
+    throw new ValidationError("Key updated_at must be a string");
+  }
+
+  if (raw.expires_at !== null && raw.expires_at !== undefined && typeof raw.expires_at !== "string") {
+    throw new ValidationError("Key expires_at must be a string, null, or undefined");
+  }
+
+  if (!isObject(raw.policy)) {
+    throw new ValidationError("Key policy must be an object");
+  }
+
   return {
     id: raw.id,
-    name: typeof raw.name === "string" ? raw.name : "",
-    display_prefix: typeof raw.display_prefix === "string" ? raw.display_prefix : "",
-    enabled: Boolean(raw.enabled),
-    created_at: typeof raw.created_at === "string" ? raw.created_at : "",
-    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : "",
+    name: raw.name,
+    display_prefix: raw.display_prefix,
+    enabled: raw.enabled,
+    created_at: raw.created_at,
+    updated_at: raw.updated_at,
     expires_at: typeof raw.expires_at === "string" ? raw.expires_at : null,
     policy: validateKeyPolicy(raw.policy),
   };
@@ -149,18 +256,46 @@ export function validateCreateKeyResponse(raw: unknown): CreateAdminKeyResponse 
     throw new ValidationError("Create key response must be an object");
   }
 
-  if (typeof raw.id !== "string" || typeof raw.key !== "string") {
-    throw new ValidationError("Create key response missing id or raw key");
+  if (typeof raw.id !== "string" || !raw.id) {
+    throw new ValidationError("Create key response missing or empty id");
+  }
+
+  if (typeof raw.key !== "string" || !raw.key) {
+    throw new ValidationError("Create key response missing or empty key");
+  }
+
+  if (typeof raw.name !== "string") {
+    throw new ValidationError("Create key response name must be a string");
+  }
+
+  if (typeof raw.prefix !== "string") {
+    throw new ValidationError("Create key response prefix must be a string");
+  }
+
+  if (typeof raw.enabled !== "boolean") {
+    throw new ValidationError("Create key response enabled must be a boolean");
+  }
+
+  if (typeof raw.created_at !== "string") {
+    throw new ValidationError("Create key response created_at must be a string");
+  }
+
+  if (raw.expires_at !== undefined && raw.expires_at !== null && typeof raw.expires_at !== "string") {
+    throw new ValidationError("Create key response expires_at must be a string or undefined");
+  }
+
+  if (!isObject(raw.policy)) {
+    throw new ValidationError("Create key response policy must be an object");
   }
 
   return {
     id: raw.id,
-    name: typeof raw.name === "string" ? raw.name : "",
-    prefix: typeof raw.prefix === "string" ? raw.prefix : "",
-    enabled: Boolean(raw.enabled),
+    name: raw.name,
+    prefix: raw.prefix,
+    enabled: raw.enabled,
     expires_at: typeof raw.expires_at === "string" ? raw.expires_at : undefined,
-    created_at: typeof raw.created_at === "string" ? raw.created_at : "",
+    created_at: raw.created_at,
     key: raw.key,
-    policy: isObject(raw.policy) ? raw.policy : {},
+    policy: raw.policy,
   };
 }

@@ -10,9 +10,21 @@ export function validateReadinessCheck(name: string, raw: unknown): ReadinessChe
     throw new ValidationError(`Readiness check ${name} must be an object`);
   }
 
+  if (typeof raw.name !== "string") {
+    throw new ValidationError(`Readiness check ${name} name must be a string`);
+  }
+
+  if (typeof raw.status !== "string") {
+    throw new ValidationError(`Readiness check ${name} status must be a string`);
+  }
+
+  if (raw.message !== undefined && raw.message !== null && typeof raw.message !== "string") {
+    throw new ValidationError(`Readiness check ${name} message must be a string or undefined`);
+  }
+
   return {
-    name: typeof raw.name === "string" ? raw.name : name,
-    status: typeof raw.status === "string" ? raw.status : "fail",
+    name: raw.name,
+    status: raw.status as ReadinessCheck["status"],
     message: typeof raw.message === "string" ? raw.message : undefined,
   };
 }
@@ -26,17 +38,27 @@ export function validateReadinessResponse(raw: unknown): ReadinessResponse {
     throw new ValidationError("Readiness response ready field must be a boolean");
   }
 
+  if (!isObject(raw.checks)) {
+    throw new ValidationError("Readiness response checks must be an object");
+  }
+
   const checks: Record<string, ReadinessCheck> = {};
-  if (isObject(raw.checks)) {
-    for (const [key, value] of Object.entries(raw.checks)) {
-      checks[key] = validateReadinessCheck(key, value);
-    }
+  for (const [key, value] of Object.entries(raw.checks)) {
+    checks[key] = validateReadinessCheck(key, value);
+  }
+
+  if (typeof raw.version !== "string") {
+    throw new ValidationError("Readiness response version must be a string");
+  }
+
+  if (typeof raw.commit !== "string") {
+    throw new ValidationError("Readiness response commit must be a string");
   }
 
   return {
     ready: raw.ready,
     checks,
-    version: typeof raw.version === "string" ? raw.version : "",
-    commit: typeof raw.commit === "string" ? raw.commit : "",
+    version: raw.version,
+    commit: raw.commit,
   };
 }

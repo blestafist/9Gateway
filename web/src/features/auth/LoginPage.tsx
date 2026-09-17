@@ -36,9 +36,9 @@ export const LoginPage: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const secret = credential.trim();
-    if (!secret || isSubmitting) return;
+    if (!credential.trim() || isSubmitting) return;
 
+    const secret = credential;
     // Clear credential in local component state immediately
     setCredential("");
     setError(null);

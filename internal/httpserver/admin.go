@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -168,14 +169,14 @@ type createdAdminKey struct {
 }
 
 type updatedAdminKey struct {
-	ID        string
-	Name      string
-	Prefix    string
-	Enabled   bool
-	ExpiresAt *time.Time
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Policy    json.RawMessage
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Prefix    string          `json:"display_prefix"`
+	Enabled   bool            `json:"enabled"`
+	ExpiresAt *time.Time      `json:"expires_at,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+	Policy    json.RawMessage `json:"policy"`
 }
 
 type adminKeyListItem struct {
@@ -989,6 +990,24 @@ type adminHandler struct {
 	sessionInitOnce sync.Once
 }
 
+func newAdminHandler(credential string, service *adminKeyService) (*adminHandler, error) {
+	var trustedProxies []*net.IPNet
+	if env := os.Getenv("GATEWAY_TRUSTED_PROXIES"); env != "" {
+		proxies, err := session.ParseTrustedProxies(strings.Split(env, ","))
+		if err != nil {
+			return nil, fmt.Errorf("invalid GATEWAY_TRUSTED_PROXIES: %w", err)
+		}
+		trustedProxies = proxies
+	}
+	return &adminHandler{
+		credential:     credential,
+		service:        service,
+		sessionStore:   session.NewStore(session.StoreOptions{}),
+		rateLimiter:    session.NewLoginRateLimiter(session.RateLimiterOptions{}),
+		trustedProxies: trustedProxies,
+	}, nil
+}
+
 var (
 	errDuplicateSessionCookie = errors.New("duplicate session cookie")
 	errDuplicateCSRFToken     = errors.New("duplicate csrf token")
@@ -1035,19 +1054,11 @@ func (handler *adminHandler) initSessions() {
 		if handler.rateLimiter == nil {
 			handler.rateLimiter = session.NewLoginRateLimiter(session.RateLimiterOptions{})
 		}
-		if handler.trustedProxies == nil {
-			if env := os.Getenv("GATEWAY_TRUSTED_PROXIES"); env != "" {
-				proxies, err := session.ParseTrustedProxies(strings.Split(env, ","))
-				if err == nil {
-					handler.trustedProxies = proxies
-				}
-			}
-		}
 	})
 }
 
 func setSecurityHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")

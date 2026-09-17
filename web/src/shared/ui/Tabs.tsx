@@ -27,6 +27,7 @@ export const Tabs: React.FC<TabsProps> = ({
   const baseId = useId();
   const tabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
+  const hasAnyContent = items.some((item) => item.content !== undefined && item.content !== null);
   const enabledItems = items.filter((item) => !item.disabled);
 
   const handleKeyDown = (e: React.KeyboardEvent, currentId: string) => {
@@ -63,7 +64,7 @@ export const Tabs: React.FC<TabsProps> = ({
   return (
     <div className={`gw-tabs-container ${className}`}>
       <div
-        role="tablist"
+        role={hasAnyContent ? "tablist" : "group"}
         aria-label={ariaLabel}
         className={`gw-tablist gw-tablist--${variant}`}
       >
@@ -79,11 +80,12 @@ export const Tabs: React.FC<TabsProps> = ({
                 if (el) tabRefs.current.set(item.id, el);
                 else tabRefs.current.delete(item.id);
               }}
-              id={tabId}
-              role="tab"
+              id={hasAnyContent ? tabId : undefined}
+              role={hasAnyContent ? "tab" : undefined}
               type="button"
-              aria-selected={isSelected}
-              aria-controls={panelId}
+              aria-selected={hasAnyContent ? isSelected : undefined}
+              aria-pressed={!hasAnyContent ? isSelected : undefined}
+              aria-controls={hasAnyContent && item.content && isSelected ? panelId : undefined}
               tabIndex={isSelected ? 0 : -1}
               disabled={item.disabled}
               className="gw-tab"
@@ -96,7 +98,7 @@ export const Tabs: React.FC<TabsProps> = ({
         })}
       </div>
 
-      {activeItem && activeItem.content && (
+      {hasAnyContent && activeItem && activeItem.content && (
         <div
           id={`${baseId}-panel-${activeItem.id}`}
           role="tabpanel"

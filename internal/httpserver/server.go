@@ -227,7 +227,10 @@ func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 			}
 		}
 	}
-	admin := &adminHandler{credential: adminCredential, service: service}
+	admin, err := newAdminHandler(adminCredential, service)
+	if err != nil {
+		return nil, err
+	}
 	router := routeWithAdmin(proxy, admin, service.auth)
 	handler := newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, usageWorker, router)
 	// The concrete storage repository supplies the database used by readiness.

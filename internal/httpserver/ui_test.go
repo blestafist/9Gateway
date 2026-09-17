@@ -285,6 +285,31 @@ func TestUIRoutes_EmbeddedFS_EndToEnd(t *testing.T) {
 		if !strings.Contains(body, "/ui/assets/") {
 			t.Fatalf("expected body to reference /ui/assets/, got %q", body)
 		}
+		if !strings.Contains(body, `<script src="/ui/theme-init.js"></script>`) {
+			t.Fatalf("expected body to reference /ui/theme-init.js, got %q", body)
+		}
+	})
+
+	t.Run("GET /ui/theme-init.js serves external theme bootstrap script with strict CSP", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/ui/theme-init.js", nil)
+		handler.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", recorder.Code)
+		}
+		ct := recorder.Header().Get("Content-Type")
+		if !strings.Contains(ct, "text/javascript") {
+			t.Fatalf("expected Content-Type text/javascript, got %q", ct)
+		}
+		csp := recorder.Header().Get("Content-Security-Policy")
+		if !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+			t.Fatalf("expected CSP with script-src 'self' without unsafe-inline, got %q", csp)
+		}
+		body := recorder.Body.String()
+		if !strings.Contains(body, "9gateway_theme") {
+			t.Fatalf("expected body to contain '9gateway_theme', got %q", body)
+		}
 	})
 
 	t.Run("GET /ui/example fallback serves real embedded index.html", func(t *testing.T) {

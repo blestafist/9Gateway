@@ -77,8 +77,8 @@ describe("T163 Shell & Navigation", () => {
       expect(document.title).toBe("Usage & Analytics | 9Gateway");
     });
 
-    expect(screen.getByRole("tab", { name: "24h" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Tokens" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "24h" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Tokens" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("navigates directly to /ui/keys and renders API Keys placeholder", async () => {
@@ -259,6 +259,33 @@ describe("T163 Layout & Responsive Structural Verifications", () => {
       const { unmount } = render(<App initialEntries={["/ui/overview"]} initialAuthState={{ isAuthenticated: true }} />);
       expect(screen.getByTestId("app-shell")).toBeInTheDocument();
       expect(screen.getByTestId("page-header")).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("supports narrow viewports (320px, 375px) on usage page with reachable range controls", async () => {
+    const narrowViewports = [320, 375];
+    for (const width of narrowViewports) {
+      window.innerWidth = width;
+      fireEvent(window, new Event("resize"));
+      const { unmount } = render(
+        <App initialEntries={["/ui/usage"]} initialAuthState={{ isAuthenticated: true }} />
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("usage-page")).toBeInTheDocument();
+      });
+
+      const rangeGroup = screen.getByRole("group", { name: "Time range" });
+      expect(rangeGroup).toBeInTheDocument();
+      expect(rangeGroup).toHaveClass("gw-tablist");
+
+      // Verify all range options exist and are reachable inside the labeled range group
+      const expectedRanges = ["Today", "24h", "7d", "30d", "90d", "All retained"];
+      for (const rangeLabel of expectedRanges) {
+        expect(screen.getByRole("button", { name: rangeLabel })).toBeInTheDocument();
+      }
+
       unmount();
     }
   });

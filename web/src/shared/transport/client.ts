@@ -44,9 +44,31 @@ function isTransientStatus(status: number): boolean {
   return status === 502 || status === 503 || status === 504;
 }
 
-function sleepWithJitter(baseMs = 100, jitterMs = 150): Promise<void> {
-  const duration = baseMs + Math.floor(Math.random() * jitterMs);
-  return new Promise((resolve) => setTimeout(resolve, duration));
+function sleepWithJitter(
+  baseMs = 100,
+  jitterMs = 150,
+  signal?: AbortSignal
+): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason || new Error("Request aborted"));
+  }
+
+  const duration = baseMs + (jitterMs > 0 ? Math.floor(Math.random() * jitterMs) : 0);
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason || new Error("Request aborted"));
+    };
+
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, duration);
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function readBoundedStream(
@@ -168,10 +190,20 @@ async function executeWithRetry<T>(
         }
 
         if (!isMutation && attempt < maxAttempts && isTransientStatus(response.status)) {
+          try {
+            await response.body?.cancel();
+          } catch {
+            // Ignore cancellation error on retry
+          }
+
           if (typeof navigator !== "undefined" && navigator.onLine === false) {
             throw new OfflineError();
           }
-          await sleepWithJitter(options.retryDelayMs ?? 100, options.retryDelayMs !== undefined ? 0 : 150);
+          await sleepWithJitter(
+            options.retryDelayMs ?? 100,
+            options.retryDelayMs !== undefined ? 0 : 150,
+            options.signal
+          );
           continue;
         }
 
@@ -237,7 +269,11 @@ async function executeWithRetry<T>(
       }
 
       if (!isMutation && attempt < maxAttempts) {
-        await sleepWithJitter(options.retryDelayMs ?? 100, options.retryDelayMs !== undefined ? 0 : 150);
+        await sleepWithJitter(
+          options.retryDelayMs ?? 100,
+          options.retryDelayMs !== undefined ? 0 : 150,
+          options.signal
+        );
         continue;
       }
 

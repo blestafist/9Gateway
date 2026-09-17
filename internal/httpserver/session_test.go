@@ -47,9 +47,9 @@ func newTestAdminHandler(t *testing.T, credential string, opts ...func(*adminHan
 	if err != nil {
 		t.Fatalf("newAdminKeyService failed: %v", err)
 	}
-	handler := &adminHandler{
-		credential: credential,
-		service:    service,
+	handler, err := newAdminHandler(credential, service)
+	if err != nil {
+		t.Fatalf("newAdminHandler failed: %v", err)
 	}
 	for _, opt := range opts {
 		opt(handler)
@@ -542,6 +542,12 @@ func TestSecurityHeaders(t *testing.T) {
 	if !strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Errorf("CSP missing frame-ancestors 'none': %s", csp)
 	}
+	if !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Errorf("CSP script-src should be 'self' without unsafe-inline: %s", csp)
+	}
+	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline'") {
+		t.Errorf("CSP style-src missing unsafe-inline: %s", csp)
+	}
 	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Errorf("missing X-Content-Type-Options: nosniff")
 	}
@@ -561,6 +567,12 @@ func TestSecurityHeaders(t *testing.T) {
 	uiCSP := uiRec.Header().Get("Content-Security-Policy")
 	if !strings.Contains(uiCSP, "frame-ancestors 'none'") {
 		t.Errorf("UI CSP missing frame-ancestors 'none'")
+	}
+	if !strings.Contains(uiCSP, "script-src 'self'") || strings.Contains(uiCSP, "script-src 'self' 'unsafe-inline'") {
+		t.Errorf("UI CSP script-src should be 'self' without unsafe-inline: %s", uiCSP)
+	}
+	if !strings.Contains(uiCSP, "style-src 'self' 'unsafe-inline'") {
+		t.Errorf("UI CSP style-src missing unsafe-inline: %s", uiCSP)
 	}
 	if uiRec.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Errorf("UI missing X-Content-Type-Options: nosniff")

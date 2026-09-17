@@ -45,6 +45,20 @@ describe("Button and IconButton", () => {
     render(<IconButton icon={<span>*</span>} aria-label="Settings" />);
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
   });
+
+  it("IconButton applies correct variant and size classes", () => {
+    const { rerender } = render(
+      <IconButton icon={<span>*</span>} aria-label="Settings" size="sm" variant="outline" />
+    );
+    const btn = screen.getByRole("button", { name: "Settings" });
+    expect(btn).toHaveClass("gw-icon-btn", "gw-icon-btn--sm", "gw-icon-btn--outline");
+
+    rerender(<IconButton icon={<span>*</span>} aria-label="Settings" size="md" variant="ghost" />);
+    expect(btn).toHaveClass("gw-icon-btn", "gw-icon-btn--md", "gw-icon-btn--ghost");
+
+    rerender(<IconButton icon={<span>*</span>} aria-label="Settings" size="lg" variant="primary" />);
+    expect(btn).toHaveClass("gw-icon-btn", "gw-icon-btn--lg", "gw-icon-btn--primary");
+  });
 });
 
 describe("Switch", () => {
@@ -142,6 +156,56 @@ describe("Tabs", () => {
     const tab4 = screen.getByRole("tab", { name: "Fourth Tab" });
     fireEvent.keyDown(tab4, { key: "Home" });
     expect(screen.getByRole("tab", { name: "First Tab" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("only sets aria-controls on active tab with content", () => {
+    render(<TabsConsumer />);
+    const activeTab = screen.getByRole("tab", { name: "First Tab" });
+    const inactiveTab = screen.getByRole("tab", { name: "Second Tab" });
+    const panel = screen.getByRole("tabpanel");
+
+    expect(activeTab).toHaveAttribute("aria-controls", panel.id);
+    expect(inactiveTab).not.toHaveAttribute("aria-controls");
+  });
+
+  it("renders role='group' with aria-pressed when all items lack content", () => {
+    const FilterTabsConsumer: React.FC = () => {
+      const [active, setActive] = useState("filter1");
+      return (
+        <Tabs
+          activeTab={active}
+          onChange={setActive}
+          aria-label="Filter group"
+          items={[
+            { id: "filter1", label: "Filter 1" },
+            { id: "filter2", label: "Filter 2" },
+            { id: "filter3", label: "Filter 3" },
+          ]}
+        />
+      );
+    };
+
+    render(<FilterTabsConsumer />);
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    const group = screen.getByRole("group", { name: "Filter group" });
+    expect(group).toBeInTheDocument();
+
+    const btn1 = screen.getByRole("button", { name: "Filter 1" });
+    const btn2 = screen.getByRole("button", { name: "Filter 2" });
+
+    expect(btn1).toHaveAttribute("aria-pressed", "true");
+    expect(btn1).not.toHaveAttribute("aria-selected");
+    expect(btn1).not.toHaveAttribute("aria-controls");
+
+    expect(btn2).toHaveAttribute("aria-pressed", "false");
+    expect(btn2).not.toHaveAttribute("aria-selected");
+    expect(btn2).not.toHaveAttribute("aria-controls");
+
+    // Keyboard cycling still works
+    btn1.focus();
+    fireEvent.keyDown(btn1, { key: "ArrowRight" });
+    expect(btn2).toHaveAttribute("aria-pressed", "true");
+    expect(btn1).toHaveAttribute("aria-pressed", "false");
   });
 });
 

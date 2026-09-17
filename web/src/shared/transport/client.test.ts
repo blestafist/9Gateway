@@ -368,6 +368,34 @@ describe("Admin Fetch Transport", () => {
       expect(callCount).toBe(1);
     });
 
+    it("cancels response body before retrying on transient status", async () => {
+      let callCount = 0;
+      const cancelSpy = vi.fn().mockResolvedValue(undefined);
+
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          const stream = new ReadableStream({
+            cancel: cancelSpy,
+          });
+          return new Response(stream, { status: 503 });
+        }
+        return new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const result = await adminFetch<{ success: boolean }>("/admin/v1/keys", {
+        method: "GET",
+        retryDelayMs: 1,
+      });
+
+      expect(callCount).toBe(2);
+      expect(cancelSpy).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+    });
+
     it("does not retry when navigator is offline", async () => {
       const originalNavigator = globalThis.navigator;
       Object.defineProperty(globalThis, "navigator", {
@@ -434,6 +462,64 @@ describe("Admin Fetch Transport", () => {
       ).rejects.toThrow();
 
       expect(cancelSpy).toHaveBeenCalled();
+    });
+
+    it("does not perform second fetch and releases limiter slot if aborted during retry backoff", async () => {
+      const limiter = new ConcurrencyLimiter(1, 1);
+      const controller = new AbortController();
+      let callCount = 0;
+
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        callCount++;
+        return new Response("Service Unavailable", { status: 503 });
+      });
+
+      const fetchPromise = adminFetch("/admin/v1/keys", {
+        method: "GET",
+        signal: controller.signal,
+        retryDelayMs: 200,
+        concurrencyLimiter: limiter,
+      });
+
+      // Wait a tick for the first fetch to complete and enter sleepWithJitter
+      await new Promise((r) => setTimeout(r, 20));
+      expect(callCount).toBe(1);
+      expect(limiter.activeReadCount).toBe(1);
+
+      // Abort during backoff
+      controller.abort();
+
+      await expect(fetchPromise).rejects.toThrow();
+      expect(callCount).toBe(1);
+      expect(limiter.activeReadCount).toBe(0);
+    });
+
+    it("does not perform second fetch and releases limiter slot if aborted during network error backoff", async () => {
+      const limiter = new ConcurrencyLimiter(1, 1);
+      const controller = new AbortController();
+      let callCount = 0;
+
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        callCount++;
+        throw new TypeError("Failed to fetch");
+      });
+
+      const fetchPromise = adminFetch("/admin/v1/keys", {
+        method: "GET",
+        signal: controller.signal,
+        retryDelayMs: 200,
+        concurrencyLimiter: limiter,
+      });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(callCount).toBe(1);
+      expect(limiter.activeReadCount).toBe(1);
+
+      controller.abort();
+
+      await expect(fetchPromise).rejects.toThrow();
+      expect(callCount).toBe(1);
+      expect(limiter.activeReadCount).toBe(0);
     });
   });
 

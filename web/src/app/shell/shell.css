@@ -591,12 +591,22 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 1rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .gw-usage-controls-group {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.gw-usage-controls-group .gw-tabs-container {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .gw-control-label {
@@ -927,6 +937,31 @@
 
   .gw-key-actions {
     align-self: flex-end;
+  }
+
+  .gw-usage-controls {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1rem;
+  }
+
+  .gw-usage-controls-group {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .gw-usage-controls-group .gw-tabs-container {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .gw-usage-controls-group .gw-tablist {
+    display: flex;
+    width: 100%;
   }
 }
 

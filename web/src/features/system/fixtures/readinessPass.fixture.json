@@ -1,20 +1,20 @@
 {
   "ready": true,
   "checks": {
-    "database": {
-      "name": "database",
+    "sqlite": {
+      "name": "sqlite",
       "status": "pass"
     },
     "schema": {
       "name": "schema",
       "status": "pass"
     },
-    "usage_worker": {
-      "name": "usage_worker",
+    "telemetry": {
+      "name": "telemetry",
       "status": "pass"
     },
-    "upstream_url": {
-      "name": "upstream_url",
+    "upstream": {
+      "name": "upstream",
       "status": "pass"
     },
     "lifecycle": {

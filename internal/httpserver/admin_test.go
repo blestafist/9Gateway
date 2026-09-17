@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -605,14 +606,12 @@ func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) 
 	}
 
 	updated, updatedPayload := update(created.ID, `{"enabled":false,"policy":{"allowed_models":["new-model"]}}`, "admin-secret")
-	if updated.StatusCode != http.StatusOK || updatedPayload["Enabled"] != false {
+	if updated.StatusCode != http.StatusOK || updatedPayload["enabled"] != false {
 		t.Fatalf("disable update = %d/%v", updated.StatusCode, updatedPayload)
 	}
-	firstUpdatedAt, ok := updatedPayload["UpdatedAt"].(string)
+	firstUpdatedAt, ok := updatedPayload["updated_at"].(string)
 	if !ok || firstUpdatedAt == "" {
-		// encoding/json field matching permits lowercase request decoding, but
-		// response field names are intentionally deterministic from the struct.
-		t.Fatalf("update timestamp = %#v", updatedPayload["UpdatedAt"])
+		t.Fatalf("update timestamp = %#v", updatedPayload["updated_at"])
 	}
 	call := func(model string) *http.Response {
 		t.Helper()
@@ -634,7 +633,7 @@ func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) 
 	}
 
 	enabled, enabledPayload := update(created.ID, `{"enabled":true,"policy":{"allowed_models":["new-model"]}}`, "admin-secret")
-	if enabled.StatusCode != http.StatusOK || enabledPayload["Enabled"] != true {
+	if enabled.StatusCode != http.StatusOK || enabledPayload["enabled"] != true {
 		t.Fatalf("enable update = %d/%v", enabled.StatusCode, enabledPayload)
 	}
 	if response := call("old-model"); response.StatusCode != http.StatusForbidden || upstreamCalls != 0 {
@@ -645,8 +644,8 @@ func TestAdminUpdatePolicyHTTPTransitionsValidationAndPersistence(t *testing.T) 
 	}
 
 	repeated, repeatedPayload := update(created.ID, `{"enabled":true,"policy":{"allowed_models":["new-model"]}}`, "admin-secret")
-	if repeated.StatusCode != http.StatusOK || repeatedPayload["UpdatedAt"] != enabledPayload["UpdatedAt"] {
-		t.Fatalf("idempotent update timestamps = %#v/%#v", repeatedPayload["UpdatedAt"], enabledPayload["UpdatedAt"])
+	if repeated.StatusCode != http.StatusOK || repeatedPayload["updated_at"] != enabledPayload["updated_at"] {
+		t.Fatalf("idempotent update timestamps = %#v/%#v", repeatedPayload["updated_at"], enabledPayload["updated_at"])
 	}
 	notFound, notFoundPayload := update("missing-key", `{"enabled":true,"policy":{}}`, "admin-secret")
 	if notFound.StatusCode != http.StatusNotFound || notFoundPayload["error"] == nil || notFound.Header.Get(requestIDHeader) == "" {
@@ -1246,7 +1245,10 @@ func TestAdminCreateKeyHTTPDuplicateGenerationFailureIsSafe(t *testing.T) {
 	}
 	generated := auth.GeneratedGatewayKey{RawKey: "sk-gw-eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg", DisplayPrefix: "sk-gw-eHh4eHh", Digest: make([]byte, storage.HMACDigestSize)}
 	service.generator = &fixedGenerator{key: generated}
-	admin := &adminHandler{credential: "admin-secret", service: service}
+	admin, err := newAdminHandler("admin-secret", service)
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler := newHandlerWithCompletionLogger(nil, routeWithAdmin(newProxyHandler(transport.NewClient(), "http://127.0.0.1:1", "upstream-secret"), admin))
 	gateway := httptest.NewServer(handler)
 	t.Cleanup(gateway.Close)
@@ -1399,5 +1401,221 @@ func decodeResponse(t *testing.T, response *http.Response, destination any) {
 	defer response.Body.Close()
 	if err := json.NewDecoder(response.Body).Decode(destination); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatal(err)
+	}
+}
+
+func TestTrustedProxiesConfiguration(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       string
+		setEnv    bool
+		wantErr   bool
+		wantCount int
+	}{
+		{
+			name:      "empty configuration unset",
+			setEnv:    false,
+			wantErr:   false,
+			wantCount: 0,
+		},
+		{
+			name:      "empty configuration empty string",
+			env:       "",
+			setEnv:    true,
+			wantErr:   false,
+			wantCount: 0,
+		},
+		{
+			name:      "valid single ip",
+			env:       "10.0.0.1",
+			setEnv:    true,
+			wantErr:   false,
+			wantCount: 1,
+		},
+		{
+			name:      "valid mixed ip and cidr with whitespace",
+			env:       " 10.0.0.1 , 192.168.1.0/24 ",
+			setEnv:    true,
+			wantErr:   false,
+			wantCount: 2,
+		},
+		{
+			name:    "invalid proxy ip",
+			env:     "not-an-ip",
+			setEnv:  true,
+			wantErr: true,
+		},
+		{
+			name:    "invalid proxy cidr mask",
+			env:     "10.0.0.0/33",
+			setEnv:  true,
+			wantErr: true,
+		},
+		{
+			name:    "mixed valid and invalid",
+			env:     "10.0.0.1,not-an-ip",
+			setEnv:  true,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setEnv {
+				t.Setenv("GATEWAY_TRUSTED_PROXIES", tc.env)
+			} else {
+				os.Unsetenv("GATEWAY_TRUSTED_PROXIES")
+			}
+			admin, err := newAdminHandler("test-secret", nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for env=%q, got nil", tc.env)
+				}
+				if !strings.Contains(err.Error(), "invalid GATEWAY_TRUSTED_PROXIES") {
+					t.Fatalf("unexpected error message: %v", err)
+				}
+				if admin != nil {
+					t.Fatalf("expected nil adminHandler on error, got %v", admin)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error for env=%q: %v", tc.env, err)
+				}
+				if admin == nil {
+					t.Fatal("expected non-nil adminHandler")
+				}
+				if len(admin.trustedProxies) != tc.wantCount {
+					t.Fatalf("got %d trusted proxies, want %d", len(admin.trustedProxies), tc.wantCount)
+				}
+			}
+		})
+	}
+}
+
+func TestNewHandlerWithAdminStartupFailsOnInvalidTrustedProxies(t *testing.T) {
+	t.Setenv("GATEWAY_TRUSTED_PROXIES", "192.168.1.1,invalid-ip")
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), "http://127.0.0.1:1", "upstream-secret", "admin-secret", "pepper", &testAdminRepository{})
+	if err == nil {
+		t.Fatal("expected NewHandlerWithAdmin to fail when GATEWAY_TRUSTED_PROXIES is invalid")
+	}
+	if handler != nil {
+		t.Fatalf("expected nil handler on failure, got %v", handler)
+	}
+}
+
+func TestPolicyUpdateResponseWireFormat(t *testing.T) {
+	database, err := storage.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	repository := storage.NewAPIKeyRepository(database)
+	handler, err := NewHandlerWithAdmin(transport.NewClient(), "http://127.0.0.1:1", "upstream-secret", "admin-secret", "pepper", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := httptest.NewServer(handler)
+	t.Cleanup(gateway.Close)
+
+	// Test 1: Update key with expires_at set
+	createReq := newAdminRequest(t, gateway.URL, `{"name":"test-key","expires_at":"2030-01-02T03:04:05Z"}`, "admin-secret")
+	createResp, err := http.DefaultClient.Do(createReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	decodeResponse(t, createResp, &created)
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", createResp.StatusCode)
+	}
+
+	policyBody := `{"enabled":true,"policy":{"allowed_models":["gpt-4o"],"request_windows":[{"amount":10,"duration":"1m"}]}}`
+	updateReq := newPolicyRequest(t, gateway.URL, created.ID, policyBody, "admin-secret")
+	updateResp, err := http.DefaultClient.Do(updateReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer updateResp.Body.Close()
+	if updateResp.StatusCode != http.StatusOK {
+		t.Fatalf("update status = %d", updateResp.StatusCode)
+	}
+
+	rawBody, err := io.ReadAll(updateResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var jsonMap map[string]any
+	if err := json.Unmarshal(rawBody, &jsonMap); err != nil {
+		t.Fatalf("unmarshal json: %v", err)
+	}
+
+	// Verify required lowercase wire fields exist
+	requiredFields := []string{"id", "name", "display_prefix", "enabled", "expires_at", "created_at", "updated_at", "policy"}
+	for _, field := range requiredFields {
+		if _, ok := jsonMap[field]; !ok {
+			t.Errorf("expected field %q in response JSON, but was missing. Full JSON: %s", field, string(rawBody))
+		}
+	}
+
+	// Verify uppercase fields do not exist
+	forbiddenUppercase := []string{"ID", "Name", "Prefix", "Enabled", "ExpiresAt", "CreatedAt", "UpdatedAt", "Policy"}
+	for _, field := range forbiddenUppercase {
+		if _, ok := jsonMap[field]; ok {
+			t.Errorf("forbidden uppercase field %q found in response JSON: %s", field, string(rawBody))
+		}
+	}
+
+	// Verify secrets/keys/digests never appear
+	forbiddenSecrets := []string{"raw_key", "rawKey", "RawKey", "key", "Key", "digest", "Digest", "secret", "Secret"}
+	for _, field := range forbiddenSecrets {
+		if _, ok := jsonMap[field]; ok {
+			t.Errorf("forbidden secret/key field %q found in response JSON: %s", field, string(rawBody))
+		}
+	}
+
+	// Test 2: Update key without expires_at - verify expires_at is omitted (omitempty)
+	createReq2 := newAdminRequest(t, gateway.URL, `{"name":"test-key-no-expiry"}`, "admin-secret")
+	createResp2, err := http.DefaultClient.Do(createReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created2 struct {
+		ID string `json:"id"`
+	}
+	decodeResponse(t, createResp2, &created2)
+	if createResp2.StatusCode != http.StatusCreated {
+		t.Fatalf("create 2 status = %d", createResp2.StatusCode)
+	}
+
+	updateReq2 := newPolicyRequest(t, gateway.URL, created2.ID, policyBody, "admin-secret")
+	updateResp2, err := http.DefaultClient.Do(updateReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer updateResp2.Body.Close()
+	if updateResp2.StatusCode != http.StatusOK {
+		t.Fatalf("update 2 status = %d", updateResp2.StatusCode)
+	}
+
+	rawBody2, err := io.ReadAll(updateResp2.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var jsonMap2 map[string]any
+	if err := json.Unmarshal(rawBody2, &jsonMap2); err != nil {
+		t.Fatalf("unmarshal json 2: %v", err)
+	}
+
+	if _, ok := jsonMap2["expires_at"]; ok {
+		t.Errorf("expires_at should be omitted when nil (omitempty), but found: %s", string(rawBody2))
+	}
+	if _, ok := jsonMap2["display_prefix"]; !ok {
+		t.Errorf("display_prefix missing in response 2: %s", string(rawBody2))
 	}
 }
