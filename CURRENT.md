@@ -2,12 +2,25 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T165`.
+Done: `T001`-`T166`.
 
-Current: `T166` - add the admin overview aggregation API.
+Current: `T167` - build the operational Overview page.
 
-Queued: `T167`-`T180`, in dependency order from analytics overview screen
-through usage analytics, key/request workflows, quality gates, and release integration.
+Queued: `T168`-`T180`, in dependency order from usage analytics
+through key/request workflows, quality gates, and release integration.
+
+T166 added the authenticated admin overview aggregation API (`GET /admin/v1/overview`):
+RFC3339 range query validation with default 24h window and bounded ranges up to
+one year; aggregated request counts, terminal outcomes (complete/custom_dispatch
+successes, error outcomes, pre_upstream rejections), nullable token/cost sums
+preserving unknown vs zero distinction, active request gauge, total and enabled key
+counts, and up to 10 recent request summaries; exact adjacent non-overlapping
+previous comparison range computed in SQLite with index-backed scans; safe global
+concurrency bounding (max 2 concurrent aggregation queries across gateway with
+retryable HTTP 503 and Retry-After: 1), in-flight singleflight query deduplication,
+and LRU caching for up to 32 completed queries with a 15-second TTL; request
+cancellation propagation without caching aborted computations; zero credential,
+policy JSON, or request/response body leakage in overview responses.
 
 T165 implemented the typed admin data layer:
 bounded typed HTTP transport with SameSite CSRF handling, generation barriers for

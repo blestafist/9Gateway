@@ -128,6 +128,42 @@ Captured bytes are bounded by the 1 MiB storage safety cap and 10 MiB serving
 cap. Capture truncation is independent from the 10 MiB request and 100 MiB
 non-stream response transport limits.
 
+## `GET /admin/v1/overview`
+
+Returns aggregated request overview statistics, comparisons for an adjacent
+previous range of equal duration, active request gauges, key counts, and up to 10
+recent request summaries.
+
+```sh
+curl -fsS 'http://localhost:8080/admin/v1/overview?after=2026-09-17T00:00:00Z&before=2026-09-18T00:00:00Z' \
+  -H "Authorization: Bearer ${ADMIN_CREDENTIAL}"
+```
+
+Query parameters:
+- `after`: RFC3339 start timestamp (defaults to 24 hours before `before`).
+- `before`: RFC3339 end timestamp (defaults to current server time).
+
+Constraints and validation:
+- `after` must be strictly before `before`.
+- Range duration must not exceed 366 days (1 year).
+- Unknown or duplicate parameters return HTTP 400 (`invalid_request`).
+- Invalid timestamps return HTTP 400 (`invalid_request`).
+
+Concurrency and caching:
+- Bounded to 2 concurrent aggregation queries across the gateway. When capacity
+  is saturated, returns HTTP 503 (`service_unavailable`) with `Retry-After: 1`.
+- Identical in-flight queries share a single execution (singleflight).
+- Completed query results are cached up to 32 entries with a 15-second TTL.
+- Cancelled client requests abort query processing without caching partial results.
+
+The response payload contains:
+- `current_range_start`, `current_range_end`, `previous_range_start`, `previous_range_end`: RFC3339 timestamps defining current and exact adjacent non-overlapping previous comparison periods.
+- `data_timestamp`: UTC timestamp when data was gathered.
+- `current` and `previous`: aggregate objects with `total_requests`, `successful_requests`, `error_requests`, `rejected_requests`, and nullable `input_tokens`, `cached_input_tokens`, `output_tokens`, and `cost_micros`.
+- `active_requests`: instantaneous count of active in-flight proxy requests.
+- `key_counts`: `total` and `enabled` key counts.
+- `recent_requests`: list of up to 10 most recent requests (newest first) matching the safe metadata structure returned by `/admin/v1/requests`.
+
 ## Operational endpoints
 
 `GET /ready`, `GET /metrics`, and `GET /health` are outside `/admin/v1` and do

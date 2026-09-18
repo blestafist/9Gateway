@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pestit/9gateway/internal/analytics"
 	"github.com/pestit/9gateway/internal/auth"
 	"github.com/pestit/9gateway/internal/limiter"
 	"github.com/pestit/9gateway/internal/security"
@@ -69,6 +70,10 @@ type requestDetailGetter interface {
 
 type requestBodyGetter interface {
 	GetRequestBody(context.Context, string, string) (*storage.BodyContent, error)
+}
+
+type overviewGetter interface {
+	GetOverview(context.Context, time.Time, time.Time, int64) (*storage.OverviewData, error)
 }
 
 type apiKeyPolicyUpdater interface {
@@ -474,6 +479,15 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 
+	if request.URL.Path == "/admin/v1/overview" {
+		if request.Method != http.MethodGet {
+			writeAdminError(response, http.StatusMethodNotAllowed, gatewayErrorMethodNotAllowed, "method not allowed")
+			return
+		}
+		handler.getOverview(response, request)
+		return
+	}
+
 	if request.Method == http.MethodGet && isRequestBodyPath(request.URL.Path) {
 		handler.getRequestBody(response, request)
 		return
@@ -724,6 +738,197 @@ func (handler *adminHandler) listRequests(response http.ResponseWriter, request 
 		Requests   []adminRequestListItem `json:"requests"`
 		NextCursor string                 `json:"next_cursor,omitempty"`
 	}{Requests: items, NextCursor: nextCursor})
+}
+
+type adminOverviewAggregate struct {
+	Requests           int64  `json:"requests"`
+	TotalRequests      int64  `json:"total_requests"`
+	SuccessfulRequests int64  `json:"successful_requests"`
+	ErrorRequests      int64  `json:"error_requests"`
+	RejectedRequests   int64  `json:"rejected_requests"`
+	InputTokens        *int64 `json:"input_tokens"`
+	CachedInputTokens  *int64 `json:"cached_input_tokens"`
+	OutputTokens       *int64 `json:"output_tokens"`
+	CostMicros         *int64 `json:"cost_micros"`
+}
+
+type adminOverviewKeyCounts struct {
+	Total       int64 `json:"total"`
+	Enabled     int64 `json:"enabled"`
+	TotalKeys   int64 `json:"total_keys"`
+	EnabledKeys int64 `json:"enabled_keys"`
+}
+
+type adminOverviewResponse struct {
+	CurrentRangeStart  time.Time              `json:"current_range_start"`
+	CurrentRangeEnd    time.Time              `json:"current_range_end"`
+	PreviousRangeStart time.Time              `json:"previous_range_start"`
+	PreviousRangeEnd   time.Time              `json:"previous_range_end"`
+	DataTimestamp      time.Time              `json:"data_timestamp"`
+	Current            adminOverviewAggregate `json:"current"`
+	Previous           adminOverviewAggregate `json:"previous"`
+
+	Requests           int64  `json:"requests"`
+	TotalRequests      int64  `json:"total_requests"`
+	SuccessfulRequests int64  `json:"successful_requests"`
+	ErrorRequests      int64  `json:"error_requests"`
+	RejectedRequests   int64  `json:"rejected_requests"`
+	InputTokens        *int64 `json:"input_tokens"`
+	CachedInputTokens  *int64 `json:"cached_input_tokens"`
+	OutputTokens       *int64 `json:"output_tokens"`
+	CostMicros         *int64 `json:"cost_micros"`
+
+	ActiveRequests int64                  `json:"active_requests"`
+	KeyCounts      adminOverviewKeyCounts `json:"key_counts"`
+	RecentRequests []adminRequestListItem `json:"recent_requests"`
+}
+
+func adminOverviewResponseFromData(data *storage.OverviewData) adminOverviewResponse {
+	recent := make([]adminRequestListItem, 0, len(data.RecentRequests))
+	for _, rec := range data.RecentRequests {
+		recent = append(recent, adminRequestListItemFromRecord(rec))
+	}
+	return adminOverviewResponse{
+		CurrentRangeStart:  data.CurrentRangeStart,
+		CurrentRangeEnd:    data.CurrentRangeEnd,
+		PreviousRangeStart: data.PreviousRangeStart,
+		PreviousRangeEnd:   data.PreviousRangeEnd,
+		DataTimestamp:      data.DataTimestamp,
+		Current: adminOverviewAggregate{
+			Requests:           data.Current.TotalRequests,
+			TotalRequests:      data.Current.TotalRequests,
+			SuccessfulRequests: data.Current.SuccessfulRequests,
+			ErrorRequests:      data.Current.ErrorRequests,
+			RejectedRequests:   data.Current.RejectedRequests,
+			InputTokens:        data.Current.InputTokens,
+			CachedInputTokens:  data.Current.CachedInputTokens,
+			OutputTokens:       data.Current.OutputTokens,
+			CostMicros:         data.Current.CostMicros,
+		},
+		Previous: adminOverviewAggregate{
+			Requests:           data.Previous.TotalRequests,
+			TotalRequests:      data.Previous.TotalRequests,
+			SuccessfulRequests: data.Previous.SuccessfulRequests,
+			ErrorRequests:      data.Previous.ErrorRequests,
+			RejectedRequests:   data.Previous.RejectedRequests,
+			InputTokens:        data.Previous.InputTokens,
+			CachedInputTokens:  data.Previous.CachedInputTokens,
+			OutputTokens:       data.Previous.OutputTokens,
+			CostMicros:         data.Previous.CostMicros,
+		},
+		Requests:           data.Current.TotalRequests,
+		TotalRequests:      data.Current.TotalRequests,
+		SuccessfulRequests: data.Current.SuccessfulRequests,
+		ErrorRequests:      data.Current.ErrorRequests,
+		RejectedRequests:   data.Current.RejectedRequests,
+		InputTokens:        data.Current.InputTokens,
+		CachedInputTokens:  data.Current.CachedInputTokens,
+		OutputTokens:       data.Current.OutputTokens,
+		CostMicros:         data.Current.CostMicros,
+		ActiveRequests:     data.ActiveRequests,
+		KeyCounts: adminOverviewKeyCounts{
+			Total:       data.KeyCounts.Total,
+			Enabled:     data.KeyCounts.Enabled,
+			TotalKeys:   data.KeyCounts.Total,
+			EnabledKeys: data.KeyCounts.Enabled,
+		},
+		RecentRequests: recent,
+	}
+}
+
+func (handler *adminHandler) getOverview(response http.ResponseWriter, request *http.Request) {
+	if !handler.authenticate(response, request) {
+		return
+	}
+	getter, ok := handler.service.repository.(overviewGetter)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "overview repository unavailable")
+		return
+	}
+	query, err := adminQuery(request)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	for key := range query {
+		if key != "after" && key != "before" {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "unsupported query parameter: "+key)
+			return
+		}
+	}
+	afterParam, err := singleAdminQueryValue(query, "after", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid after parameter")
+		return
+	}
+	beforeParam, err := singleAdminQueryValue(query, "before", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid before parameter")
+		return
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	var after, before time.Time
+
+	if beforeParam == "" {
+		before = now
+	} else {
+		parsedBefore, err := time.Parse(time.RFC3339, beforeParam)
+		if err != nil {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid before timestamp; RFC3339 required")
+			return
+		}
+		before = parsedBefore.UTC().Truncate(time.Microsecond)
+	}
+
+	if afterParam == "" {
+		after = before.Add(-24 * time.Hour)
+	} else {
+		parsedAfter, err := time.Parse(time.RFC3339, afterParam)
+		if err != nil {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid after timestamp; RFC3339 required")
+			return
+		}
+		after = parsedAfter.UTC().Truncate(time.Microsecond)
+	}
+
+	if !after.Before(before) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "after must be before before")
+		return
+	}
+	if before.Sub(after) > 366*24*time.Hour {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "range must not exceed one year")
+		return
+	}
+
+	var activeRequests int64
+	if metrics := metricsFromRequest(request); metrics != nil {
+		activeRequests = metrics.active.Load()
+		if activeRequests < 0 {
+			activeRequests = 0
+		}
+	}
+
+	cacheKey := fmt.Sprintf("overview:%d:%d", after.UnixMicro(), before.UnixMicro())
+	data, err := handler.analyticsCoordinator.Do(request.Context(), cacheKey, func(ctx context.Context) (*storage.OverviewData, error) {
+		return getter.GetOverview(ctx, after, before, activeRequests)
+	})
+	if err != nil {
+		if errors.Is(err, analytics.ErrCapacityExceeded) {
+			response.Header().Set("Retry-After", "1")
+			writeAdminError(response, http.StatusServiceUnavailable, gatewayErrorServiceUnavailable, "analytics capacity exceeded")
+			return
+		}
+		if errors.Is(err, context.Canceled) || request.Context().Err() != nil {
+			return
+		}
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "overview aggregation failed")
+		return
+	}
+
+	resp := adminOverviewResponseFromData(data)
+	resp.ActiveRequests = activeRequests
+	writeAdminJSON(response, http.StatusOK, resp)
 }
 
 func (handler *adminHandler) getRequest(response http.ResponseWriter, request *http.Request) {
@@ -982,12 +1187,13 @@ func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request 
 }
 
 type adminHandler struct {
-	credential      string
-	service         *adminKeyService
-	sessionStore    *session.Store
-	rateLimiter     *session.LoginRateLimiter
-	trustedProxies  []*net.IPNet
-	sessionInitOnce sync.Once
+	credential           string
+	service              *adminKeyService
+	sessionStore         *session.Store
+	rateLimiter          *session.LoginRateLimiter
+	trustedProxies       []*net.IPNet
+	analyticsCoordinator *analytics.Coordinator[*storage.OverviewData]
+	sessionInitOnce      sync.Once
 }
 
 func newAdminHandler(credential string, service *adminKeyService) (*adminHandler, error) {
@@ -1000,11 +1206,12 @@ func newAdminHandler(credential string, service *adminKeyService) (*adminHandler
 		trustedProxies = proxies
 	}
 	return &adminHandler{
-		credential:     credential,
-		service:        service,
-		sessionStore:   session.NewStore(session.StoreOptions{}),
-		rateLimiter:    session.NewLoginRateLimiter(session.RateLimiterOptions{}),
-		trustedProxies: trustedProxies,
+		credential:           credential,
+		service:              service,
+		sessionStore:         session.NewStore(session.StoreOptions{}),
+		rateLimiter:          session.NewLoginRateLimiter(session.RateLimiterOptions{}),
+		trustedProxies:       trustedProxies,
+		analyticsCoordinator: analytics.NewCoordinator[*storage.OverviewData](2, 32, 15*time.Second),
 	}, nil
 }
 
@@ -1053,6 +1260,9 @@ func (handler *adminHandler) initSessions() {
 		}
 		if handler.rateLimiter == nil {
 			handler.rateLimiter = session.NewLoginRateLimiter(session.RateLimiterOptions{})
+		}
+		if handler.analyticsCoordinator == nil {
+			handler.analyticsCoordinator = analytics.NewCoordinator[*storage.OverviewData](2, 32, 15*time.Second)
 		}
 	})
 }

@@ -32,6 +32,7 @@ const (
 	gatewayErrorForbidden            = "forbidden"
 	gatewayErrorRateLimitExceeded    = "rate_limit_exceeded"
 	gatewayErrorMethodNotAllowed     = "method_not_allowed"
+	gatewayErrorServiceUnavailable   = "service_unavailable"
 )
 
 type gatewayErrorBody struct {
@@ -77,6 +78,7 @@ var gatewayErrorDefinitions = map[string]gatewayErrorDefinition{
 	gatewayErrorForbidden:            {"The requested action is forbidden.", "permission_error", http.StatusForbidden},
 	gatewayErrorRateLimitExceeded:    {"Too many failed login attempts. Please try again later.", "rate_limit_error", http.StatusTooManyRequests},
 	gatewayErrorMethodNotAllowed:     {"Method not allowed.", "invalid_request_error", http.StatusMethodNotAllowed},
+	gatewayErrorServiceUnavailable:   {"Service unavailable. Please try again later.", "service_error", http.StatusServiceUnavailable},
 }
 
 // gatewayErrorTraceRecorder is deliberately tiny so error writing remains
@@ -131,6 +133,8 @@ func safeErrorCodeForGatewayCode(code string) SafeErrorCode {
 		return ErrorCodeModelNotAllowed
 	case gatewayErrorRateLimitExceeded:
 		return ErrorCodeRequestLimit
+	case gatewayErrorServiceUnavailable:
+		return ErrorCodeInternal
 	default:
 		return ErrorCodeUnknown
 	}
