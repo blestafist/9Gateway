@@ -7,6 +7,9 @@ import requestDetailFixture from "./requests/fixtures/requestDetail.fixture.json
 import requestBodyFixture from "./requests/fixtures/requestBody.fixture.json";
 import readinessPassFixture from "./system/fixtures/readinessPass.fixture.json";
 import readinessFailFixture from "./system/fixtures/readinessFail.fixture.json";
+import overviewFixture from "./overview/fixtures/overview.fixture.json";
+import overviewNullsFixture from "./overview/fixtures/overviewNulls.fixture.json";
+import overviewEmptyFixture from "./overview/fixtures/overviewEmpty.fixture.json";
 
 import {
   validateKeyListResponse,
@@ -19,6 +22,7 @@ import {
   validateRequestBodyContent,
 } from "./requests/validation";
 import { validateReadinessResponse } from "./system/validation";
+import { validateOverviewResponse } from "./overview/validation";
 import { ValidationError } from "../shared/transport";
 
 describe("Contract Fixtures and Runtime Validation", () => {
@@ -385,6 +389,89 @@ describe("Contract Fixtures and Runtime Validation", () => {
     it("rejects invalid readiness responses", () => {
       expect(() => validateReadinessResponse({ ready: "not-bool" })).toThrow(ValidationError);
       expect(() => validateReadinessResponse(null)).toThrow(ValidationError);
+    });
+  });
+
+  describe("Overview Contracts", () => {
+    it("successfully decodes full overview fixture", () => {
+      const decoded = validateOverviewResponse(overviewFixture);
+      expect(decoded.requests).toBe(150);
+      expect(decoded.total_requests).toBe(150);
+      expect(decoded.successful_requests).toBe(142);
+      expect(decoded.error_requests).toBe(5);
+      expect(decoded.rejected_requests).toBe(3);
+      expect(decoded.input_tokens).toBe(19178344);
+      expect(decoded.cached_input_tokens).toBe(11381601);
+      expect(decoded.output_tokens).toBe(72803);
+      expect(decoded.cost_micros).toBe(27990000);
+      expect(decoded.active_requests).toBe(2);
+      expect(decoded.key_counts.total).toBe(6);
+      expect(decoded.key_counts.enabled).toBe(5);
+      expect(decoded.recent_requests).toHaveLength(2);
+      expect(decoded.recent_requests[0]?.request_id).toBe(
+        "0191eb0b62bc7b7489a2434685ef3b600191eb0b62bc7b7489a2434685ef3b60"
+      );
+      expect(decoded.recent_requests[0]?.upstream_started).toBe(true);
+      expect(decoded.recent_requests[1]?.terminal_outcome).toBe("pre_upstream");
+      expect(decoded.recent_requests[1]?.upstream_started).toBe(false);
+    });
+
+    it("successfully decodes overviewNulls fixture preserving null usage/cost", () => {
+      const decoded = validateOverviewResponse(overviewNullsFixture);
+      expect(decoded.requests).toBe(50);
+      expect(decoded.current.input_tokens).toBeNull();
+      expect(decoded.current.cached_input_tokens).toBeNull();
+      expect(decoded.current.output_tokens).toBeNull();
+      expect(decoded.current.cost_micros).toBeNull();
+      expect(decoded.previous.input_tokens).toBeNull();
+      expect(decoded.previous.cost_micros).toBeNull();
+      expect(decoded.recent_requests).toHaveLength(0);
+    });
+
+    it("successfully decodes overviewEmpty fixture with zero baseline", () => {
+      const decoded = validateOverviewResponse(overviewEmptyFixture);
+      expect(decoded.requests).toBe(0);
+      expect(decoded.current.successful_requests).toBe(0);
+      expect(decoded.current.input_tokens).toBe(0);
+      expect(decoded.current.cost_micros).toBe(0);
+      expect(decoded.active_requests).toBe(0);
+      expect(decoded.key_counts.total).toBe(3);
+      expect(decoded.recent_requests).toHaveLength(0);
+    });
+
+    it("rejects malformed overview responses with ValidationError", () => {
+      expect(() => validateOverviewResponse(null)).toThrow(ValidationError);
+      expect(() => validateOverviewResponse("not-object")).toThrow(ValidationError);
+      expect(() =>
+        validateOverviewResponse({
+          ...overviewFixture,
+          current_range_start: 12345, // string required
+        })
+      ).toThrow(ValidationError);
+      expect(() =>
+        validateOverviewResponse({
+          ...overviewFixture,
+          current: { ...overviewFixture.current, total_requests: "100" }, // number required
+        })
+      ).toThrow(ValidationError);
+      expect(() =>
+        validateOverviewResponse({
+          ...overviewFixture,
+          key_counts: { total: "five", enabled: 1 },
+        })
+      ).toThrow(ValidationError);
+      expect(() =>
+        validateOverviewResponse({
+          ...overviewFixture,
+          recent_requests: "not-array",
+        })
+      ).toThrow(ValidationError);
+      expect(() =>
+        validateOverviewResponse({
+          ...overviewFixture,
+          recent_requests: [{ ...overviewFixture.recent_requests[0], upstream_started: "yes" }],
+        })
+      ).toThrow(ValidationError);
     });
   });
 });

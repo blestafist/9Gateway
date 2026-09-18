@@ -2,12 +2,26 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T166`.
+Done: `T001`-`T167`.
 
-Current: `T167` - build the operational Overview page.
+Current: `T168` - add bounded usage time-series and breakdown APIs.
 
-Queued: `T168`-`T180`, in dependency order from usage analytics
+Queued: `T169`-`T180`, in dependency order from usage analytics
 through key/request workflows, quality gates, and release integration.
+
+T167 built the operational Overview page:
+connects the T166 admin overview aggregation API into a period preset selector
+(1h, 24h, 7d, 30d), operational KPI cards (total/active requests, input/cached/output
+tokens, estimated cost, error and rejection counts), previous-period deltas with
+direction and exact comparison text (neutral for volume/tokens/cost, warning for
+error/rejection increases, explicit estimate labels for cost, honest placeholders
+for unknown/null baselines), gateway health and operations strip, key configuration
+summary, recent requests list with long-identifier truncation, and deep navigation
+links to Usage, Keys, Requests, and System screens; adaptive polling (minimum 30s)
+that pauses when the tab is hidden or offline, with manual refresh deduplication
+and stale snapshot preservation on background refresh failure; honest empty,
+partial-data, loading skeletons, capacity constrained (503), and expired session (401)
+states with login recovery; verified by isolated component and lifecycle unit tests.
 
 T166 added the authenticated admin overview aggregation API (`GET /admin/v1/overview`):
 RFC3339 range query validation with default 24h window and bounded ranges up to

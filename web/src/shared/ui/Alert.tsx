@@ -8,6 +8,7 @@ export interface AlertProps extends React.HTMLAttributes<HTMLDivElement> {
   variant?: AlertVariant;
   title?: string;
   icon?: React.ReactNode;
+  action?: React.ReactNode;
   onClose?: () => void;
   children?: React.ReactNode;
 }
@@ -16,6 +17,7 @@ export const Alert: React.FC<AlertProps> = ({
   variant = "info",
   title,
   icon,
+  action,
   onClose,
   children,
   className = "",
@@ -49,6 +51,7 @@ export const Alert: React.FC<AlertProps> = ({
         {title && <div className="gw-alert-title">{title}</div>}
         {children && <div>{children}</div>}
       </div>
+      {action && <div className="gw-alert-action">{action}</div>}
       {onClose && (
         <IconButton
           icon={<X size={16} />}

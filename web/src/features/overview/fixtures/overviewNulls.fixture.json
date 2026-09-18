@@ -1,0 +1,46 @@
+{
+  "current_range_start": "2026-09-17T00:00:00Z",
+  "current_range_end": "2026-09-18T00:00:00Z",
+  "previous_range_start": "2026-09-16T00:00:00Z",
+  "previous_range_end": "2026-09-17T00:00:00Z",
+  "data_timestamp": "2026-09-18T00:00:05Z",
+  "current": {
+    "requests": 50,
+    "total_requests": 50,
+    "successful_requests": 50,
+    "error_requests": 0,
+    "rejected_requests": 0,
+    "input_tokens": null,
+    "cached_input_tokens": null,
+    "output_tokens": null,
+    "cost_micros": null
+  },
+  "previous": {
+    "requests": 0,
+    "total_requests": 0,
+    "successful_requests": 0,
+    "error_requests": 0,
+    "rejected_requests": 0,
+    "input_tokens": null,
+    "cached_input_tokens": null,
+    "output_tokens": null,
+    "cost_micros": null
+  },
+  "requests": 50,
+  "total_requests": 50,
+  "successful_requests": 50,
+  "error_requests": 0,
+  "rejected_requests": 0,
+  "input_tokens": null,
+  "cached_input_tokens": null,
+  "output_tokens": null,
+  "cost_micros": null,
+  "active_requests": 1,
+  "key_counts": {
+    "total": 2,
+    "enabled": 1,
+    "total_keys": 2,
+    "enabled_keys": 1
+  },
+  "recent_requests": []
+}
