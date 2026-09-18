@@ -66,12 +66,12 @@ export function validateUsageBucket(raw: unknown, index: number): UsageTimeserie
       raw.rejected_requests,
       `buckets[${index}].rejected_requests`
     ),
-    input_tokens: parseRequiredNumber(raw.input_tokens, `buckets[${index}].input_tokens`),
-    cached_input_tokens: parseRequiredNumber(
+    input_tokens: parseOptionalNumber(raw.input_tokens, `buckets[${index}].input_tokens`),
+    cached_input_tokens: parseOptionalNumber(
       raw.cached_input_tokens,
       `buckets[${index}].cached_input_tokens`
     ),
-    output_tokens: parseRequiredNumber(raw.output_tokens, `buckets[${index}].output_tokens`),
+    output_tokens: parseOptionalNumber(raw.output_tokens, `buckets[${index}].output_tokens`),
     cost_micros: parseOptionalNumber(raw.cost_micros, `buckets[${index}].cost_micros`),
     avg_total_latency_micros: parseOptionalNumber(
       raw.avg_total_latency_micros,
@@ -142,12 +142,12 @@ export function validateUsageBreakdownRow(raw: unknown, fieldName: string): Usag
       raw.rejected_requests,
       `${fieldName}.rejected_requests`
     ),
-    input_tokens: parseRequiredNumber(raw.input_tokens, `${fieldName}.input_tokens`),
-    cached_input_tokens: parseRequiredNumber(
+    input_tokens: parseOptionalNumber(raw.input_tokens, `${fieldName}.input_tokens`),
+    cached_input_tokens: parseOptionalNumber(
       raw.cached_input_tokens,
       `${fieldName}.cached_input_tokens`
     ),
-    output_tokens: parseRequiredNumber(raw.output_tokens, `${fieldName}.output_tokens`),
+    output_tokens: parseOptionalNumber(raw.output_tokens, `${fieldName}.output_tokens`),
     cost_micros: parseOptionalNumber(raw.cost_micros, `${fieldName}.cost_micros`),
   };
 }
@@ -168,12 +168,12 @@ export function validateUsageBreakdownTotal(raw: unknown, fieldName: string): Us
       raw.rejected_requests,
       `${fieldName}.rejected_requests`
     ),
-    input_tokens: parseRequiredNumber(raw.input_tokens, `${fieldName}.input_tokens`),
-    cached_input_tokens: parseRequiredNumber(
+    input_tokens: parseOptionalNumber(raw.input_tokens, `${fieldName}.input_tokens`),
+    cached_input_tokens: parseOptionalNumber(
       raw.cached_input_tokens,
       `${fieldName}.cached_input_tokens`
     ),
-    output_tokens: parseRequiredNumber(raw.output_tokens, `${fieldName}.output_tokens`),
+    output_tokens: parseOptionalNumber(raw.output_tokens, `${fieldName}.output_tokens`),
     cost_micros: parseOptionalNumber(raw.cost_micros, `${fieldName}.cost_micros`),
   };
 }
@@ -187,6 +187,17 @@ export function validateUsageBreakdownResponse(raw: unknown): UsageBreakdownResp
     throw new ValidationError("Usage breakdown response must have a rows array");
   }
 
+  const emptyBreakdown = {
+    total_requests: 0,
+    successful_requests: 0,
+    error_requests: 0,
+    rejected_requests: 0,
+    input_tokens: null,
+    cached_input_tokens: null,
+    output_tokens: null,
+    cost_micros: null,
+  };
+
   return {
     requested_after: parseOptionalString(raw.requested_after, "requested_after"),
     effective_after: parseRequiredString(raw.effective_after, "effective_after"),
@@ -196,7 +207,10 @@ export function validateUsageBreakdownResponse(raw: unknown): UsageBreakdownResp
     earliest_retained_at: parseOptionalString(raw.earliest_retained_at, "earliest_retained_at"),
     latest_retained_at: parseOptionalString(raw.latest_retained_at, "latest_retained_at"),
     rows: raw.rows.map((r, idx) => validateUsageBreakdownRow(r, `rows[${idx}]`)),
-    other: validateUsageBreakdownRow(raw.other, "other"),
-    total: validateUsageBreakdownTotal(raw.total, "total"),
+    other: validateUsageBreakdownRow(
+      raw.other ?? { id: "other", name: "Other", is_unknown: false, is_deleted: false, ...emptyBreakdown },
+      "other"
+    ),
+    total: validateUsageBreakdownTotal(raw.total ?? emptyBreakdown, "total"),
   };
 }

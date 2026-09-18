@@ -8,6 +8,7 @@ import {
   computePreviousBounds,
   getValidBuckets,
   formatBucketLabel,
+  normalizeBucketResolution,
 } from "./ranges";
 import {
   validateUsageTimeseriesResponse,
@@ -91,6 +92,12 @@ describe("T169 Usage Ranges and Bucket Resolutions", () => {
     expect(formatBucketLabel("five_minutes")).toBe("5 min");
     expect(formatBucketLabel("hour")).toBe("Hourly");
     expect(formatBucketLabel("day")).toBe("Daily");
+  });
+
+  it("normalizes unknown and over-detailed buckets to auto", () => {
+    expect(normalizeBucketResolution("30d", "five_minutes")).toBe("auto");
+    expect(normalizeBucketResolution("30d", "hour")).toBe("hour");
+    expect(normalizeBucketResolution("custom", "not-a-bucket", 2 * 24 * 60 * 60 * 1000)).toBe("auto");
   });
 });
 
@@ -301,6 +308,90 @@ describe("T169 UsagePage Component and Lifecycle", () => {
       expect(screen.getByTestId("all-retained-notice")).toBeInTheDocument();
       expect(screen.getByText(/All Retained History/i)).toBeInTheDocument();
     });
+  });
+
+  it("renders unknown token telemetry as unavailable instead of zero", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/admin/v1/usage/timeseries")) {
+        return mockJsonResponse({
+          ...usageNullGapsFixture,
+          buckets: usageNullGapsFixture.buckets.map((bucket, index) =>
+            index === 1
+              ? { ...bucket, input_tokens: null, cached_input_tokens: null, output_tokens: null }
+              : bucket
+          ),
+        });
+      }
+      return mockJsonResponse(usageBreakdownModelFixture);
+    });
+
+    renderUsagePage("/ui/usage?metric=tokens");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kpi-tokens")).toHaveTextContent("—");
+    });
+  });
+
+  it("renders unavailable breakdown token totals when query data is absent", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/admin/v1/usage/timeseries")) {
+        return mockJsonResponse(usageTimeseriesFixture);
+      }
+      return mockJsonResponse({
+        ...usageBreakdownModelFixture,
+        other: undefined,
+        total: undefined,
+      });
+    });
+
+    renderUsagePage();
+
+    const rankingsCard = screen.getByTestId("rankings-card");
+    await waitFor(() => {
+      expect(
+        within(rankingsCard).getByRole("button", { name: /switch to detailed table view/i })
+      ).toBeInTheDocument();
+    });
+    await act(async () => {
+      fireEvent.click(within(rankingsCard).getByRole("button", { name: "Tokens" }));
+      fireEvent.click(
+        within(rankingsCard).getByRole("button", { name: /switch to detailed table view/i })
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("rankings-table")).toHaveTextContent("Unavailable");
+    });
+  });
+
+  it("refreshes changed rolling bounds with one current and previous query set", async () => {
+    vi.setSystemTime(new Date("2026-09-18T12:00:00.000Z"));
+    renderUsagePage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("usage-page")).toBeInTheDocument();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    const initialUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    vi.setSystemTime(new Date("2026-09-18T12:01:00.000Z"));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+    });
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+    });
+
+    const refreshedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    for (const initialUrl of initialUrls) {
+      expect(refreshedUrls.filter((url) => url === initialUrl)).toHaveLength(1);
+    }
+    expect(refreshedUrls.slice(3)).toHaveLength(3);
+    expect(refreshedUrls.slice(3)).not.toEqual(initialUrls);
   });
 
   it("handles null cost and latency null gaps gracefully without false zeros", async () => {

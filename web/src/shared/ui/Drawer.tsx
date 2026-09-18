@@ -10,6 +10,7 @@ export interface DrawerProps {
   children: React.ReactNode;
   footer?: React.ReactNode;
   placement?: "right" | "bottom" | "left";
+  restoreFocusTo?: React.RefObject<HTMLElement | null>;
 }
 
 const FOCUSABLE_SELECTORS =
@@ -23,6 +24,7 @@ export const Drawer: React.FC<DrawerProps> = ({
   children,
   footer,
   placement = "right",
+  restoreFocusTo,
 }) => {
   const drawerId = useId();
   const titleId = `${drawerId}-title`;
@@ -34,7 +36,8 @@ export const Drawer: React.FC<DrawerProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    previouslyFocusedElementRef.current = document.activeElement as HTMLElement | null;
+    previouslyFocusedElementRef.current =
+      restoreFocusTo?.current ?? (document.activeElement as HTMLElement | null);
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
@@ -57,7 +60,7 @@ export const Drawer: React.FC<DrawerProps> = ({
         previouslyFocusedElementRef.current.focus();
       }
     };
-  }, [isOpen]);
+  }, [isOpen, restoreFocusTo]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {

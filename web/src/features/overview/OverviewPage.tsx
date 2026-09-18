@@ -99,13 +99,16 @@ export const OverviewPage: React.FC = () => {
     computeBounds(activePeriod)
   );
 
+  const prevPeriodRef = React.useRef(activePeriod);
   useEffect(() => {
-    setRangeSnapshot(computeBounds(activePeriod));
+    if (prevPeriodRef.current !== activePeriod) {
+      prevPeriodRef.current = activePeriod;
+      setRangeSnapshot(computeBounds(activePeriod));
+    }
   }, [activePeriod, computeBounds]);
 
   const handlePeriodChange = (newPeriod: string) => {
     const nextPreset = newPeriod as OverviewPeriodPreset;
-    setRangeSnapshot(computeBounds(nextPreset));
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       if (nextPreset === "24h") {
@@ -134,9 +137,18 @@ export const OverviewPage: React.FC = () => {
   const handleManualRefresh = () => {
     if (query.isFetching) return;
     if (activePeriod !== "24h") {
-      setRangeSnapshot(computeBounds(activePeriod));
+      const nextBounds = computeBounds(activePeriod);
+      if (
+        nextBounds.after !== rangeSnapshot.after ||
+        nextBounds.before !== rangeSnapshot.before
+      ) {
+        setRangeSnapshot(nextBounds);
+      } else {
+        query.refetch();
+      }
+    } else {
+      query.refetch();
     }
-    query.refetch();
   };
 
   const freshnessInfo = useMemo(() => {

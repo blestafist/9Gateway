@@ -50,12 +50,12 @@ func aggregateRequests(ctx context.Context, db dbQueries, afterMicros, beforeMic
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-			SUM(input_tokens),
-			SUM(cached_input_tokens),
-			SUM(output_tokens),
-			SUM(cost_micros)
+			CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+			CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+			CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+			CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END
 		FROM requests
 		WHERE finished_at >= ? AND finished_at <= ?
 	`

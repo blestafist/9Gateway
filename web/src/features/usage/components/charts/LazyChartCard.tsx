@@ -62,8 +62,14 @@ export const LazyChartCard: React.FC<LazyChartCardProps> = ({
   const screenReaderSummary = useMemo(() => {
     if (buckets.length === 0) return "No bucket telemetry available for this range.";
     const totalRequests = buckets.reduce((acc, b) => acc + b.total_requests, 0);
-    const totalInput = buckets.reduce((acc, b) => acc + b.input_tokens, 0);
-    const totalOutput = buckets.reduce((acc, b) => acc + b.output_tokens, 0);
+    const inputKnown = buckets.every((b) => b.input_tokens !== null);
+    const totalInput = inputKnown
+      ? buckets.reduce((acc, b) => acc + (b.input_tokens ?? 0), 0)
+      : null;
+    const outputKnown = buckets.every((b) => b.output_tokens !== null);
+    const totalOutput = outputKnown
+      ? buckets.reduce((acc, b) => acc + (b.output_tokens ?? 0), 0)
+      : null;
     const totalCost = buckets.reduce(
       (acc, b) => (b.cost_micros !== null ? (acc ?? 0) + b.cost_micros : acc),
       null as number | null

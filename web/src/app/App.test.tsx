@@ -230,10 +230,11 @@ describe("T163 Shell & Navigation", () => {
 
     // Close via Escape key
     fireEvent.keyDown(drawer, { key: "Escape" });
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
-  });
+     await waitFor(() => {
+       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+     });
+     expect(menuBtn).toHaveFocus();
+   });
 
   it("recovers gracefully inside route error boundary when a chunk throws", () => {
     const ThrowingComponent: React.FC = () => {

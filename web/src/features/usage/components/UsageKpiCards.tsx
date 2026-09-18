@@ -15,9 +15,9 @@ export interface UsageKpisData {
   errorRequests: number;
   rejectedRequests: number;
   peakBucketRequests: number;
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
   totalCostMicros: number | null;
   avgTotalLatencyMicros: number | null;
   totalLatencySamples: number;
@@ -40,11 +40,14 @@ export const UsageKpiCards: React.FC<UsageKpiCardsProps> = ({
   costDelta,
   errorDelta,
 }) => {
-  const totalTokens = data.inputTokens + data.outputTokens;
+  const totalTokens =
+    data.inputTokens !== null || data.outputTokens !== null
+      ? (data.inputTokens ?? 0) + (data.outputTokens ?? 0)
+      : null;
   const cacheRate =
-    data.inputTokens > 0
+    data.inputTokens !== null && data.inputTokens > 0 && data.cachedInputTokens !== null
       ? ((data.cachedInputTokens / data.inputTokens) * 100).toFixed(1)
-      : "0.0";
+      : "—";
 
   const totalErrorsAndRejections = data.errorRequests + data.rejectedRequests;
   const errorRate =
@@ -80,9 +83,9 @@ export const UsageKpiCards: React.FC<UsageKpiCardsProps> = ({
             {formatTokenCount(totalTokens)}
           </div>
           <DeltaBadge delta={tokenDelta} />
-          <div className="gw-kpi-subtitle" title={`Input: ${data.inputTokens.toLocaleString()}, Output: ${data.outputTokens.toLocaleString()}, Cached: ${data.cachedInputTokens.toLocaleString()}`}>
-            In: {formatTokenCount(data.inputTokens)} · Out: {formatTokenCount(data.outputTokens)} · Cached: {formatTokenCount(data.cachedInputTokens)} ({cacheRate}%)
-          </div>
+<div className="gw-kpi-subtitle" title={`Input: ${formatTokenCount(data.inputTokens)}, Output: ${formatTokenCount(data.outputTokens)}, Cached: ${formatTokenCount(data.cachedInputTokens)}`}>
+             In: {formatTokenCount(data.inputTokens)} · Out: {formatTokenCount(data.outputTokens)} · Cached: {formatTokenCount(data.cachedInputTokens)} ({cacheRate === "—" ? cacheRate : `${cacheRate}%`})
+           </div>
         </CardContent>
       </Card>
 

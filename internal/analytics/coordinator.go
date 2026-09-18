@@ -10,6 +10,9 @@ import (
 var (
 	// ErrCapacityExceeded is returned when the global analytics concurrency limit is reached.
 	ErrCapacityExceeded = errors.New("analytics capacity exceeded")
+
+	// ErrLeaderCanceled is returned when identical-query retries are exhausted after leader cancellation.
+	ErrLeaderCanceled = errors.New("analytics leader canceled")
 )
 
 type cacheEntry[T any] struct {
@@ -18,9 +21,10 @@ type cacheEntry[T any] struct {
 }
 
 type flightCall[T any] struct {
-	done chan struct{}
-	val  T
-	err  error
+	done           chan struct{}
+	val            T
+	err            error
+	leaderCanceled bool
 }
 
 // Gate limits concurrent active executions across one or more Coordinators.
@@ -109,57 +113,78 @@ func (c *Coordinator[T]) Do(ctx context.Context, key string, fn func(ctx context
 		return zero, errors.New("nil context")
 	}
 
-	c.mu.Lock()
-	// 1. Check cache
-	if entry, ok := c.cache[key]; ok {
-		if time.Since(entry.createdAt) <= c.ttl {
+	const maxAttempts = 5
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
+
+		c.mu.Lock()
+		// 1. Check cache
+		if entry, ok := c.cache[key]; ok {
+			if time.Since(entry.createdAt) <= c.ttl {
+				c.touch(key)
+				c.mu.Unlock()
+				return entry.value, nil
+			}
+			// Expired
+			delete(c.cache, key)
+			c.removeKeyFromOrder(key)
+		}
+
+		// 2. Singleflight check
+		if call, ok := c.inFlight[key]; ok {
 			c.mu.Unlock()
-			return entry.value, nil
+			select {
+			case <-call.done:
+				if call.err != nil && call.leaderCanceled && ctx.Err() == nil {
+					// Leader was canceled, but our context is still active.
+					// Retry to become the new leader or join a live flight.
+					continue
+				}
+				return call.val, call.err
+			case <-ctx.Done():
+				return zero, ctx.Err()
+			}
 		}
-		// Expired
-		delete(c.cache, key)
-		c.removeKeyFromOrder(key)
-	}
 
-	// 2. Singleflight check
-	if call, ok := c.inFlight[key]; ok {
-		c.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.val, call.err
-		case <-ctx.Done():
-			return zero, ctx.Err()
+		// 3. Concurrency check (non-blocking immediate safe 503)
+		if !c.gate.TryAcquire() {
+			c.mu.Unlock()
+			return zero, ErrCapacityExceeded
 		}
-	}
 
-	// 3. Concurrency check (non-blocking immediate safe 503)
-	if !c.gate.TryAcquire() {
+		call := &flightCall[T]{done: make(chan struct{})}
+		c.inFlight[key] = call
 		c.mu.Unlock()
-		return zero, ErrCapacityExceeded
+
+		// 4. Run query
+		val, err := fn(ctx)
+
+		// 5. Update state
+		c.mu.Lock()
+		c.gate.Release()
+		delete(c.inFlight, key)
+
+		if err == nil && ctx.Err() == nil {
+			c.setCache(key, val)
+		}
+
+		call.val = val
+		call.err = err
+		call.leaderCanceled = (ctx.Err() != nil)
+		close(call.done)
+		c.mu.Unlock()
+
+		return val, err
 	}
 
-	call := &flightCall[T]{done: make(chan struct{})}
-	c.inFlight[key] = call
-	c.mu.Unlock()
+	return zero, ErrLeaderCanceled
+}
 
-	// 4. Run query
-	val, err := fn(ctx)
-
-	// 5. Update state
-	c.mu.Lock()
-	c.gate.Release()
-	delete(c.inFlight, key)
-
-	if err == nil && ctx.Err() == nil {
-		c.setCache(key, val)
-	}
-
-	call.val = val
-	call.err = err
-	close(call.done)
-	c.mu.Unlock()
-
-	return val, err
+func (c *Coordinator[T]) touch(key string) {
+	c.removeKeyFromOrder(key)
+	c.cacheOrder = append(c.cacheOrder, key)
 }
 
 func (c *Coordinator[T]) removeKeyFromOrder(key string) {

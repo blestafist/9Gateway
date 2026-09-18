@@ -14,10 +14,10 @@ export interface RequestsChartPoint extends ChartTimePoint {
 }
 
 export interface TokensChartPoint extends ChartTimePoint {
-  input: number;
-  cached: number;
-  output: number;
-  total: number;
+  input: number | null;
+  cached: number | null;
+  output: number | null;
+  total: number | null;
 }
 
 export interface CostChartPoint extends ChartTimePoint {
@@ -70,12 +70,17 @@ export function transformTimeseriesBuckets(buckets: UsageTimeseriesBucket[]) {
       total: b.total_requests,
     });
 
+    const totalTokens =
+      b.input_tokens !== null && b.output_tokens !== null
+        ? b.input_tokens + b.output_tokens
+        : null;
+
     tokens.push({
       ...common,
       input: b.input_tokens,
       cached: b.cached_input_tokens,
       output: b.output_tokens,
-      total: b.input_tokens + b.output_tokens,
+      total: totalTokens,
     });
 
     cost.push({

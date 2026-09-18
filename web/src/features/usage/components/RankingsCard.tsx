@@ -75,7 +75,9 @@ export const RankingsCard: React.FC<RankingsCardProps> = ({
       case "requests":
         return row.total_requests;
       case "tokens":
-        return row.input_tokens + row.output_tokens;
+        return row.input_tokens !== null && row.output_tokens !== null
+          ? row.input_tokens + row.output_tokens
+          : null;
       case "cost":
         return row.cost_micros;
       default:
@@ -88,7 +90,9 @@ export const RankingsCard: React.FC<RankingsCardProps> = ({
       case "requests":
         return tot.total_requests;
       case "tokens":
-        return tot.input_tokens + tot.output_tokens;
+        return tot.input_tokens !== null || tot.output_tokens !== null
+          ? (tot.input_tokens ?? 0) + (tot.output_tokens ?? 0)
+          : null;
       case "cost":
         return tot.cost_micros;
       default:
@@ -114,8 +118,8 @@ export const RankingsCard: React.FC<RankingsCardProps> = ({
 
   const hasOther =
     other.total_requests > 0 ||
-    other.input_tokens > 0 ||
-    other.output_tokens > 0 ||
+    (other.input_tokens !== null && other.input_tokens > 0) ||
+    (other.output_tokens !== null && other.output_tokens > 0) ||
     (other.cost_micros !== null && other.cost_micros > 0);
 
   // Combine rows with share calculations
@@ -206,7 +210,7 @@ export const RankingsCard: React.FC<RankingsCardProps> = ({
           <div>
             <CardTitle>Breakdown & Rankings</CardTitle>
             <p className="gw-card-subtitle">
-              Ranked breakdown by model, API key, or terminal outcome. Showing share of total and bounded aggregates.
+              Top members are selected by request count; this view shows their {metric} share and value. Bounded aggregates cover the remaining members.
             </p>
           </div>
           <div className="gw-rankings-header-actions">
@@ -243,7 +247,7 @@ export const RankingsCard: React.FC<RankingsCardProps> = ({
           </div>
           <div className="gw-rankings-metric-tabs">
             <span className="gw-control-label" style={{ marginRight: "6px" }}>
-              Rank by:
+              Display metric:
             </span>
             <Tabs
               items={METRIC_TABS}

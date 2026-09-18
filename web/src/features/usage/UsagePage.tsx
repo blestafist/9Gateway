@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Alert, Button, Skeleton } from "../../shared/ui";
@@ -12,7 +12,12 @@ import {
 } from "./types";
 import { usageQueryKeys } from "./queryKeys";
 import { getUsageTimeseries, getUsageBreakdown } from "./api";
-import { computePresetBounds, computePreviousBounds, getValidBuckets } from "./ranges";
+import {
+  computePresetBounds,
+  computePreviousBounds,
+  getValidBuckets,
+  normalizeBucketResolution,
+} from "./ranges";
 import { calculateUsageDelta } from "./deltas";
 import { UsageControls } from "./components/UsageControls";
 import { RetentionNotice } from "./components/RetentionNotice";
@@ -46,7 +51,17 @@ export const UsagePage: React.FC = () => {
   const fromParam = searchParams.get("from") || "";
   const toParam = searchParams.get("to") || "";
 
-  const bucketParam = (searchParams.get("bucket") as UsageBucketResolution) || "auto";
+  const requestedBucket = searchParams.get("bucket") as UsageBucketResolution | null;
+  const bucketParam: UsageBucketResolution = [
+    "auto",
+    "five_minutes",
+    "hour",
+    "day",
+    "week",
+    "month",
+  ].includes(requestedBucket ?? "")
+    ? (requestedBucket as UsageBucketResolution)
+    : "auto";
 
   const metricParam = searchParams.get("metric") as UsageChartMetric | null;
   const activeMetric: UsageChartMetric =
@@ -80,6 +95,40 @@ export const UsagePage: React.FC = () => {
   const [bounds, setBounds] = useState(() =>
     computeBounds(activePreset, fromParam, toParam)
   );
+  const boundsUrlKey = `${activePreset}|${fromParam}|${toParam}`;
+  const previousBoundsUrlKey = useRef(boundsUrlKey);
+
+  // URL changes (including browser back/forward) are the source of truth. Keep
+  // preset windows stable until the user changes the URL or explicitly refreshes.
+  useEffect(() => {
+    if (previousBoundsUrlKey.current === boundsUrlKey) return;
+    previousBoundsUrlKey.current = boundsUrlKey;
+    setBounds(computeBounds(activePreset, fromParam, toParam));
+  }, [activePreset, boundsUrlKey, computeBounds, fromParam, toParam]);
+
+  const customDurationMs = useMemo(() => {
+    if (activePreset !== "custom" || !fromParam || !toParam) return undefined;
+    const fromMs = Date.parse(fromParam);
+    const toMs = Date.parse(toParam);
+    return Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs
+      ? toMs - fromMs
+      : undefined;
+  }, [activePreset, fromParam, toParam]);
+  const normalizedBucket = normalizeBucketResolution(
+    activePreset,
+    requestedBucket,
+    customDurationMs
+  );
+
+  useEffect(() => {
+    if (requestedBucket === normalizedBucket || (requestedBucket === null && normalizedBucket === "auto")) return;
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (normalizedBucket === "auto") next.delete("bucket");
+      else next.set("bucket", normalizedBucket);
+      return next;
+    }, { replace: true });
+  }, [normalizedBucket, requestedBucket, setSearchParams]);
 
   // Sync snapshot when preset or custom params change
   const handlePresetChange = (nextPreset: UsageRangePreset) => {
@@ -100,7 +149,7 @@ export const UsagePage: React.FC = () => {
       // Reset bucket if invalid for the new preset
       const valid = getValidBuckets(nextPreset);
       if (!valid.includes(bucketParam)) {
-        next.set("bucket", "auto");
+        next.delete("bucket");
       }
       return next;
     });
@@ -170,14 +219,14 @@ export const UsagePage: React.FC = () => {
     queryKey: usageQueryKeys.timeseries({
       after: bounds.after,
       before: bounds.before,
-      bucket: bucketParam,
+      bucket: normalizedBucket,
     }),
     queryFn: ({ signal }) =>
       getUsageTimeseries(
         {
           after: bounds.after,
           before: bounds.before,
-          bucket: bucketParam === "auto" ? undefined : bucketParam,
+          bucket: normalizedBucket === "auto" ? undefined : normalizedBucket,
         },
         signal
       ),
@@ -224,18 +273,25 @@ export const UsagePage: React.FC = () => {
         signal
       ),
     enabled: Boolean(prevBounds),
-    placeholderData: keepPreviousData,
+    // Never retain a previous comparison for a different window: that would
+    // present a stale delta as if it matched the current range.
+    placeholderData: undefined,
     refetchInterval: false,
     refetchOnWindowFocus: false,
   });
 
   // Manual refresh trigger
   const handleRefresh = () => {
-    // Re-snapshot the bounds if not custom
     if (activePreset !== "custom") {
       const freshBounds = computePresetBounds(activePreset);
-      setBounds(freshBounds);
+      const boundsChanged =
+        freshBounds.after !== bounds.after || freshBounds.before !== bounds.before;
+      if (boundsChanged) {
+        setBounds(freshBounds);
+        return;
+      }
     }
+
     timeseriesQuery.refetch();
     breakdownQuery.refetch();
     if (prevBounds) {
@@ -256,9 +312,12 @@ export const UsagePage: React.FC = () => {
     let errorRequests = 0;
     let rejectedRequests = 0;
     let peakBucketRequests = 0;
-    let inputTokens = 0;
-    let cachedInputTokens = 0;
-    let outputTokens = 0;
+    let inputTokenSum = 0;
+    let cachedInputTokenSum = 0;
+    let outputTokenSum = 0;
+    let inputTokensKnown = true;
+    let cachedInputTokensKnown = true;
+    let outputTokensKnown = true;
     let costSum: number | null = null;
     let hasCost = false;
 
@@ -277,9 +336,12 @@ export const UsagePage: React.FC = () => {
       if (b.total_requests > peakBucketRequests) {
         peakBucketRequests = b.total_requests;
       }
-      inputTokens += b.input_tokens;
-      cachedInputTokens += b.cached_input_tokens;
-      outputTokens += b.output_tokens;
+      if (b.input_tokens === null) inputTokensKnown = false;
+      else inputTokenSum += b.input_tokens;
+      if (b.cached_input_tokens === null) cachedInputTokensKnown = false;
+      else cachedInputTokenSum += b.cached_input_tokens;
+      if (b.output_tokens === null) outputTokensKnown = false;
+      else outputTokenSum += b.output_tokens;
 
       if (b.cost_micros !== null) {
         costSum = (costSum ?? 0) + b.cost_micros;
@@ -306,9 +368,9 @@ export const UsagePage: React.FC = () => {
       errorRequests,
       rejectedRequests,
       peakBucketRequests,
-      inputTokens,
-      cachedInputTokens,
-      outputTokens,
+      inputTokens: inputTokensKnown ? inputTokenSum : null,
+      cachedInputTokens: cachedInputTokensKnown ? cachedInputTokenSum : null,
+      outputTokens: outputTokensKnown ? outputTokenSum : null,
       totalCostMicros: hasCost ? costSum : null,
       avgTotalLatencyMicros:
         totalLatencySamples > 0 ? Math.round(totalWeightedLatency / totalLatencySamples) : null,
@@ -327,13 +389,15 @@ export const UsagePage: React.FC = () => {
 
     let totalReq = 0;
     let totalTokens = 0;
+    let tokensKnown = true;
     let costSum: number | null = null;
     let hasCost = false;
     let errorReq = 0;
 
     for (const b of buckets) {
       totalReq += b.total_requests;
-      totalTokens += b.input_tokens + b.output_tokens;
+      if (b.input_tokens === null || b.output_tokens === null) tokensKnown = false;
+      else totalTokens += b.input_tokens + b.output_tokens;
       errorReq += b.error_requests + b.rejected_requests;
       if (b.cost_micros !== null) {
         costSum = (costSum ?? 0) + b.cost_micros;
@@ -343,7 +407,7 @@ export const UsagePage: React.FC = () => {
 
     return {
       requests: totalReq,
-      tokens: totalTokens,
+      tokens: tokensKnown ? totalTokens : null,
       costMicros: hasCost ? costSum : null,
       errors: errorReq,
     };
@@ -357,7 +421,9 @@ export const UsagePage: React.FC = () => {
   const tokenDelta = useMemo(
     () =>
       calculateUsageDelta(
-        kpiData.inputTokens + kpiData.outputTokens,
+        kpiData.inputTokens !== null || kpiData.outputTokens !== null
+          ? (kpiData.inputTokens ?? 0) + (kpiData.outputTokens ?? 0)
+          : null,
         prevTotals?.tokens,
         { isTokens: true }
       ),
@@ -404,9 +470,9 @@ export const UsagePage: React.FC = () => {
     successful_requests: 0,
     error_requests: 0,
     rejected_requests: 0,
-    input_tokens: 0,
-    cached_input_tokens: 0,
-    output_tokens: 0,
+    input_tokens: null,
+    cached_input_tokens: null,
+    output_tokens: null,
     cost_micros: null,
   };
   const breakdownTotal = breakdownQuery.data?.total || {
@@ -414,9 +480,9 @@ export const UsagePage: React.FC = () => {
     successful_requests: 0,
     error_requests: 0,
     rejected_requests: 0,
-    input_tokens: 0,
-    cached_input_tokens: 0,
-    output_tokens: 0,
+    input_tokens: null,
+    cached_input_tokens: null,
+    output_tokens: null,
     cost_micros: null,
   };
 

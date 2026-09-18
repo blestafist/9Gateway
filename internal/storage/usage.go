@@ -20,6 +20,11 @@ var (
 	ErrInvalidGroupBy = errors.New("invalid group_by parameter")
 )
 
+func zeroInt64() *int64 {
+	zero := int64(0)
+	return &zero
+}
+
 // UsageTimeseriesBucket represents an individual aggregated time bucket in a time series.
 type UsageTimeseriesBucket struct {
 	BucketStart              time.Time `json:"bucket_start"`
@@ -28,9 +33,9 @@ type UsageTimeseriesBucket struct {
 	SuccessfulRequests       int64     `json:"successful_requests"`
 	ErrorRequests            int64     `json:"error_requests"`
 	RejectedRequests         int64     `json:"rejected_requests"`
-	InputTokens              int64     `json:"input_tokens"`
-	CachedInputTokens        int64     `json:"cached_input_tokens"`
-	OutputTokens             int64     `json:"output_tokens"`
+	InputTokens              *int64    `json:"input_tokens"`
+	CachedInputTokens        *int64    `json:"cached_input_tokens"`
+	OutputTokens             *int64    `json:"output_tokens"`
 	CostMicros               *int64    `json:"cost_micros"`
 	AvgTotalLatencyMicros    *int64    `json:"avg_total_latency_micros"`
 	TotalLatencySamples      int64     `json:"total_latency_samples"`
@@ -63,9 +68,9 @@ type UsageBreakdownRow struct {
 	SuccessfulRequests int64   `json:"successful_requests"`
 	ErrorRequests      int64   `json:"error_requests"`
 	RejectedRequests   int64   `json:"rejected_requests"`
-	InputTokens        int64   `json:"input_tokens"`
-	CachedInputTokens  int64   `json:"cached_input_tokens"`
-	OutputTokens       int64   `json:"output_tokens"`
+	InputTokens        *int64  `json:"input_tokens"`
+	CachedInputTokens  *int64  `json:"cached_input_tokens"`
+	OutputTokens       *int64  `json:"output_tokens"`
 	CostMicros         *int64  `json:"cost_micros"`
 }
 
@@ -75,9 +80,9 @@ type UsageBreakdownTotal struct {
 	SuccessfulRequests int64  `json:"successful_requests"`
 	ErrorRequests      int64  `json:"error_requests"`
 	RejectedRequests   int64  `json:"rejected_requests"`
-	InputTokens        int64  `json:"input_tokens"`
-	CachedInputTokens  int64  `json:"cached_input_tokens"`
-	OutputTokens       int64  `json:"output_tokens"`
+	InputTokens        *int64 `json:"input_tokens"`
+	CachedInputTokens  *int64 `json:"cached_input_tokens"`
+	OutputTokens       *int64 `json:"output_tokens"`
 	CostMicros         *int64 `json:"cost_micros"`
 }
 
@@ -313,12 +318,12 @@ func GetUsageTimeseries(ctx context.Context, db dbQueries, reqAfter *time.Time, 
 			%s AS b_micros,
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(cached_input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			SUM(cost_micros),
+			CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+			CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+			CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+			CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END,
 			COUNT(cost_micros),
 			ROUND(AVG(total_micros)),
 			COUNT(total_micros),
@@ -343,9 +348,9 @@ func GetUsageTimeseries(ctx context.Context, db dbQueries, reqAfter *time.Time, 
 		successfulRequests int64
 		errorRequests      int64
 		rejectedRequests   int64
-		inputTokens        int64
-		cachedInputTokens  int64
-		outputTokens       int64
+		inputTokens        *int64
+		cachedInputTokens  *int64
+		outputTokens       *int64
 		costMicros         *int64
 		avgTotalLatency    *int64
 		totalLatencyCount  int64
@@ -364,9 +369,9 @@ func GetUsageTimeseries(ctx context.Context, db dbQueries, reqAfter *time.Time, 
 			succReq        int64
 			errReq         int64
 			rejReq         int64
-			inTok          int64
-			cacheTok       int64
-			outTok         int64
+			inTokNull      sql.NullInt64
+			cacheTokNull   sql.NullInt64
+			outTokNull     sql.NullInt64
 			costSumNull    sql.NullInt64
 			costCount      int64
 			avgTotNull     sql.NullInt64
@@ -382,9 +387,9 @@ func GetUsageTimeseries(ctx context.Context, db dbQueries, reqAfter *time.Time, 
 			&succReq,
 			&errReq,
 			&rejReq,
-			&inTok,
-			&cacheTok,
-			&outTok,
+			&inTokNull,
+			&cacheTokNull,
+			&outTokNull,
 			&costSumNull,
 			&costCount,
 			&avgTotNull,
@@ -402,15 +407,24 @@ func GetUsageTimeseries(ctx context.Context, db dbQueries, reqAfter *time.Time, 
 			successfulRequests: succReq,
 			errorRequests:      errReq,
 			rejectedRequests:   rejReq,
-			inputTokens:        inTok,
-			cachedInputTokens:  cacheTok,
-			outputTokens:       outTok,
 			totalLatencyCount:  totLatCount,
 			ttfbLatencyCount:   ttfbLatCount,
 			upstreamLatencyCnt: upLatCount,
 		}
 
-		if costCount > 0 && costSumNull.Valid {
+		if inTokNull.Valid {
+			v := inTokNull.Int64
+			rec.inputTokens = &v
+		}
+		if cacheTokNull.Valid {
+			v := cacheTokNull.Int64
+			rec.cachedInputTokens = &v
+		}
+		if outTokNull.Valid {
+			v := outTokNull.Int64
+			rec.outputTokens = &v
+		}
+		if costSumNull.Valid {
 			v := costSumNull.Int64
 			rec.costMicros = &v
 		}
@@ -434,7 +448,6 @@ func GetUsageTimeseries(ctx context.Context, db dbQueries, reqAfter *time.Time, 
 		return nil, err
 	}
 
-	zeroCost := int64(0)
 	resultBuckets := make([]UsageTimeseriesBucket, 0, len(expectedBuckets))
 
 	for _, bStart := range expectedBuckets {
@@ -463,7 +476,10 @@ func GetUsageTimeseries(ctx context.Context, db dbQueries, reqAfter *time.Time, 
 			bucketItem.UpstreamLatencySamples = rec.upstreamLatencyCnt
 		} else {
 			// Filled missing bucket
-			bucketItem.CostMicros = &zeroCost
+			bucketItem.InputTokens = zeroInt64()
+			bucketItem.CachedInputTokens = zeroInt64()
+			bucketItem.OutputTokens = zeroInt64()
+			bucketItem.CostMicros = zeroInt64()
 		}
 
 		resultBuckets = append(resultBuckets, bucketItem)
@@ -524,28 +540,27 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 		effectiveAfter = before
 	}
 
-	zeroCost := int64(0)
-
 	// Untruncated total query
 	totalQuery := `
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(cached_input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			SUM(cost_micros),
-			COUNT(cost_micros)
+			CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+			CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+			CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+			CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END
 		FROM requests
 		WHERE finished_at >= ? AND finished_at <= ?
 	`
 
 	var (
 		total        UsageBreakdownTotal
+		totInTokNull sql.NullInt64
+		totCacheNull sql.NullInt64
+		totOutNull   sql.NullInt64
 		totCostNull  sql.NullInt64
-		totCostCount int64
 	)
 
 	row := db.QueryRowContext(ctx, totalQuery, effectiveAfter.UnixMicro(), before.UnixMicro())
@@ -554,20 +569,36 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 		&total.SuccessfulRequests,
 		&total.ErrorRequests,
 		&total.RejectedRequests,
-		&total.InputTokens,
-		&total.CachedInputTokens,
-		&total.OutputTokens,
+		&totInTokNull,
+		&totCacheNull,
+		&totOutNull,
 		&totCostNull,
-		&totCostCount,
 	); err != nil {
 		return nil, err
 	}
 
-	if totCostCount > 0 && totCostNull.Valid {
-		v := totCostNull.Int64
-		total.CostMicros = &v
-	} else if total.TotalRequests == 0 {
-		total.CostMicros = &zeroCost
+	if total.TotalRequests == 0 {
+		total.InputTokens = zeroInt64()
+		total.CachedInputTokens = zeroInt64()
+		total.OutputTokens = zeroInt64()
+		total.CostMicros = zeroInt64()
+	} else {
+		if totInTokNull.Valid {
+			v := totInTokNull.Int64
+			total.InputTokens = &v
+		}
+		if totCacheNull.Valid {
+			v := totCacheNull.Int64
+			total.CachedInputTokens = &v
+		}
+		if totOutNull.Valid {
+			v := totOutNull.Int64
+			total.OutputTokens = &v
+		}
+		if totCostNull.Valid {
+			v := totCostNull.Int64
+			total.CostMicros = &v
+		}
 	}
 
 	// Empty result check
@@ -582,18 +613,20 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 			LatestRetainedAt:   latest,
 			Rows:               []UsageBreakdownRow{},
 			Other: UsageBreakdownRow{
-				ID:         "other",
-				Name:       "Other",
-				CostMicros: &zeroCost,
+				ID:                "other",
+				Name:              "Other",
+				InputTokens:       zeroInt64(),
+				CachedInputTokens: zeroInt64(),
+				OutputTokens:      zeroInt64(),
+				CostMicros:        zeroInt64(),
 			},
 			Total: total,
 		}, nil
 	}
 
 	var rows []UsageBreakdownRow
-	var sumRows UsageBreakdownTotal
-	var sumCostCount int64
-	var sumKnownCost int64
+	var sumRowsTotalReq, sumRowsSuccReq, sumRowsErrReq, sumRowsRejReq int64
+	var sumKnownInput, sumKnownCached, sumKnownOutput, sumKnownCost int64
 
 	switch groupBy {
 	case "model":
@@ -602,13 +635,12 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				COALESCE(model, '') AS model_name,
 				COUNT(*) AS total_reqs,
 				COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 				COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(input_tokens), 0),
-				COALESCE(SUM(cached_input_tokens), 0),
-				COALESCE(SUM(output_tokens), 0),
-				SUM(cost_micros),
-				COUNT(cost_micros)
+				CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+				CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+				CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+				CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END
 			FROM requests
 			WHERE finished_at >= ? AND finished_at <= ?
 			GROUP BY model_name
@@ -623,10 +655,12 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 
 		for sqlRows.Next() {
 			var (
-				modelName string
-				r         UsageBreakdownRow
-				costNull  sql.NullInt64
-				costCnt   int64
+				modelName    string
+				r            UsageBreakdownRow
+				inTokNull    sql.NullInt64
+				cacheTokNull sql.NullInt64
+				outTokNull   sql.NullInt64
+				costNull     sql.NullInt64
 			)
 			if err := sqlRows.Scan(
 				&modelName,
@@ -634,11 +668,10 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				&r.SuccessfulRequests,
 				&r.ErrorRequests,
 				&r.RejectedRequests,
-				&r.InputTokens,
-				&r.CachedInputTokens,
-				&r.OutputTokens,
+				&inTokNull,
+				&cacheTokNull,
+				&outTokNull,
 				&costNull,
-				&costCnt,
 			); err != nil {
 				return nil, err
 			}
@@ -652,22 +685,31 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				r.Name = modelName
 			}
 
-			if costCnt > 0 && costNull.Valid {
+			if inTokNull.Valid {
+				v := inTokNull.Int64
+				r.InputTokens = &v
+				sumKnownInput += v
+			}
+			if cacheTokNull.Valid {
+				v := cacheTokNull.Int64
+				r.CachedInputTokens = &v
+				sumKnownCached += v
+			}
+			if outTokNull.Valid {
+				v := outTokNull.Int64
+				r.OutputTokens = &v
+				sumKnownOutput += v
+			}
+			if costNull.Valid {
 				v := costNull.Int64
 				r.CostMicros = &v
 				sumKnownCost += v
-			} else if r.TotalRequests == 0 {
-				r.CostMicros = &zeroCost
 			}
 
-			sumRows.TotalRequests += r.TotalRequests
-			sumRows.SuccessfulRequests += r.SuccessfulRequests
-			sumRows.ErrorRequests += r.ErrorRequests
-			sumRows.RejectedRequests += r.RejectedRequests
-			sumRows.InputTokens += r.InputTokens
-			sumRows.CachedInputTokens += r.CachedInputTokens
-			sumRows.OutputTokens += r.OutputTokens
-			sumCostCount += costCnt
+			sumRowsTotalReq += r.TotalRequests
+			sumRowsSuccReq += r.SuccessfulRequests
+			sumRowsErrReq += r.ErrorRequests
+			sumRowsRejReq += r.RejectedRequests
 
 			rows = append(rows, r)
 		}
@@ -681,13 +723,12 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				COALESCE(terminal_outcome, 'unknown') AS outcome_val,
 				COUNT(*) AS total_reqs,
 				COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 				COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(input_tokens), 0),
-				COALESCE(SUM(cached_input_tokens), 0),
-				COALESCE(SUM(output_tokens), 0),
-				SUM(cost_micros),
-				COUNT(cost_micros)
+				CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+				CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+				CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+				CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END
 			FROM requests
 			WHERE finished_at >= ? AND finished_at <= ?
 			GROUP BY outcome_val
@@ -702,10 +743,12 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 
 		for sqlRows.Next() {
 			var (
-				outcomeVal string
-				r          UsageBreakdownRow
-				costNull   sql.NullInt64
-				costCnt    int64
+				outcomeVal   string
+				r            UsageBreakdownRow
+				inTokNull    sql.NullInt64
+				cacheTokNull sql.NullInt64
+				outTokNull   sql.NullInt64
+				costNull     sql.NullInt64
 			)
 			if err := sqlRows.Scan(
 				&outcomeVal,
@@ -713,11 +756,10 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				&r.SuccessfulRequests,
 				&r.ErrorRequests,
 				&r.RejectedRequests,
-				&r.InputTokens,
-				&r.CachedInputTokens,
-				&r.OutputTokens,
+				&inTokNull,
+				&cacheTokNull,
+				&outTokNull,
 				&costNull,
-				&costCnt,
 			); err != nil {
 				return nil, err
 			}
@@ -728,22 +770,31 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				r.IsUnknown = true
 			}
 
-			if costCnt > 0 && costNull.Valid {
+			if inTokNull.Valid {
+				v := inTokNull.Int64
+				r.InputTokens = &v
+				sumKnownInput += v
+			}
+			if cacheTokNull.Valid {
+				v := cacheTokNull.Int64
+				r.CachedInputTokens = &v
+				sumKnownCached += v
+			}
+			if outTokNull.Valid {
+				v := outTokNull.Int64
+				r.OutputTokens = &v
+				sumKnownOutput += v
+			}
+			if costNull.Valid {
 				v := costNull.Int64
 				r.CostMicros = &v
 				sumKnownCost += v
-			} else if r.TotalRequests == 0 {
-				r.CostMicros = &zeroCost
 			}
 
-			sumRows.TotalRequests += r.TotalRequests
-			sumRows.SuccessfulRequests += r.SuccessfulRequests
-			sumRows.ErrorRequests += r.ErrorRequests
-			sumRows.RejectedRequests += r.RejectedRequests
-			sumRows.InputTokens += r.InputTokens
-			sumRows.CachedInputTokens += r.CachedInputTokens
-			sumRows.OutputTokens += r.OutputTokens
-			sumCostCount += costCnt
+			sumRowsTotalReq += r.TotalRequests
+			sumRowsSuccReq += r.SuccessfulRequests
+			sumRowsErrReq += r.ErrorRequests
+			sumRowsRejReq += r.RejectedRequests
 
 			rows = append(rows, r)
 		}
@@ -772,13 +823,12 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				END AS is_deleted,
 				COUNT(*) AS total_reqs,
 				COALESCE(SUM(CASE WHEN r.terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN r.terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN r.terminal_outcome IS NULL OR r.terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 				COALESCE(SUM(CASE WHEN r.terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(r.input_tokens), 0),
-				COALESCE(SUM(r.cached_input_tokens), 0),
-				COALESCE(SUM(r.output_tokens), 0),
-				SUM(r.cost_micros),
-				COUNT(r.cost_micros)
+				CASE WHEN COUNT(r.input_tokens) < COUNT(*) THEN NULL ELSE SUM(r.input_tokens) END,
+				CASE WHEN COUNT(r.cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(r.cached_input_tokens) END,
+				CASE WHEN COUNT(r.output_tokens) < COUNT(*) THEN NULL ELSE SUM(r.output_tokens) END,
+				CASE WHEN COUNT(r.cost_micros) < COUNT(*) THEN NULL ELSE SUM(r.cost_micros) END
 			FROM requests r
 			LEFT JOIN api_keys k ON r.api_key_id = k.id
 			WHERE r.finished_at >= ? AND r.finished_at <= ?
@@ -794,14 +844,16 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 
 		for sqlRows.Next() {
 			var (
-				groupKey string
-				keyIDVal string
-				nameVal  string
-				isUnk    int
-				isDel    int
-				r        UsageBreakdownRow
-				costNull sql.NullInt64
-				costCnt  int64
+				groupKey     string
+				keyIDVal     string
+				nameVal      string
+				isUnk        int
+				isDel        int
+				r            UsageBreakdownRow
+				inTokNull    sql.NullInt64
+				cacheTokNull sql.NullInt64
+				outTokNull   sql.NullInt64
+				costNull     sql.NullInt64
 			)
 			if err := sqlRows.Scan(
 				&groupKey,
@@ -813,11 +865,10 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				&r.SuccessfulRequests,
 				&r.ErrorRequests,
 				&r.RejectedRequests,
-				&r.InputTokens,
-				&r.CachedInputTokens,
-				&r.OutputTokens,
+				&inTokNull,
+				&cacheTokNull,
+				&outTokNull,
 				&costNull,
-				&costCnt,
 			); err != nil {
 				return nil, err
 			}
@@ -842,22 +893,31 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 				}
 			}
 
-			if costCnt > 0 && costNull.Valid {
+			if inTokNull.Valid {
+				v := inTokNull.Int64
+				r.InputTokens = &v
+				sumKnownInput += v
+			}
+			if cacheTokNull.Valid {
+				v := cacheTokNull.Int64
+				r.CachedInputTokens = &v
+				sumKnownCached += v
+			}
+			if outTokNull.Valid {
+				v := outTokNull.Int64
+				r.OutputTokens = &v
+				sumKnownOutput += v
+			}
+			if costNull.Valid {
 				v := costNull.Int64
 				r.CostMicros = &v
 				sumKnownCost += v
-			} else if r.TotalRequests == 0 {
-				r.CostMicros = &zeroCost
 			}
 
-			sumRows.TotalRequests += r.TotalRequests
-			sumRows.SuccessfulRequests += r.SuccessfulRequests
-			sumRows.ErrorRequests += r.ErrorRequests
-			sumRows.RejectedRequests += r.RejectedRequests
-			sumRows.InputTokens += r.InputTokens
-			sumRows.CachedInputTokens += r.CachedInputTokens
-			sumRows.OutputTokens += r.OutputTokens
-			sumCostCount += costCnt
+			sumRowsTotalReq += r.TotalRequests
+			sumRowsSuccReq += r.SuccessfulRequests
+			sumRowsErrReq += r.ErrorRequests
+			sumRowsRejReq += r.RejectedRequests
 
 			rows = append(rows, r)
 		}
@@ -874,27 +934,38 @@ func GetUsageBreakdown(ctx context.Context, db dbQueries, reqAfter *time.Time, b
 	}
 
 	// Calculate other aggregate
-	otherTotalReq := total.TotalRequests - sumRows.TotalRequests
+	otherTotalReq := total.TotalRequests - sumRowsTotalReq
 	other := UsageBreakdownRow{
 		ID:                 "other",
 		Name:               "Other",
 		TotalRequests:      otherTotalReq,
-		SuccessfulRequests: total.SuccessfulRequests - sumRows.SuccessfulRequests,
-		ErrorRequests:      total.ErrorRequests - sumRows.ErrorRequests,
-		RejectedRequests:   total.RejectedRequests - sumRows.RejectedRequests,
-		InputTokens:        total.InputTokens - sumRows.InputTokens,
-		CachedInputTokens:  total.CachedInputTokens - sumRows.CachedInputTokens,
-		OutputTokens:       total.OutputTokens - sumRows.OutputTokens,
+		SuccessfulRequests: total.SuccessfulRequests - sumRowsSuccReq,
+		ErrorRequests:      total.ErrorRequests - sumRowsErrReq,
+		RejectedRequests:   total.RejectedRequests - sumRowsRejReq,
 	}
 
-	otherCostCount := totCostCount - sumCostCount
 	if otherTotalReq == 0 {
-		other.CostMicros = &zeroCost
-	} else if otherCostCount == 0 {
-		other.CostMicros = nil // Unknown cost
-	} else if total.CostMicros != nil {
-		diffCost := *total.CostMicros - sumKnownCost
-		other.CostMicros = &diffCost
+		other.InputTokens = zeroInt64()
+		other.CachedInputTokens = zeroInt64()
+		other.OutputTokens = zeroInt64()
+		other.CostMicros = zeroInt64()
+	} else {
+		if total.InputTokens != nil {
+			diffInput := *total.InputTokens - sumKnownInput
+			other.InputTokens = &diffInput
+		}
+		if total.CachedInputTokens != nil {
+			diffCached := *total.CachedInputTokens - sumKnownCached
+			other.CachedInputTokens = &diffCached
+		}
+		if total.OutputTokens != nil {
+			diffOutput := *total.OutputTokens - sumKnownOutput
+			other.OutputTokens = &diffOutput
+		}
+		if total.CostMicros != nil {
+			diffCost := *total.CostMicros - sumKnownCost
+			other.CostMicros = &diffCost
+		}
 	}
 
 	return &UsageBreakdownData{

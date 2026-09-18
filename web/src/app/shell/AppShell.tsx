@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Outlet, NavLink, Link, useLocation } from "react-router-dom";
 import { Menu, Zap, Sun, Moon } from "lucide-react";
 import { Drawer, IconButton, StatusPill } from "../../shared/ui";
@@ -25,6 +25,7 @@ function getInitialCollapsedState(): boolean {
 export const AppShell: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState<boolean>(getInitialCollapsedState);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const mobileMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
 
@@ -68,8 +69,9 @@ export const AppShell: React.FC = () => {
           aria-controls="mobile-navigation-drawer"
           variant="ghost"
           size="md"
-          onClick={() => setIsMobileDrawerOpen(true)}
-          data-testid="mobile-menu-btn"
+           ref={mobileMenuTriggerRef}
+           onClick={() => setIsMobileDrawerOpen(true)}
+           data-testid="mobile-menu-btn"
         />
 
         <Link to="/overview" className="gw-mobile-brand">
@@ -97,8 +99,9 @@ export const AppShell: React.FC = () => {
         onClose={() => setIsMobileDrawerOpen(false)}
         title="9Gateway Console"
         description="Operations navigation"
-        placement="left"
-      >
+         placement="left"
+         restoreFocusTo={mobileMenuTriggerRef}
+       >
         <div id="mobile-navigation-drawer" className="gw-mobile-drawer-nav">
           {NAV_ITEMS.map((item) => (
             <NavLink

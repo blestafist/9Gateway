@@ -38,12 +38,12 @@ func TestUsageTimeseriesQueryPlan(t *testing.T) {
 				%s AS b_micros,
 				COUNT(*),
 				COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 				COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(input_tokens), 0),
-				COALESCE(SUM(cached_input_tokens), 0),
-				COALESCE(SUM(output_tokens), 0),
-				SUM(cost_micros),
+				CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+				CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+				CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+				CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END,
 				COUNT(cost_micros),
 				ROUND(AVG(total_micros)),
 				COUNT(total_micros),
@@ -97,13 +97,12 @@ func TestUsageBreakdownQueryPlan(t *testing.T) {
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(cached_input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			SUM(cost_micros),
-			COUNT(cost_micros)
+			CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+			CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+			CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+			CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END
 		FROM requests
 		WHERE finished_at >= ? AND finished_at <= ?`
 
@@ -134,13 +133,12 @@ func TestUsageBreakdownQueryPlan(t *testing.T) {
 			COALESCE(model, '') AS model_name,
 			COUNT(*) AS total_reqs,
 			COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(cached_input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			SUM(cost_micros),
-			COUNT(cost_micros)
+			CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+			CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+			CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+			CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END
 		FROM requests
 		WHERE finished_at >= ? AND finished_at <= ?
 		GROUP BY model_name
@@ -257,6 +255,9 @@ func TestUsageTimeseriesMissingBucketsAndNullableCost(t *testing.T) {
 		RequestID:             "00000000000000000000000000000001",
 		TerminalOutcome:       "complete",
 		UpstreamStarted:       true,
+		InputTokens:           KnownInt64(4),
+		CachedInputTokens:     KnownInt64(1),
+		OutputTokens:          KnownInt64(5),
 		CostMicros:            KnownInt64(500),
 		TotalMicros:           KnownInt64(20000),
 		TimeToFirstByteMicros: KnownInt64(10000),
@@ -295,6 +296,9 @@ func TestUsageTimeseriesMissingBucketsAndNullableCost(t *testing.T) {
 	if b0.TotalRequests != 1 || b0.SuccessfulRequests != 1 {
 		t.Errorf("b0 total=%d succ=%d, want 1, 1", b0.TotalRequests, b0.SuccessfulRequests)
 	}
+	if b0.InputTokens == nil || *b0.InputTokens != 4 || b0.CachedInputTokens == nil || *b0.CachedInputTokens != 1 || b0.OutputTokens == nil || *b0.OutputTokens != 5 {
+		t.Errorf("b0 tokens input=%v cached=%v output=%v, want 4, 1, 5", b0.InputTokens, b0.CachedInputTokens, b0.OutputTokens)
+	}
 	if b0.CostMicros == nil || *b0.CostMicros != 500 {
 		t.Errorf("b0 cost=%v, want 500", b0.CostMicros)
 	}
@@ -316,8 +320,11 @@ func TestUsageTimeseriesMissingBucketsAndNullableCost(t *testing.T) {
 
 	// Bucket 2 (14:00 - 15:00): has rec2 (pre_upstream, null cost, null latency)
 	b2 := data.Buckets[2]
-	if b2.TotalRequests != 1 || b2.RejectedRequests != 1 {
-		t.Errorf("b2 total=%d rej=%d, want 1, 1", b2.TotalRequests, b2.RejectedRequests)
+	if b2.TotalRequests != 1 || b2.RejectedRequests != 1 || b2.ErrorRequests != 0 {
+		t.Errorf("b2 total=%d error=%d rej=%d, want 1, 0, 1", b2.TotalRequests, b2.ErrorRequests, b2.RejectedRequests)
+	}
+	if b2.InputTokens != nil || b2.CachedInputTokens != nil || b2.OutputTokens != nil {
+		t.Errorf("b2 token sums should be nil for unknown usage, got input=%v cached=%v output=%v", b2.InputTokens, b2.CachedInputTokens, b2.OutputTokens)
 	}
 	if b2.CostMicros != nil {
 		t.Errorf("b2 cost should be nil (unknown), got %v", *b2.CostMicros)
@@ -438,13 +445,17 @@ func TestUsageBreakdownTop20AndOther(t *testing.T) {
 	)
 	for _, r := range data.Rows {
 		sumReq += r.TotalRequests
-		sumInput += r.InputTokens
+		if r.InputTokens != nil {
+			sumInput += *r.InputTokens
+		}
 		if r.CostMicros != nil {
 			sumCost += *r.CostMicros
 		}
 	}
 	sumReq += data.Other.TotalRequests
-	sumInput += data.Other.InputTokens
+	if data.Other.InputTokens != nil {
+		sumInput += *data.Other.InputTokens
+	}
 	if data.Other.CostMicros != nil {
 		sumCost += *data.Other.CostMicros
 	}
@@ -452,8 +463,8 @@ func TestUsageBreakdownTop20AndOther(t *testing.T) {
 	if sumReq != data.Total.TotalRequests {
 		t.Errorf("sumReq %d != total %d", sumReq, data.Total.TotalRequests)
 	}
-	if sumInput != data.Total.InputTokens {
-		t.Errorf("sumInput %d != total %d", sumInput, data.Total.InputTokens)
+	if data.Total.InputTokens == nil || sumInput != *data.Total.InputTokens {
+		t.Errorf("sumInput %d != total %v", sumInput, data.Total.InputTokens)
 	}
 	if data.Total.CostMicros == nil || sumCost != *data.Total.CostMicros {
 		t.Errorf("sumCost %d != total %v", sumCost, data.Total.CostMicros)

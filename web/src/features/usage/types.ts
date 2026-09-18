@@ -30,9 +30,9 @@ export interface UsageTimeseriesBucket {
   successful_requests: number;
   error_requests: number;
   rejected_requests: number;
-  input_tokens: number;
-  cached_input_tokens: number;
-  output_tokens: number;
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
   cost_micros: number | null;
   avg_total_latency_micros: number | null;
   total_latency_samples: number;
@@ -63,9 +63,9 @@ export interface UsageBreakdownRow {
   successful_requests: number;
   error_requests: number;
   rejected_requests: number;
-  input_tokens: number;
-  cached_input_tokens: number;
-  output_tokens: number;
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
   cost_micros: number | null;
 }
 
@@ -74,9 +74,9 @@ export interface UsageBreakdownTotal {
   successful_requests: number;
   error_requests: number;
   rejected_requests: number;
-  input_tokens: number;
-  cached_input_tokens: number;
-  output_tokens: number;
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
   cost_micros: number | null;
 }
 

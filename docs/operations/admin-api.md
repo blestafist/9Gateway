@@ -219,10 +219,10 @@ The response payload contains:
   - `bucket_start`, `bucket_end`: RFC3339 UTC timestamps.
   - `total_requests`: total finished requests in the bucket.
   - `successful_requests`: requests with terminal outcome `complete` or `custom_dispatch`.
-  - `error_requests`: requests with error terminal outcomes (excluding `pre_upstream`).
+  - `error_requests`: requests with error terminal outcomes (excluding `pre_upstream`), plus requests whose terminal outcome is `NULL`/unknown.
   - `rejected_requests`: requests rejected before upstream dispatch (`pre_upstream`).
-  - `input_tokens`, `cached_input_tokens`, `output_tokens`: integer token counts.
-  - `cost_micros`: nullable integer estimated cost in microdollars. Returns `null` when cost is unknown or cannot be estimated; returns `0` when zero or when no requests occurred in the bucket.
+  - `input_tokens`, `cached_input_tokens`, `output_tokens`: nullable integer token totals. They are `null` when any request in the bucket has an unknown value; they are `0` for an explicitly known zero, including a filled bucket with no requests.
+  - `cost_micros`: nullable integer estimated cost in microdollars. Returns `null` when any request in the bucket has unknown or unestimated cost; returns `0` when all values are known zero or when no requests occurred in the bucket.
   - `avg_total_latency_micros`: nullable integer average total request latency in microseconds (`null` when no latency samples exist in the bucket).
   - `total_latency_samples`: sample count for total latency (allows UI to render gaps rather than misleading zeroes).
   - `avg_ttfb_latency_micros`: nullable integer average time-to-first-byte latency in microseconds (`null` when no samples exist).
@@ -266,11 +266,12 @@ The response payload contains:
   - `key_id`: optional string containing the key ID when grouping by `key`.
   - `is_unknown`: boolean flag indicating whether the entity was unidentified (`true` for missing model or key).
   - `is_deleted`: boolean flag indicating whether the API key was deleted from key configuration (`true` when grouping by `key` and key is deleted).
-  - `total_requests`, `successful_requests`, `error_requests`, `rejected_requests`: integer request counts.
-  - `input_tokens`, `cached_input_tokens`, `output_tokens`: integer token counts.
-  - `cost_micros`: nullable integer estimated cost in microdollars (`null` when cost is unknown).
-- `other`: aggregate row representing the sum of all dimensions beyond the top 20 (`id: "other"`, `name: "Other"`). Sum of top rows plus `other` matches `total` across all known metrics.
-- `total`: untruncated overall aggregate object containing total counts, tokens, and nullable `cost_micros` across the entire requested range.
+  - `total_requests`, `successful_requests`, `error_requests`, `rejected_requests`: integer request counts. `error_requests` includes `NULL`/unknown terminal outcomes; `pre_upstream` remains counted only as rejected.
+  - `input_tokens`, `cached_input_tokens`, `output_tokens`: nullable integer token totals. A dimension row is `null` when any request in that row has an unknown value; known zero remains `0`.
+  - `cost_micros`: nullable integer estimated cost in microdollars (`null` when any request in that row has unknown or unestimated cost; known zero remains `0`).
+  - `other`: aggregate row representing the sum of all dimensions beyond the top 20 (`id: "other"`, `name: "Other"`). Sum of top rows plus `other` matches `total` across all known metrics; if a metric's untruncated total is unknown, the corresponding `other` value remains `null` unless there are no omitted requests.
+
+- `total`: untruncated overall aggregate object containing total counts, nullable token totals, and nullable `cost_micros` across the entire requested range. A token or cost field is `null` when any request in the range has an unknown value, and is `0` for an empty range or known zero.
 
 ## Operational endpoints
 

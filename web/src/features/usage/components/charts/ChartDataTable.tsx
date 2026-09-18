@@ -151,10 +151,14 @@ export const ChartDataTable: React.FC<ChartDataTableProps> = ({ buckets, metric 
                       {formatTokenCount(b.output_tokens)}
                     </TableCell>
                     <TableCell style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>
-                      {formatTokenCount(b.input_tokens + b.output_tokens)}
+                      {formatTokenCount(
+                        b.input_tokens !== null && b.output_tokens !== null
+                          ? b.input_tokens + b.output_tokens
+                          : null
+                      )}
                     </TableCell>
                     <TableCell style={{ fontFamily: "var(--font-mono)" }}>
-                      {b.input_tokens > 0
+                      {b.input_tokens !== null && b.input_tokens > 0 && b.cached_input_tokens !== null
                         ? `${((b.cached_input_tokens / b.input_tokens) * 100).toFixed(1)}%`
                         : "—"}
                     </TableCell>

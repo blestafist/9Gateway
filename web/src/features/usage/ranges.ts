@@ -114,6 +114,17 @@ export function getValidBuckets(
   }
 }
 
+export function normalizeBucketResolution(
+  preset: UsageRangePreset,
+  requested: string | null | undefined,
+  customDurationMs?: number
+): UsageBucketResolution {
+  const valid = getValidBuckets(preset, customDurationMs);
+  return requested && valid.includes(requested as UsageBucketResolution)
+    ? (requested as UsageBucketResolution)
+    : "auto";
+}
+
 export function formatBucketLabel(bucket: UsageBucketResolution): string {
   switch (bucket) {
     case "auto":

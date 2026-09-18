@@ -440,6 +440,44 @@ describe("T167 OverviewPage Component and Lifecycle", () => {
     queryClient.clear();
   });
 
+  it("manual refresh with non-default period triggers exactly one fetch without overlap", async () => {
+    let fetchCount = 0;
+    const fetchUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      fetchCount++;
+      fetchUrls.push(url);
+      return mockJsonResponse(overviewFixture);
+    });
+
+    const { queryClient } = renderOverview({ initialEntries: ["/ui?period=1h"] });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("overview-refresh-btn")).toBeInTheDocument();
+    });
+
+    expect(fetchCount).toBe(1);
+    expect(fetchUrls[0]).toContain("after=");
+
+    // Advance clock so computeBounds will compute a new timestamp
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+
+    const refreshBtn = screen.getByTestId("overview-refresh-btn");
+    await act(async () => {
+      fireEvent.click(refreshBtn);
+    });
+
+    await waitFor(() => {
+      expect(fetchCount).toBe(2);
+    });
+
+    // Exactly one additional fetch was triggered (fetchCount is 2, not 3 from old-key + new-key)
+    expect(fetchCount).toBe(2);
+    expect(fetchUrls[1]).toContain("after=");
+    expect(fetchUrls[1]).not.toEqual(fetchUrls[0]);
+
+    queryClient.clear();
+  });
+
   it("handles long model and key strings with truncation and title attributes", async () => {
     const longModelRequest = {
       ...overviewFixture.recent_requests[0]!,

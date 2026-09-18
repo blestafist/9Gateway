@@ -21,12 +21,12 @@ func TestOverviewQueryPlan(t *testing.T) {
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN terminal_outcome IN ('complete', 'custom_dispatch') THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN terminal_outcome IS NULL OR terminal_outcome NOT IN ('complete', 'custom_dispatch', 'pre_upstream') THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN terminal_outcome = 'pre_upstream' THEN 1 ELSE 0 END), 0),
-			SUM(input_tokens),
-			SUM(cached_input_tokens),
-			SUM(output_tokens),
-			SUM(cost_micros)
+			CASE WHEN COUNT(input_tokens) < COUNT(*) THEN NULL ELSE SUM(input_tokens) END,
+			CASE WHEN COUNT(cached_input_tokens) < COUNT(*) THEN NULL ELSE SUM(cached_input_tokens) END,
+			CASE WHEN COUNT(output_tokens) < COUNT(*) THEN NULL ELSE SUM(output_tokens) END,
+			CASE WHEN COUNT(cost_micros) < COUNT(*) THEN NULL ELSE SUM(cost_micros) END
 		FROM requests
 		WHERE finished_at >= ? AND finished_at <= ?`
 
@@ -107,7 +107,7 @@ func TestOverviewAllTerminalOutcomesAndTotals(t *testing.T) {
 	after := baseTime.Add(-1 * time.Hour)
 	before := baseTime.Add(1 * time.Hour)
 
-	// Insert requests for each terminal outcome
+	// Insert requests for each terminal outcome, including NULL terminal outcome
 	outcomes := []struct {
 		id      string
 		outcome string
@@ -121,6 +121,7 @@ func TestOverviewAllTerminalOutcomesAndTotals(t *testing.T) {
 		{"00000000000000000000000000000004", "upstream_error", "upstream_timeout", 504, true},
 		{"00000000000000000000000000000005", "response_error", "response_transport_error", 502, true},
 		{"00000000000000000000000000000006", "cancelled", "cancelled", 499, true},
+		{"00000000000000000000000000000007", "", "", 500, true}, // Absent / NULL outcome classified as error
 	}
 
 	for i, o := range outcomes {
@@ -147,13 +148,13 @@ func TestOverviewAllTerminalOutcomesAndTotals(t *testing.T) {
 		t.Fatalf("GetOverview failed: %v", err)
 	}
 
-	// 6 total requests:
+	// 7 total requests:
 	// successful: 2 (complete, custom_dispatch)
 	// rejected: 1 (pre_upstream)
-	// error: 3 (upstream_error, response_error, cancelled)
+	// error: 4 (upstream_error, response_error, cancelled, plus absent/NULL outcome)
 	// Total must match sum and never double count!
-	if data.Current.TotalRequests != 6 {
-		t.Fatalf("total requests = %d, want 6", data.Current.TotalRequests)
+	if data.Current.TotalRequests != 7 {
+		t.Fatalf("total requests = %d, want 7", data.Current.TotalRequests)
 	}
 	if data.Current.SuccessfulRequests != 2 {
 		t.Fatalf("successful requests = %d, want 2", data.Current.SuccessfulRequests)
@@ -161,8 +162,8 @@ func TestOverviewAllTerminalOutcomesAndTotals(t *testing.T) {
 	if data.Current.RejectedRequests != 1 {
 		t.Fatalf("rejected requests = %d, want 1", data.Current.RejectedRequests)
 	}
-	if data.Current.ErrorRequests != 3 {
-		t.Fatalf("error requests = %d, want 3", data.Current.ErrorRequests)
+	if data.Current.ErrorRequests != 4 {
+		t.Fatalf("error requests = %d, want 4", data.Current.ErrorRequests)
 	}
 
 	sum := data.Current.SuccessfulRequests + data.Current.ErrorRequests + data.Current.RejectedRequests
@@ -195,6 +196,7 @@ func TestOverviewNullableUsage(t *testing.T) {
 	}
 
 	repo := NewAPIKeyRepository(database)
+	// Case 1: Range contains only rec1 (all unknown)
 	data, err := repo.GetOverview(context.Background(), after, before, 0)
 	if err != nil {
 		t.Fatalf("GetOverview: %v", err)
@@ -218,15 +220,26 @@ func TestOverviewNullableUsage(t *testing.T) {
 		t.Fatalf("persist rec2: %v", err)
 	}
 
+	// Case 2: Range contains rec1 (unknown) and rec2 (known 0) -> mixed known+unknown must be nil!
 	data, err = repo.GetOverview(context.Background(), after, before, 0)
 	if err != nil {
 		t.Fatalf("GetOverview: %v", err)
 	}
-	if data.Current.InputTokens == nil || *data.Current.InputTokens != 0 {
-		t.Fatalf("expected known 0 input tokens, got %v", data.Current.InputTokens)
+	if data.Current.InputTokens != nil || data.Current.CostMicros != nil {
+		t.Fatalf("expected nil tokens and cost for mixed known+unknown, got tokens=%v, cost=%v", data.Current.InputTokens, data.Current.CostMicros)
 	}
-	if data.Current.CostMicros == nil || *data.Current.CostMicros != 0 {
-		t.Fatalf("expected known 0 cost micros, got %v", data.Current.CostMicros)
+
+	// Case 3: Range contains only rec2 (known 0)
+	t2 := time.UnixMicro(baseTime.UnixMicro() + 2).UTC()
+	dataOnlyRec2, err := repo.GetOverview(context.Background(), t2, t2.Add(time.Microsecond), 0)
+	if err != nil {
+		t.Fatalf("GetOverview rec2: %v", err)
+	}
+	if dataOnlyRec2.Current.InputTokens == nil || *dataOnlyRec2.Current.InputTokens != 0 {
+		t.Fatalf("expected known 0 input tokens, got %v", dataOnlyRec2.Current.InputTokens)
+	}
+	if dataOnlyRec2.Current.CostMicros == nil || *dataOnlyRec2.Current.CostMicros != 0 {
+		t.Fatalf("expected known 0 cost micros, got %v", dataOnlyRec2.Current.CostMicros)
 	}
 
 	// Record 3: positive tokens and cost
@@ -244,18 +257,30 @@ func TestOverviewNullableUsage(t *testing.T) {
 		t.Fatalf("persist rec3: %v", err)
 	}
 
-	data, err = repo.GetOverview(context.Background(), after, before, 0)
+	// Case 4: Range covering rec2 and rec3 (both known) -> known sum!
+	tKnownStart := time.UnixMicro(baseTime.UnixMicro() + 2).UTC()
+	tKnownEnd := time.UnixMicro(baseTime.UnixMicro() + 4).UTC()
+	dataKnown, err := repo.GetOverview(context.Background(), tKnownStart, tKnownEnd, 0)
 	if err != nil {
-		t.Fatalf("GetOverview: %v", err)
+		t.Fatalf("GetOverview known: %v", err)
 	}
-	if data.Current.InputTokens == nil || *data.Current.InputTokens != 50 {
-		t.Fatalf("expected 50 input tokens, got %v", data.Current.InputTokens)
+	if dataKnown.Current.InputTokens == nil || *dataKnown.Current.InputTokens != 50 {
+		t.Fatalf("expected 50 input tokens, got %v", dataKnown.Current.InputTokens)
 	}
-	if data.Current.CachedInputTokens == nil || *data.Current.CachedInputTokens != 20 {
-		t.Fatalf("expected 20 cached tokens, got %v", data.Current.CachedInputTokens)
+	if dataKnown.Current.CachedInputTokens == nil || *dataKnown.Current.CachedInputTokens != 20 {
+		t.Fatalf("expected 20 cached tokens, got %v", dataKnown.Current.CachedInputTokens)
 	}
-	if data.Current.CostMicros == nil || *data.Current.CostMicros != 500 {
-		t.Fatalf("expected 500 cost micros, got %v", data.Current.CostMicros)
+	if dataKnown.Current.CostMicros == nil || *dataKnown.Current.CostMicros != 500 {
+		t.Fatalf("expected 500 cost micros, got %v", dataKnown.Current.CostMicros)
+	}
+
+	// Case 5: Full range covering rec1, rec2, rec3 -> mixed known+unknown must be nil!
+	dataFull, err := repo.GetOverview(context.Background(), after, before, 0)
+	if err != nil {
+		t.Fatalf("GetOverview full: %v", err)
+	}
+	if dataFull.Current.InputTokens != nil || dataFull.Current.CostMicros != nil {
+		t.Fatalf("expected nil for full mixed range, got tokens=%v, cost=%v", dataFull.Current.InputTokens, dataFull.Current.CostMicros)
 	}
 }
 
