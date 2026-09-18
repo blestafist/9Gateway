@@ -1,0 +1,29 @@
+{
+  "requested_after": "2026-09-17T00:00:00Z",
+  "effective_after": "2026-09-17T00:00:00Z",
+  "before": "2026-09-18T00:00:00Z",
+  "bucket": "hour",
+  "retention_limited": false,
+  "earliest_retained_at": null,
+  "latest_retained_at": null,
+  "buckets": [
+    {
+      "bucket_start": "2026-09-17T00:00:00Z",
+      "bucket_end": "2026-09-17T01:00:00Z",
+      "total_requests": 0,
+      "successful_requests": 0,
+      "error_requests": 0,
+      "rejected_requests": 0,
+      "input_tokens": 0,
+      "cached_input_tokens": 0,
+      "output_tokens": 0,
+      "cost_micros": null,
+      "avg_total_latency_micros": null,
+      "total_latency_samples": 0,
+      "avg_ttfb_latency_micros": null,
+      "ttfb_latency_samples": 0,
+      "avg_upstream_latency_micros": null,
+      "upstream_latency_samples": 0
+    }
+  ]
+}

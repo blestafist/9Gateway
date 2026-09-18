@@ -1,100 +1,535 @@
-import React, { useState } from "react";
-import { Card, CardHeader, CardTitle, CardContent, Tabs, EmptyState } from "../../shared/ui";
-import { BarChart3 } from "lucide-react";
-
-const RANGE_TABS = [
-  { id: "today", label: "Today" },
-  { id: "24h", label: "24h" },
-  { id: "7d", label: "7d" },
-  { id: "30d", label: "30d" },
-  { id: "90d", label: "90d" },
-  { id: "all", label: "All retained" },
-];
-
-const METRIC_TABS = [
-  { id: "tokens", label: "Tokens" },
-  { id: "cost", label: "Cost" },
-  { id: "requests", label: "Requests" },
-];
+import React, { useState, useMemo, useCallback } from "react";
+import { useSearchParams, Link } from "react-router-dom";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
+import { Alert, Button, Skeleton } from "../../shared/ui";
+import { AdminApiError } from "../../shared/transport";
+import {
+  UsageRangePreset,
+  UsageBucketResolution,
+  UsageChartMetric,
+  UsageRankingDimension,
+  UsageRankingMetric,
+} from "./types";
+import { usageQueryKeys } from "./queryKeys";
+import { getUsageTimeseries, getUsageBreakdown } from "./api";
+import { computePresetBounds, computePreviousBounds, getValidBuckets } from "./ranges";
+import { calculateUsageDelta } from "./deltas";
+import { UsageControls } from "./components/UsageControls";
+import { RetentionNotice } from "./components/RetentionNotice";
+import { UsageKpiCards, UsageKpisData } from "./components/UsageKpiCards";
+import { LazyChartCard } from "./components/charts/LazyChartCard";
+import { RankingsCard } from "./components/RankingsCard";
+import { AlertTriangle, LogIn, RefreshCw } from "lucide-react";
+import "./usage.css";
 
 export const UsagePage: React.FC = () => {
-  const [activeRange, setActiveRange] = useState("24h");
-  const [activeMetric, setActiveMetric] = useState("tokens");
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // URL search parameter parsing with defaults
+  const rangeParam = searchParams.get("range") as UsageRangePreset | null;
+  const activePreset: UsageRangePreset =
+    rangeParam &&
+    [
+      "1h",
+      "today",
+      "24h",
+      "7d",
+      "30d",
+      "90d",
+      "1y",
+      "all",
+      "custom",
+    ].includes(rangeParam)
+      ? rangeParam
+      : "24h";
+
+  const fromParam = searchParams.get("from") || "";
+  const toParam = searchParams.get("to") || "";
+
+  const bucketParam = (searchParams.get("bucket") as UsageBucketResolution) || "auto";
+
+  const metricParam = searchParams.get("metric") as UsageChartMetric | null;
+  const activeMetric: UsageChartMetric =
+    metricParam && ["requests", "tokens", "cost", "latency"].includes(metricParam)
+      ? metricParam
+      : "tokens";
+
+  const rankDimParam = searchParams.get("rank_dim") as UsageRankingDimension | null;
+  const activeRankDim: UsageRankingDimension =
+    rankDimParam && ["model", "key", "outcome"].includes(rankDimParam)
+      ? rankDimParam
+      : "model";
+
+  const rankMetricParam = searchParams.get("rank_metric") as UsageRankingMetric | null;
+  const activeRankMetric: UsageRankingMetric =
+    rankMetricParam && ["requests", "tokens", "cost"].includes(rankMetricParam)
+      ? rankMetricParam
+      : "requests";
+
+  // Compute fixed time bounds snapshot for the active preset
+  const computeBounds = useCallback(
+    (preset: UsageRangePreset, from: string, to: string) => {
+      if (preset === "custom" && from && to) {
+        return { after: from, before: to };
+      }
+      return computePresetBounds(preset);
+    },
+    []
+  );
+
+  const [bounds, setBounds] = useState(() =>
+    computeBounds(activePreset, fromParam, toParam)
+  );
+
+  // Sync snapshot when preset or custom params change
+  const handlePresetChange = (nextPreset: UsageRangePreset) => {
+    const nextBounds = computeBounds(nextPreset, fromParam, toParam);
+    setBounds(nextBounds);
+
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (nextPreset === "24h") {
+        next.delete("range");
+      } else {
+        next.set("range", nextPreset);
+      }
+      if (nextPreset !== "custom") {
+        next.delete("from");
+        next.delete("to");
+      }
+      // Reset bucket if invalid for the new preset
+      const valid = getValidBuckets(nextPreset);
+      if (!valid.includes(bucketParam)) {
+        next.set("bucket", "auto");
+      }
+      return next;
+    });
+  };
+
+  const handleCustomRangeApply = (from: string, to: string) => {
+    setBounds({ after: from, before: to });
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("range", "custom");
+      next.set("from", from);
+      next.set("to", to);
+      return next;
+    });
+  };
+
+  const handleBucketChange = (nextBucket: UsageBucketResolution) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (nextBucket === "auto") {
+        next.delete("bucket");
+      } else {
+        next.set("bucket", nextBucket);
+      }
+      return next;
+    });
+  };
+
+  const handleMetricChange = (nextMetric: UsageChartMetric) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (nextMetric === "tokens") {
+        next.delete("metric");
+      } else {
+        next.set("metric", nextMetric);
+      }
+      return next;
+    });
+  };
+
+  const handleRankDimChange = (nextDim: UsageRankingDimension) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (nextDim === "model") {
+        next.delete("rank_dim");
+      } else {
+        next.set("rank_dim", nextDim);
+      }
+      return next;
+    });
+  };
+
+  const handleRankMetricChange = (nextMetric: UsageRankingMetric) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (nextMetric === "requests") {
+        next.delete("rank_metric");
+      } else {
+        next.set("rank_metric", nextMetric);
+      }
+      return next;
+    });
+  };
+
+  // Primary timeseries query (cancellation via signal, NO automatic polling)
+  const timeseriesQuery = useQuery({
+    queryKey: usageQueryKeys.timeseries({
+      after: bounds.after,
+      before: bounds.before,
+      bucket: bucketParam,
+    }),
+    queryFn: ({ signal }) =>
+      getUsageTimeseries(
+        {
+          after: bounds.after,
+          before: bounds.before,
+          bucket: bucketParam === "auto" ? undefined : bucketParam,
+        },
+        signal
+      ),
+    placeholderData: keepPreviousData,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+  });
+
+  // Secondary breakdown query (cancellation via signal, NO automatic polling)
+  const breakdownQuery = useQuery({
+    queryKey: usageQueryKeys.breakdown({
+      group_by: activeRankDim,
+      after: bounds.after,
+      before: bounds.before,
+    }),
+    queryFn: ({ signal }) =>
+      getUsageBreakdown(
+        {
+          group_by: activeRankDim,
+          after: bounds.after,
+          before: bounds.before,
+        },
+        signal
+      ),
+    placeholderData: keepPreviousData,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+  });
+
+  // Previous range comparison query for honest deltas (only if bounds.after is present)
+  const prevBounds = useMemo(() => computePreviousBounds(bounds), [bounds]);
+
+  const previousTimeseriesQuery = useQuery({
+    queryKey: prevBounds
+      ? usageQueryKeys.previousComparison(prevBounds)
+      : ["usage", "previous-comparison", "disabled"],
+    queryFn: ({ signal }) =>
+      getUsageTimeseries(
+        {
+          after: prevBounds!.after,
+          before: prevBounds!.before,
+          bucket: "auto",
+        },
+        signal
+      ),
+    enabled: Boolean(prevBounds),
+    placeholderData: keepPreviousData,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+  });
+
+  // Manual refresh trigger
+  const handleRefresh = () => {
+    // Re-snapshot the bounds if not custom
+    if (activePreset !== "custom") {
+      const freshBounds = computePresetBounds(activePreset);
+      setBounds(freshBounds);
+    }
+    timeseriesQuery.refetch();
+    breakdownQuery.refetch();
+    if (prevBounds) {
+      previousTimeseriesQuery.refetch();
+    }
+  };
+
+  const isFetching =
+    timeseriesQuery.isFetching ||
+    breakdownQuery.isFetching ||
+    previousTimeseriesQuery.isFetching;
+
+  // Aggregate current KPI statistics
+  const kpiData: UsageKpisData = useMemo(() => {
+    const buckets = timeseriesQuery.data?.buckets || [];
+    let totalRequests = 0;
+    let successfulRequests = 0;
+    let errorRequests = 0;
+    let rejectedRequests = 0;
+    let peakBucketRequests = 0;
+    let inputTokens = 0;
+    let cachedInputTokens = 0;
+    let outputTokens = 0;
+    let costSum: number | null = null;
+    let hasCost = false;
+
+    let totalLatencySamples = 0;
+    let totalWeightedLatency = 0;
+    let ttfbSamples = 0;
+    let ttfbWeightedLatency = 0;
+    let upstreamSamples = 0;
+    let upstreamWeightedLatency = 0;
+
+    for (const b of buckets) {
+      totalRequests += b.total_requests;
+      successfulRequests += b.successful_requests;
+      errorRequests += b.error_requests;
+      rejectedRequests += b.rejected_requests;
+      if (b.total_requests > peakBucketRequests) {
+        peakBucketRequests = b.total_requests;
+      }
+      inputTokens += b.input_tokens;
+      cachedInputTokens += b.cached_input_tokens;
+      outputTokens += b.output_tokens;
+
+      if (b.cost_micros !== null) {
+        costSum = (costSum ?? 0) + b.cost_micros;
+        hasCost = true;
+      }
+
+      if (b.total_latency_samples > 0 && b.avg_total_latency_micros !== null) {
+        totalLatencySamples += b.total_latency_samples;
+        totalWeightedLatency += b.avg_total_latency_micros * b.total_latency_samples;
+      }
+      if (b.ttfb_latency_samples > 0 && b.avg_ttfb_latency_micros !== null) {
+        ttfbSamples += b.ttfb_latency_samples;
+        ttfbWeightedLatency += b.avg_ttfb_latency_micros * b.ttfb_latency_samples;
+      }
+      if (b.upstream_latency_samples > 0 && b.avg_upstream_latency_micros !== null) {
+        upstreamSamples += b.upstream_latency_samples;
+        upstreamWeightedLatency += b.avg_upstream_latency_micros * b.upstream_latency_samples;
+      }
+    }
+
+    return {
+      totalRequests,
+      successfulRequests,
+      errorRequests,
+      rejectedRequests,
+      peakBucketRequests,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      totalCostMicros: hasCost ? costSum : null,
+      avgTotalLatencyMicros:
+        totalLatencySamples > 0 ? Math.round(totalWeightedLatency / totalLatencySamples) : null,
+      totalLatencySamples,
+      avgTtfbLatencyMicros:
+        ttfbSamples > 0 ? Math.round(ttfbWeightedLatency / ttfbSamples) : null,
+      avgUpstreamLatencyMicros:
+        upstreamSamples > 0 ? Math.round(upstreamWeightedLatency / upstreamSamples) : null,
+    };
+  }, [timeseriesQuery.data]);
+
+  // Aggregate previous period totals for deltas
+  const prevTotals = useMemo(() => {
+    const buckets = previousTimeseriesQuery.data?.buckets;
+    if (!buckets) return null;
+
+    let totalReq = 0;
+    let totalTokens = 0;
+    let costSum: number | null = null;
+    let hasCost = false;
+    let errorReq = 0;
+
+    for (const b of buckets) {
+      totalReq += b.total_requests;
+      totalTokens += b.input_tokens + b.output_tokens;
+      errorReq += b.error_requests + b.rejected_requests;
+      if (b.cost_micros !== null) {
+        costSum = (costSum ?? 0) + b.cost_micros;
+        hasCost = true;
+      }
+    }
+
+    return {
+      requests: totalReq,
+      tokens: totalTokens,
+      costMicros: hasCost ? costSum : null,
+      errors: errorReq,
+    };
+  }, [previousTimeseriesQuery.data]);
+
+  // Calculate honest deltas
+  const requestDelta = useMemo(
+    () => calculateUsageDelta(kpiData.totalRequests, prevTotals?.requests),
+    [kpiData.totalRequests, prevTotals]
+  );
+  const tokenDelta = useMemo(
+    () =>
+      calculateUsageDelta(
+        kpiData.inputTokens + kpiData.outputTokens,
+        prevTotals?.tokens,
+        { isTokens: true }
+      ),
+    [kpiData.inputTokens, kpiData.outputTokens, prevTotals]
+  );
+  const costDelta = useMemo(
+    () =>
+      calculateUsageDelta(kpiData.totalCostMicros, prevTotals?.costMicros, {
+        isCost: true,
+      }),
+    [kpiData.totalCostMicros, prevTotals]
+  );
+  const errorDelta = useMemo(
+    () =>
+      calculateUsageDelta(
+        kpiData.errorRequests + kpiData.rejectedRequests,
+        prevTotals?.errors,
+        { isErrorMetric: true }
+      ),
+    [kpiData.errorRequests, kpiData.rejectedRequests, prevTotals]
+  );
+
+  // Retention metadata from timeseries response
+  const retentionLimited = Boolean(
+    timeseriesQuery.data?.retention_limited || breakdownQuery.data?.retention_limited
+  );
+  const earliestRetainedAt =
+    timeseriesQuery.data?.earliest_retained_at ||
+    breakdownQuery.data?.earliest_retained_at ||
+    null;
+  const latestRetainedAt =
+    timeseriesQuery.data?.latest_retained_at ||
+    breakdownQuery.data?.latest_retained_at ||
+    null;
+
+  // Breakdown rows and totals
+  const breakdownRows = breakdownQuery.data?.rows || [];
+  const breakdownOther = breakdownQuery.data?.other || {
+    id: "other",
+    name: "Other",
+    is_unknown: false,
+    is_deleted: false,
+    total_requests: 0,
+    successful_requests: 0,
+    error_requests: 0,
+    rejected_requests: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    cost_micros: null,
+  };
+  const breakdownTotal = breakdownQuery.data?.total || {
+    total_requests: 0,
+    successful_requests: 0,
+    error_requests: 0,
+    rejected_requests: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    cost_micros: null,
+  };
+
+  // Error boundary checks
+  const error = timeseriesQuery.error || breakdownQuery.error;
+  const is401 = error instanceof AdminApiError && error.status === 401;
+  const is503 = error instanceof AdminApiError && error.status === 503;
 
   return (
-    <div className="gw-page-content" data-testid="usage-page">
-      {/* Control Bar: Range Tabs & Metric Tabs */}
-      <div className="gw-usage-controls">
-        <div className="gw-usage-controls-group">
-          <span className="gw-control-label">Range:</span>
-          <Tabs
-            items={RANGE_TABS}
-            activeTab={activeRange}
-            onChange={setActiveRange}
-            aria-label="Time range"
-          />
-        </div>
-        <div className="gw-usage-controls-group">
-          <span className="gw-control-label">Metric:</span>
-          <Tabs
-            items={METRIC_TABS}
-            activeTab={activeMetric}
-            onChange={setActiveMetric}
-            aria-label="Metric view"
-          />
-        </div>
-      </div>
+    <div className="gw-page-content gw-usage-container" data-testid="usage-page">
+      {/* 1. Range & Resolution Controls */}
+      <UsageControls
+        preset={activePreset}
+        onPresetChange={handlePresetChange}
+        bucket={bucketParam}
+        onBucketChange={handleBucketChange}
+        customFrom={fromParam}
+        customTo={toParam}
+        onCustomRangeApply={handleCustomRangeApply}
+        isFetching={isFetching}
+        onRefresh={handleRefresh}
+      />
 
-      {/* Primary Chart Placeholder Card */}
-      <Card className="gw-chart-card">
-        <CardHeader>
-          <div className="gw-chart-header">
-            <div>
-              <CardTitle>Token & Volume Telemetry</CardTitle>
-              <p className="gw-card-subtitle">
-                Time-series aggregation for range: <strong style={{ color: "var(--accent-primary)" }}>{activeRange}</strong> ({activeMetric})
-              </p>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="gw-chart-placeholder-area">
-            <EmptyState
-              icon={<BarChart3 size={36} />}
-              title="Interactive Chart Framing"
-              description="SQLite telemetry aggregations will connect in T171. Heavy chart dependencies are omitted from initial shell load."
-            />
-          </div>
-        </CardContent>
-      </Card>
+      {/* 2. Error and Alert States */}
+      {is401 && (
+        <Alert variant="danger" title="Session Expired" icon={<LogIn size={16} />}>
+          Your administrative session has expired. Please{" "}
+          <Link to="/ui/login" style={{ color: "inherit", textDecoration: "underline" }}>
+            log in again
+          </Link>{" "}
+          to access telemetry data.
+        </Alert>
+      )}
 
-      {/* Ranking Card Placeholder */}
-      <div className="gw-ranking-grid">
-        <Card>
-          <CardHeader>
-            <CardTitle>Top Models by Consumption</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="gw-ranking-list">
-              <div className="gw-ranking-row">
-                <span className="gw-ranking-name">claude-sonnet-5</span>
-                <span className="gw-ranking-metric" style={{ color: "var(--metric-tokens-in)" }}>12.4M tokens</span>
-                <span className="gw-ranking-cost" style={{ color: "var(--metric-cost)" }}>$18.60</span>
-              </div>
-              <div className="gw-ranking-row">
-                <span className="gw-ranking-name">gpt-luna</span>
-                <span className="gw-ranking-metric" style={{ color: "var(--metric-tokens-in)" }}>5.2M tokens</span>
-                <span className="gw-ranking-cost" style={{ color: "var(--metric-cost)" }}>$7.80</span>
-              </div>
-              <div className="gw-ranking-row">
-                <span className="gw-ranking-name">gemini-3.8-flash</span>
-                <span className="gw-ranking-metric" style={{ color: "var(--metric-tokens-in)" }}>1.5M tokens</span>
-                <span className="gw-ranking-cost" style={{ color: "var(--metric-cost)" }}>$1.59</span>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {is503 && (
+        <Alert
+          variant="warning"
+          title="Gateway Analytics Capacity Constrained"
+          icon={<AlertTriangle size={16} />}
+        >
+          Usage query concurrency limit reached. The gateway is prioritizing proxy transport. Please
+          retry in a few moments.
+          <div style={{ marginTop: "8px" }}>
+            <Button size="sm" variant="outline" onClick={handleRefresh}>
+              <RefreshCw size={13} style={{ marginRight: "4px" }} />
+              Retry Query
+            </Button>
+          </div>
+        </Alert>
+      )}
+
+      {error && !is401 && !is503 && (
+        <Alert
+          variant="danger"
+          title="Unable to Load Usage Analytics"
+          icon={<AlertTriangle size={16} />}
+        >
+          {error.message || "An unexpected error occurred while loading analytics telemetry."}
+          <div style={{ marginTop: "8px" }}>
+            <Button size="sm" variant="outline" onClick={handleRefresh}>
+              <RefreshCw size={13} style={{ marginRight: "4px" }} />
+              Retry Query
+            </Button>
+          </div>
+        </Alert>
+      )}
+
+      {/* 3. Retention Notice */}
+      <RetentionNotice
+        preset={activePreset}
+        retentionLimited={retentionLimited}
+        earliestRetainedAt={earliestRetainedAt}
+        latestRetainedAt={latestRetainedAt}
+      />
+
+      {/* 4. <= 5 KPI Cards (Summary) */}
+      {timeseriesQuery.isLoading && !timeseriesQuery.data ? (
+        <div className="gw-usage-kpi-grid">
+          <Skeleton variant="rect" height={130} />
+          <Skeleton variant="rect" height={130} />
+          <Skeleton variant="rect" height={130} />
+          <Skeleton variant="rect" height={130} />
+          <Skeleton variant="rect" height={130} />
+        </div>
+      ) : (
+        <UsageKpiCards
+          data={kpiData}
+          requestDelta={requestDelta}
+          tokenDelta={tokenDelta}
+          costDelta={costDelta}
+          errorDelta={errorDelta}
+        />
+      )}
+
+      {/* 5. Primary Chart Card (Selected Metric Only) */}
+      <LazyChartCard
+        buckets={timeseriesQuery.data?.buckets || []}
+        activeMetric={activeMetric}
+        onMetricChange={handleMetricChange}
+        isLoading={timeseriesQuery.isLoading}
+      />
+
+      {/* 6. Secondary Rankings Card */}
+      <RankingsCard
+        rows={breakdownRows}
+        other={breakdownOther}
+        total={breakdownTotal}
+        dimension={activeRankDim}
+        onDimensionChange={handleRankDimChange}
+        metric={activeRankMetric}
+        onMetricChange={handleRankMetricChange}
+        isLoading={breakdownQuery.isLoading}
+      />
     </div>
   );
 };

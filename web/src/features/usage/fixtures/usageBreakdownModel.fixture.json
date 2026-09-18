@@ -1,0 +1,77 @@
+{
+  "requested_after": "2026-09-17T00:00:00Z",
+  "effective_after": "2026-09-17T00:00:00Z",
+  "before": "2026-09-18T00:00:00Z",
+  "group_by": "model",
+  "retention_limited": false,
+  "earliest_retained_at": "2026-09-10T00:00:00Z",
+  "latest_retained_at": "2026-09-17T23:58:12Z",
+  "rows": [
+    {
+      "id": "gpt-4o",
+      "name": "gpt-4o",
+      "is_unknown": false,
+      "is_deleted": false,
+      "total_requests": 140,
+      "successful_requests": 135,
+      "error_requests": 3,
+      "rejected_requests": 2,
+      "input_tokens": 780000,
+      "cached_input_tokens": 320000,
+      "output_tokens": 52000,
+      "cost_micros": 2650000
+    },
+    {
+      "id": "claude-3-5-sonnet",
+      "name": "claude-3-5-sonnet",
+      "is_unknown": false,
+      "is_deleted": false,
+      "total_requests": 95,
+      "successful_requests": 92,
+      "error_requests": 2,
+      "rejected_requests": 1,
+      "input_tokens": 420500,
+      "cached_input_tokens": 195000,
+      "output_tokens": 31500,
+      "cost_micros": 1580000
+    },
+    {
+      "id": "gemini-1.5-pro",
+      "name": "gemini-1.5-pro",
+      "is_unknown": false,
+      "is_deleted": false,
+      "total_requests": 35,
+      "successful_requests": 33,
+      "error_requests": 1,
+      "rejected_requests": 1,
+      "input_tokens": 172000,
+      "cached_input_tokens": 50000,
+      "output_tokens": 11000,
+      "cost_micros": 550000
+    }
+  ],
+  "other": {
+    "id": "_other",
+    "name": "Other",
+    "is_unknown": false,
+    "is_deleted": false,
+    "total_requests": 10,
+    "successful_requests": 9,
+    "error_requests": 1,
+    "rejected_requests": 0,
+    "input_tokens": 60000,
+    "cached_input_tokens": 20000,
+    "output_tokens": 2700,
+    "cost_micros": 140000
+  },
+  "total": {
+    "total_requests": 280,
+    "successful_requests": 269,
+    "error_requests": 7,
+    "rejected_requests": 4,
+    "input_tokens": 1432500,
+    "cached_input_tokens": 585000,
+    "output_tokens": 97200,
+    "cost_micros": 4920000
+  }
+}

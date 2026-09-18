@@ -2,12 +2,31 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T168`.
+Done: `T001`-`T169`.
 
-Current: `T169` - build the Usage and Analytics page.
+Current: `T170` - build the API key inventory.
 
-Queued: `T170`-`T180`, in dependency order from key/request workflows,
+Queued: `T171`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T169 built the Usage and Analytics page:
+connects the T168 usage time-series and breakdown APIs into URL-backed presets
+(`1h`, `Today`, `24h`, `7d`, `30d`, `90d`, `1y`, `All retained`, `Custom UTC`) with `30d` as
+a first-class visible preset and accessible custom UTC datetime range validation;
+dynamic bucket resolution restriction (`auto`, `five_minutes`, `hour`, `day`, `week`, `month`)
+preventing over-detailed combinations; retention explanation explaining `All retained`
+as rows available under configured retention policy with first/last timestamps and
+warning notice when retention-limited; five KPI cards (total requests, total tokens,
+estimated cost, average latency, errors & rejections) with honest previous-period deltas
+labeled as unavailable when not cleanly derivable; lazy single-metric primary chart card
+switching between Requests, Tokens, Cost, and Latency views with URL synchronization and
+Recharts project wrappers; accessible alternative data table with full time-window breakdown
+and live screen-reader summaries; secondary rankings card with Models, API Keys, and
+Outcomes dimension tabs and Requests, Tokens, and Cost metric selectors, horizontal percentage
+fill bars, direct labels, unknown/deleted key badges, bounded `other` aggregate row, and
+sortable detailed table; responsive desktop (1440px) and mobile (375px) layouts without
+horizontal overflow; TanStack queries with query cancellation, keepPreviousData, and
+no automatic polling; verified by unit, integration, and lifecycle tests.
 
 T168 added the authenticated usage time-series and breakdown APIs:
 `GET /admin/v1/usage/timeseries` and `GET /admin/v1/usage/breakdown` support
