@@ -23,12 +23,53 @@ type flightCall[T any] struct {
 	err  error
 }
 
+// Gate limits concurrent active executions across one or more Coordinators.
+type Gate struct {
+	mu       sync.Mutex
+	capacity int
+	active   int
+}
+
+// NewGate creates a new concurrency Gate with the specified capacity (defaults to 2).
+func NewGate(capacity int) *Gate {
+	if capacity <= 0 {
+		capacity = 2
+	}
+	return &Gate{capacity: capacity}
+}
+
+// TryAcquire attempts to acquire an execution slot non-blocking.
+func (g *Gate) TryAcquire() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active >= g.capacity {
+		return false
+	}
+	g.active++
+	return true
+}
+
+// Release releases an acquired execution slot.
+func (g *Gate) Release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active > 0 {
+		g.active--
+	}
+}
+
+// Active returns the current active acquired slots.
+func (g *Gate) Active() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.active
+}
+
 // Coordinator provides reusable global concurrency limiting (max 2),
 // bounded range caching (<=32 entries, <=15s TTL), and identical-query singleflight.
 type Coordinator[T any] struct {
 	mu         sync.Mutex
-	capacity   int
-	active     int
+	gate       *Gate
 	maxCache   int
 	ttl        time.Duration
 	cache      map[string]cacheEntry[T]
@@ -36,10 +77,15 @@ type Coordinator[T any] struct {
 	inFlight   map[string]*flightCall[T]
 }
 
-// NewCoordinator creates a new analytics Coordinator.
+// NewCoordinator creates a new analytics Coordinator with a private Gate.
 func NewCoordinator[T any](capacity, maxCache int, ttl time.Duration) *Coordinator[T] {
-	if capacity <= 0 {
-		capacity = 2
+	return NewCoordinatorWithGate[T](NewGate(capacity), maxCache, ttl)
+}
+
+// NewCoordinatorWithGate creates a new analytics Coordinator sharing a Gate.
+func NewCoordinatorWithGate[T any](gate *Gate, maxCache int, ttl time.Duration) *Coordinator[T] {
+	if gate == nil {
+		gate = NewGate(2)
 	}
 	if maxCache <= 0 {
 		maxCache = 32
@@ -48,7 +94,7 @@ func NewCoordinator[T any](capacity, maxCache int, ttl time.Duration) *Coordinat
 		ttl = 15 * time.Second
 	}
 	return &Coordinator[T]{
-		capacity: capacity,
+		gate:     gate,
 		maxCache: maxCache,
 		ttl:      ttl,
 		cache:    make(map[string]cacheEntry[T]),
@@ -87,12 +133,11 @@ func (c *Coordinator[T]) Do(ctx context.Context, key string, fn func(ctx context
 	}
 
 	// 3. Concurrency check (non-blocking immediate safe 503)
-	if c.active >= c.capacity {
+	if !c.gate.TryAcquire() {
 		c.mu.Unlock()
 		return zero, ErrCapacityExceeded
 	}
 
-	c.active++
 	call := &flightCall[T]{done: make(chan struct{})}
 	c.inFlight[key] = call
 	c.mu.Unlock()
@@ -102,7 +147,7 @@ func (c *Coordinator[T]) Do(ctx context.Context, key string, fn func(ctx context
 
 	// 5. Update state
 	c.mu.Lock()
-	c.active--
+	c.gate.Release()
 	delete(c.inFlight, key)
 
 	if err == nil && ctx.Err() == nil {
@@ -142,9 +187,10 @@ func (c *Coordinator[T]) setCache(key string, val T) {
 
 // ActiveCount returns current active running queries.
 func (c *Coordinator[T]) ActiveCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.active
+	if c.gate == nil {
+		return 0
+	}
+	return c.gate.Active()
 }
 
 // CacheLen returns current cached entries count.

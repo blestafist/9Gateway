@@ -76,6 +76,14 @@ type overviewGetter interface {
 	GetOverview(context.Context, time.Time, time.Time, int64) (*storage.OverviewData, error)
 }
 
+type usageTimeseriesGetter interface {
+	GetUsageTimeseries(context.Context, *time.Time, time.Time, string) (*storage.UsageTimeseriesData, error)
+}
+
+type usageBreakdownGetter interface {
+	GetUsageBreakdown(context.Context, *time.Time, time.Time, string) (*storage.UsageBreakdownData, error)
+}
+
 type apiKeyPolicyUpdater interface {
 	UpdatePolicy(context.Context, string, bool, string) error
 }
@@ -485,6 +493,24 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 			return
 		}
 		handler.getOverview(response, request)
+		return
+	}
+
+	if request.URL.Path == "/admin/v1/usage/timeseries" {
+		if request.Method != http.MethodGet {
+			writeAdminError(response, http.StatusMethodNotAllowed, gatewayErrorMethodNotAllowed, "method not allowed")
+			return
+		}
+		handler.getUsageTimeseries(response, request)
+		return
+	}
+
+	if request.URL.Path == "/admin/v1/usage/breakdown" {
+		if request.Method != http.MethodGet {
+			writeAdminError(response, http.StatusMethodNotAllowed, gatewayErrorMethodNotAllowed, "method not allowed")
+			return
+		}
+		handler.getUsageBreakdown(response, request)
 		return
 	}
 
@@ -931,6 +957,215 @@ func (handler *adminHandler) getOverview(response http.ResponseWriter, request *
 	writeAdminJSON(response, http.StatusOK, resp)
 }
 
+func (handler *adminHandler) getUsageTimeseries(response http.ResponseWriter, request *http.Request) {
+	if !handler.authenticate(response, request) {
+		return
+	}
+	getter, ok := handler.service.repository.(usageTimeseriesGetter)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "usage timeseries repository unavailable")
+		return
+	}
+	query, err := adminQuery(request)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	for key := range query {
+		if key != "after" && key != "before" && key != "bucket" {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "unsupported query parameter: "+key)
+			return
+		}
+	}
+	afterParam, err := singleAdminQueryValue(query, "after", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid after parameter")
+		return
+	}
+	beforeParam, err := singleAdminQueryValue(query, "before", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid before parameter")
+		return
+	}
+	bucketParam, err := singleAdminQueryValue(query, "bucket", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid bucket parameter")
+		return
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	var before time.Time
+	if beforeParam == "" {
+		before = now
+	} else {
+		parsedBefore, err := time.Parse(time.RFC3339, beforeParam)
+		if err != nil {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid before timestamp; RFC3339 required")
+			return
+		}
+		before = parsedBefore.UTC().Truncate(time.Microsecond)
+	}
+
+	var reqAfter *time.Time
+	if afterParam != "" {
+		parsedAfter, err := time.Parse(time.RFC3339, afterParam)
+		if err != nil {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid after timestamp; RFC3339 required")
+			return
+		}
+		truncated := parsedAfter.UTC().Truncate(time.Microsecond)
+		if !truncated.Before(before) {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "after must be before before")
+			return
+		}
+		reqAfter = &truncated
+	}
+
+	switch bucketParam {
+	case "", "auto", "five_minutes", "hour", "day", "week", "month":
+		// valid
+	default:
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid bucket parameter; must be five_minutes, hour, day, week, month, or auto")
+		return
+	}
+
+	normalizedBucket := bucketParam
+	if normalizedBucket == "" {
+		normalizedBucket = "auto"
+	}
+
+	afterKey := int64(-1)
+	if reqAfter != nil {
+		afterKey = reqAfter.UnixMicro()
+	}
+	cacheKey := fmt.Sprintf("timeseries:%d:%d:%s", afterKey, before.UnixMicro(), normalizedBucket)
+	data, err := handler.usageTimeseriesCoordinator.Do(request.Context(), cacheKey, func(ctx context.Context) (*storage.UsageTimeseriesData, error) {
+		return getter.GetUsageTimeseries(ctx, reqAfter, before, bucketParam)
+	})
+	if err != nil {
+		if errors.Is(err, analytics.ErrCapacityExceeded) {
+			response.Header().Set("Retry-After", "1")
+			writeAdminError(response, http.StatusServiceUnavailable, gatewayErrorServiceUnavailable, "analytics capacity exceeded")
+			return
+		}
+		if errors.Is(err, storage.ErrOverDetailedRange) {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidBucket) {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid bucket parameter")
+			return
+		}
+		if errors.Is(err, context.Canceled) || request.Context().Err() != nil {
+			return
+		}
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "usage timeseries aggregation failed")
+		return
+	}
+
+	writeAdminJSON(response, http.StatusOK, data)
+}
+
+func (handler *adminHandler) getUsageBreakdown(response http.ResponseWriter, request *http.Request) {
+	if !handler.authenticate(response, request) {
+		return
+	}
+	getter, ok := handler.service.repository.(usageBreakdownGetter)
+	if !ok {
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "usage breakdown repository unavailable")
+		return
+	}
+	query, err := adminQuery(request)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	for key := range query {
+		if key != "after" && key != "before" && key != "group_by" {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "unsupported query parameter: "+key)
+			return
+		}
+	}
+	afterParam, err := singleAdminQueryValue(query, "after", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid after parameter")
+		return
+	}
+	beforeParam, err := singleAdminQueryValue(query, "before", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid before parameter")
+		return
+	}
+	groupBy, err := singleAdminQueryValue(query, "group_by", false)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid group_by parameter")
+		return
+	}
+	if groupBy == "" {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "group_by parameter is required; must be model, key, or outcome")
+		return
+	}
+	if groupBy != "model" && groupBy != "key" && groupBy != "outcome" {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid group_by parameter; must be model, key, or outcome")
+		return
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	var before time.Time
+	if beforeParam == "" {
+		before = now
+	} else {
+		parsedBefore, err := time.Parse(time.RFC3339, beforeParam)
+		if err != nil {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid before timestamp; RFC3339 required")
+			return
+		}
+		before = parsedBefore.UTC().Truncate(time.Microsecond)
+	}
+
+	var reqAfter *time.Time
+	if afterParam != "" {
+		parsedAfter, err := time.Parse(time.RFC3339, afterParam)
+		if err != nil {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid after timestamp; RFC3339 required")
+			return
+		}
+		truncated := parsedAfter.UTC().Truncate(time.Microsecond)
+		if !truncated.Before(before) {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "after must be before before")
+			return
+		}
+		reqAfter = &truncated
+	}
+
+	afterKey := int64(-1)
+	if reqAfter != nil {
+		afterKey = reqAfter.UnixMicro()
+	}
+	cacheKey := fmt.Sprintf("breakdown:%d:%d:%s", afterKey, before.UnixMicro(), groupBy)
+	data, err := handler.usageBreakdownCoordinator.Do(request.Context(), cacheKey, func(ctx context.Context) (*storage.UsageBreakdownData, error) {
+		return getter.GetUsageBreakdown(ctx, reqAfter, before, groupBy)
+	})
+	if err != nil {
+		if errors.Is(err, analytics.ErrCapacityExceeded) {
+			response.Header().Set("Retry-After", "1")
+			writeAdminError(response, http.StatusServiceUnavailable, gatewayErrorServiceUnavailable, "analytics capacity exceeded")
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidGroupBy) {
+			writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid group_by parameter")
+			return
+		}
+		if errors.Is(err, context.Canceled) || request.Context().Err() != nil {
+			return
+		}
+		writeAdminError(response, http.StatusInternalServerError, "internal_error", "usage breakdown aggregation failed")
+		return
+	}
+
+	writeAdminJSON(response, http.StatusOK, data)
+}
+
 func (handler *adminHandler) getRequest(response http.ResponseWriter, request *http.Request) {
 	if !handler.authenticate(response, request) {
 		return
@@ -1187,13 +1422,16 @@ func (handler *adminHandler) updatePolicy(response http.ResponseWriter, request 
 }
 
 type adminHandler struct {
-	credential           string
-	service              *adminKeyService
-	sessionStore         *session.Store
-	rateLimiter          *session.LoginRateLimiter
-	trustedProxies       []*net.IPNet
-	analyticsCoordinator *analytics.Coordinator[*storage.OverviewData]
-	sessionInitOnce      sync.Once
+	credential                 string
+	service                    *adminKeyService
+	sessionStore               *session.Store
+	rateLimiter                *session.LoginRateLimiter
+	trustedProxies             []*net.IPNet
+	analyticsGate              *analytics.Gate
+	analyticsCoordinator       *analytics.Coordinator[*storage.OverviewData]
+	usageTimeseriesCoordinator *analytics.Coordinator[*storage.UsageTimeseriesData]
+	usageBreakdownCoordinator  *analytics.Coordinator[*storage.UsageBreakdownData]
+	sessionInitOnce            sync.Once
 }
 
 func newAdminHandler(credential string, service *adminKeyService) (*adminHandler, error) {
@@ -1205,13 +1443,17 @@ func newAdminHandler(credential string, service *adminKeyService) (*adminHandler
 		}
 		trustedProxies = proxies
 	}
+	gate := analytics.NewGate(2)
 	return &adminHandler{
-		credential:           credential,
-		service:              service,
-		sessionStore:         session.NewStore(session.StoreOptions{}),
-		rateLimiter:          session.NewLoginRateLimiter(session.RateLimiterOptions{}),
-		trustedProxies:       trustedProxies,
-		analyticsCoordinator: analytics.NewCoordinator[*storage.OverviewData](2, 32, 15*time.Second),
+		credential:                 credential,
+		service:                    service,
+		sessionStore:               session.NewStore(session.StoreOptions{}),
+		rateLimiter:                session.NewLoginRateLimiter(session.RateLimiterOptions{}),
+		trustedProxies:             trustedProxies,
+		analyticsGate:              gate,
+		analyticsCoordinator:       analytics.NewCoordinatorWithGate[*storage.OverviewData](gate, 32, 15*time.Second),
+		usageTimeseriesCoordinator: analytics.NewCoordinatorWithGate[*storage.UsageTimeseriesData](gate, 32, 15*time.Second),
+		usageBreakdownCoordinator:  analytics.NewCoordinatorWithGate[*storage.UsageBreakdownData](gate, 32, 15*time.Second),
 	}, nil
 }
 
@@ -1261,8 +1503,17 @@ func (handler *adminHandler) initSessions() {
 		if handler.rateLimiter == nil {
 			handler.rateLimiter = session.NewLoginRateLimiter(session.RateLimiterOptions{})
 		}
+		if handler.analyticsGate == nil {
+			handler.analyticsGate = analytics.NewGate(2)
+		}
 		if handler.analyticsCoordinator == nil {
-			handler.analyticsCoordinator = analytics.NewCoordinator[*storage.OverviewData](2, 32, 15*time.Second)
+			handler.analyticsCoordinator = analytics.NewCoordinatorWithGate[*storage.OverviewData](handler.analyticsGate, 32, 15*time.Second)
+		}
+		if handler.usageTimeseriesCoordinator == nil {
+			handler.usageTimeseriesCoordinator = analytics.NewCoordinatorWithGate[*storage.UsageTimeseriesData](handler.analyticsGate, 32, 15*time.Second)
+		}
+		if handler.usageBreakdownCoordinator == nil {
+			handler.usageBreakdownCoordinator = analytics.NewCoordinatorWithGate[*storage.UsageBreakdownData](handler.analyticsGate, 32, 15*time.Second)
 		}
 	})
 }

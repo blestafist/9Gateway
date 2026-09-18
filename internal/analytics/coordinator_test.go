@@ -181,3 +181,67 @@ func TestCoordinatorCancellation(t *testing.T) {
 		t.Fatalf("expected active count = 0 after cancellation, got %d", coord.ActiveCount())
 	}
 }
+
+func TestSharedGateAcrossCoordinators(t *testing.T) {
+	gate := NewGate(2)
+	coordA := NewCoordinatorWithGate[string](gate, 32, 15*time.Second)
+	coordB := NewCoordinatorWithGate[int](gate, 32, 15*time.Second)
+
+	started1 := make(chan struct{})
+	started2 := make(chan struct{})
+	unblock := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		_, _ = coordA.Do(context.Background(), "a1", func(ctx context.Context) (string, error) {
+			close(started1)
+			<-unblock
+			return "valA", nil
+		})
+	}()
+
+	go func() {
+		defer wg.Done()
+		_, _ = coordB.Do(context.Background(), "b1", func(ctx context.Context) (int, error) {
+			close(started2)
+			<-unblock
+			return 42, nil
+		})
+	}()
+
+	<-started1
+	<-started2
+
+	if gate.Active() != 2 {
+		t.Fatalf("expected 2 active in shared gate, got %d", gate.Active())
+	}
+	if coordA.ActiveCount() != 2 || coordB.ActiveCount() != 2 {
+		t.Fatalf("coordinators should reflect shared gate active count 2, got A=%d, B=%d",
+			coordA.ActiveCount(), coordB.ActiveCount())
+	}
+
+	// Saturated gate: third query to coordA or coordB must immediately fail
+	_, errA := coordA.Do(context.Background(), "a2", func(ctx context.Context) (string, error) {
+		return "fail", nil
+	})
+	if !errors.Is(errA, ErrCapacityExceeded) {
+		t.Fatalf("expected ErrCapacityExceeded on coordA, got %v", errA)
+	}
+
+	_, errB := coordB.Do(context.Background(), "b2", func(ctx context.Context) (int, error) {
+		return 99, nil
+	})
+	if !errors.Is(errB, ErrCapacityExceeded) {
+		t.Fatalf("expected ErrCapacityExceeded on coordB, got %v", errB)
+	}
+
+	close(unblock)
+	wg.Wait()
+
+	if gate.Active() != 0 {
+		t.Fatalf("expected 0 active in gate after completion, got %d", gate.Active())
+	}
+}

@@ -2,12 +2,30 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T167`.
+Done: `T001`-`T168`.
 
-Current: `T168` - add bounded usage time-series and breakdown APIs.
+Current: `T169` - build the Usage and Analytics page.
 
-Queued: `T169`-`T180`, in dependency order from usage analytics
-through key/request workflows, quality gates, and release integration.
+Queued: `T170`-`T180`, in dependency order from key/request workflows,
+quality gates, and release integration.
+
+T168 added the authenticated usage time-series and breakdown APIs:
+`GET /admin/v1/usage/timeseries` and `GET /admin/v1/usage/breakdown` support
+RFC3339 range filtering with optional `after` (omitting requests all retained history
+without conflating deleted past records), safe bucket resolutions (`five_minutes`
+up to 24h, `hour` up to 31d, `day` up to 2y, `week` up to 10y, `month` for longer or
+all-retained, and `auto` finest resolution producing <= 1,000 points); over-detailed
+combinations producing > 1,000 buckets are rejected with HTTP 400; missing buckets are
+filled explicitly; nullable cost and average total/TTFB/upstream latencies include sample
+counts to distinguish absent observations from zero; breakdown supports top-20 ranking
+by model, key, and outcome with deterministic tie-breaking, safe identifiers,
+unknown/deleted key indicators, and an `other` aggregate strictly matching untruncated
+totals; `retention_limited` flag and earliest/latest retained completion timestamps explain
+retention boundaries honestly; index-backed SQLite scans (`idx_requests_finished`)
+meet p95 < 250ms latency and < 12 MiB memory budgets; global two-query analytics
+concurrency limiter (HTTP 503 with Retry-After: 1), singleflight deduplication, and
+bounded 32-entry/15-second LRU caching prevent upstream transport disruption; zero
+credential, body, or arbitrary high-cardinality dimension leakage.
 
 T167 built the operational Overview page:
 connects the T166 admin overview aggregation API into a period preset selector

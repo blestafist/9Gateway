@@ -164,6 +164,114 @@ The response payload contains:
 - `key_counts`: `total` and `enabled` key counts.
 - `recent_requests`: list of up to 10 most recent requests (newest first) matching the safe metadata structure returned by `/admin/v1/requests`.
 
+## `GET /admin/v1/usage/timeseries`
+
+Returns aggregated usage metrics grouped into ordered UTC time buckets for
+trend analysis and chart rendering.
+
+```sh
+curl -fsS 'http://localhost:8080/admin/v1/usage/timeseries?bucket=hour&after=2026-09-17T00:00:00Z&before=2026-09-18T00:00:00Z' \
+  -H "Authorization: Bearer ${ADMIN_CREDENTIAL}"
+```
+
+Query parameters:
+- `after`: optional RFC3339 start timestamp. Omitting `after` requests all
+  retained history currently stored in the database (not lifetime data that
+  retention has already pruned).
+- `before`: optional RFC3339 end timestamp (defaults to current server time).
+- `bucket`: optional bucket duration identifier: `five_minutes`, `hour`, `day`,
+  `week`, `month`, or `auto` (default `auto` when omitted).
+
+Constraints, bounds, and validation:
+- `after` must be strictly before `before` when specified.
+- Enforced safe bucket/range combinations:
+  - `five_minutes`: range up to 24 hours.
+  - `hour`: range up to 31 days.
+  - `day`: range up to 2 years (732 days).
+  - `week`: range up to 10 years (3660 days).
+  - `month`: allowed for longer ranges and all-retained history queries.
+- When `bucket` is `auto` or omitted, the gateway selects the finest valid
+  interval producing at most 1,000 points.
+- Explicitly over-detailed requests (e.g. `five_minutes` over 7 days) and ranges
+  producing more than 1,000 buckets are rejected with HTTP 400 (`invalid_request`).
+- Unknown or duplicate parameters return HTTP 400 (`invalid_request`).
+
+Concurrency and caching:
+- Shares the global 2-query analytics concurrency limit across overview,
+  timeseries, and breakdown queries. Saturated capacity returns HTTP 503
+  (`service_unavailable`) with `Retry-After: 1`.
+- Identical in-flight queries share execution (singleflight).
+- Completed query results are cached up to 32 entries with a 15-second TTL.
+- Cancelled client requests abort query processing without caching partial results.
+
+The response payload contains:
+- `requested_after`: RFC3339 timestamp as requested, or `null` if omitted.
+- `effective_after`: RFC3339 timestamp reflecting the actual start boundary used
+  (e.g. earliest retained request timestamp when `after` is omitted).
+- `before`: RFC3339 end timestamp.
+- `bucket`: resolved bucket identifier (`five_minutes`, `hour`, `day`, `week`, or `month`).
+- `retention_limited`: boolean indicating whether the requested history window
+  was truncated by history retention passes (`true` if retention deleted data
+  before `effective_after`, or if `after` was omitted and retention has pruned records).
+- `earliest_retained_at`: RFC3339 timestamp of the earliest retained completed request, or `null` if history is empty.
+- `latest_retained_at`: RFC3339 timestamp of the latest retained completed request, or `null` if history is empty.
+- `buckets`: ordered array of UTC bucket objects (missing buckets within the range are filled explicitly, capped at 1,000 buckets). Each bucket contains:
+  - `bucket_start`, `bucket_end`: RFC3339 UTC timestamps.
+  - `total_requests`: total finished requests in the bucket.
+  - `successful_requests`: requests with terminal outcome `complete` or `custom_dispatch`.
+  - `error_requests`: requests with error terminal outcomes (excluding `pre_upstream`).
+  - `rejected_requests`: requests rejected before upstream dispatch (`pre_upstream`).
+  - `input_tokens`, `cached_input_tokens`, `output_tokens`: integer token counts.
+  - `cost_micros`: nullable integer estimated cost in microdollars. Returns `null` when cost is unknown or cannot be estimated; returns `0` when zero or when no requests occurred in the bucket.
+  - `avg_total_latency_micros`: nullable integer average total request latency in microseconds (`null` when no latency samples exist in the bucket).
+  - `total_latency_samples`: sample count for total latency (allows UI to render gaps rather than misleading zeroes).
+  - `avg_ttfb_latency_micros`: nullable integer average time-to-first-byte latency in microseconds (`null` when no samples exist).
+  - `ttfb_latency_samples`: sample count for TTFB latency.
+  - `avg_upstream_latency_micros`: nullable integer average time-to-upstream-headers latency in microseconds (`null` when no samples exist).
+  - `upstream_latency_samples`: sample count for upstream latency.
+
+## `GET /admin/v1/usage/breakdown`
+
+Returns aggregated usage metrics grouped by dimension (`model`, `key`, or `outcome`)
+with top-20 ranking and an `other` aggregate.
+
+```sh
+curl -fsS 'http://localhost:8080/admin/v1/usage/breakdown?group_by=model&after=2026-09-17T00:00:00Z&before=2026-09-18T00:00:00Z' \
+  -H "Authorization: Bearer ${ADMIN_CREDENTIAL}"
+```
+
+Query parameters:
+- `after`: optional RFC3339 start timestamp. Omitting `after` requests all retained history.
+- `before`: optional RFC3339 end timestamp (defaults to current server time).
+- `group_by`: required dimension; must be `model`, `key`, or `outcome`.
+
+Constraints, bounds, and validation:
+- `group_by` is required and must be strictly `model`, `key`, or `outcome`.
+- `after` must be strictly before `before` when specified.
+- Unknown or duplicate parameters return HTTP 400 (`invalid_request`).
+
+Concurrency and caching:
+- Shares the global 2-query analytics concurrency limit (HTTP 503 with `Retry-After: 1` when saturated).
+- Singleflight query deduplication and LRU caching (32 entries, 15-second TTL).
+- Cancelled client requests abort processing without caching.
+
+The response payload contains:
+- `requested_after`, `effective_after`, `before`: RFC3339 timestamps (`requested_after` is `null` when omitted).
+- `group_by`: dimension name (`model`, `key`, or `outcome`).
+- `retention_limited`: boolean indicating whether the history window was truncated by retention.
+- `earliest_retained_at`, `latest_retained_at`: RFC3339 timestamps of earliest/latest retained records, or `null`.
+- `rows`: array of up to 20 ranked dimension rows ordered by `total_requests` descending, tie-broken deterministically:
+  - `id`: stable identifier (`model` name, `api_key_id` or `deleted:<key_name>`, `terminal_outcome`, or `"unknown"`).
+  - `name`: display name for the entity.
+  - `key_id`: optional string containing the key ID when grouping by `key`.
+  - `is_unknown`: boolean flag indicating whether the entity was unidentified (`true` for missing model or key).
+  - `is_deleted`: boolean flag indicating whether the API key was deleted from key configuration (`true` when grouping by `key` and key is deleted).
+  - `total_requests`, `successful_requests`, `error_requests`, `rejected_requests`: integer request counts.
+  - `input_tokens`, `cached_input_tokens`, `output_tokens`: integer token counts.
+  - `cost_micros`: nullable integer estimated cost in microdollars (`null` when cost is unknown).
+- `other`: aggregate row representing the sum of all dimensions beyond the top 20 (`id: "other"`, `name: "Other"`). Sum of top rows plus `other` matches `total` across all known metrics.
+- `total`: untruncated overall aggregate object containing total counts, tokens, and nullable `cost_micros` across the entire requested range.
+
 ## Operational endpoints
 
 `GET /ready`, `GET /metrics`, and `GET /health` are outside `/admin/v1` and do
