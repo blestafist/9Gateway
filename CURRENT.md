@@ -2,12 +2,27 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T169`.
+Done: `T001`-`T170`.
 
-Current: `T170` - build the API key inventory.
+Current: `T171` - add API key creation and one-time secret handling.
 
-Queued: `T171`-`T180`, in dependency order from key/request workflows,
+Queued: `T172`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T170 built the API key inventory:
+connects `GET /admin/v1/keys` into an accessible, responsive key inventory below
+`/ui/keys` featuring in-memory cursor pagination with bounded page sizes (10, 25, 50,
+100; default 25), single-next-page TanStack prefetching, and zero URL/history cursor
+leakage; client-side searching and filtering by name, key ID, display prefix, status
+(active, disabled, expired, expiring <= 30d), and policy summaries (model allowlist/
+denylist, body logging) clearly scoped to current-page filtering; deep-linkable
+key detail drawer shell (`/ui/keys/:id` or `?keyId=:id`) using `GET /admin/v1/keys/:id`
+with stable focus restoration to activated rows or cards on dismissal, handling
+404 deleted keys; dual presentation with compact desktop table and mobile cards
+without color-only status indicators; honest error, offline, invalid cursor, and
+401 session expiry handling; strict DOM safety ensuring raw keys or reconstructed
+secrets never appear in DOM, URL, or client logs; verified by unit, integration,
+lifecycle, and contract tests.
 
 T169 built the Usage and Analytics page:
 connects the T168 usage time-series and breakdown APIs into URL-backed presets

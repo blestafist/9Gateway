@@ -1,0 +1,148 @@
+import { formatTimestamp } from "../../shared/formatters";
+import { AdminKeyListItem, KeyPageFilters } from "./types";
+
+export interface KeyStatusInfo {
+  status: "active" | "disabled" | "expired" | "expiring";
+  label: string;
+  variant: "success" | "warning" | "danger" | "neutral";
+  isExpired: boolean;
+  isExpiringSoon: boolean;
+  expiresText: string;
+}
+
+export function isKeyExpired(expiresAt: string | null, nowMs: number = Date.now()): boolean {
+  if (!expiresAt) return false;
+  const time = new Date(expiresAt).getTime();
+  return !Number.isNaN(time) && time <= nowMs;
+}
+
+export function isKeyExpiringSoon(
+  expiresAt: string | null,
+  nowMs: number = Date.now(),
+  thresholdDays = 30
+): boolean {
+  if (!expiresAt) return false;
+  const time = new Date(expiresAt).getTime();
+  if (Number.isNaN(time) || time <= nowMs) return false;
+  return time - nowMs <= thresholdDays * 24 * 60 * 60 * 1000;
+}
+
+export function getKeyStatus(
+  enabled: boolean,
+  expiresAt: string | null,
+  nowMs: number = Date.now()
+): KeyStatusInfo {
+  if (isKeyExpired(expiresAt, nowMs)) {
+    return {
+      status: "expired",
+      label: "Expired",
+      variant: "danger",
+      isExpired: true,
+      isExpiringSoon: false,
+      expiresText: "Expired",
+    };
+  }
+
+  if (isKeyExpiringSoon(expiresAt, nowMs)) {
+    if (!enabled) {
+      return {
+        status: "disabled",
+        label: "Disabled (Expiring)",
+        variant: "warning",
+        isExpired: false,
+        isExpiringSoon: true,
+        expiresText: "Expiring soon",
+      };
+    }
+    return {
+      status: "expiring",
+      label: "Expiring Soon",
+      variant: "warning",
+      isExpired: false,
+      isExpiringSoon: true,
+      expiresText: "Expiring soon",
+    };
+  }
+
+  if (!enabled) {
+    return {
+      status: "disabled",
+      label: "Disabled",
+      variant: "neutral",
+      isExpired: false,
+      isExpiringSoon: false,
+      expiresText: expiresAt ? "Valid until expiry" : "Never expires",
+    };
+  }
+
+  return {
+    status: "active",
+    label: "Active",
+    variant: "success",
+    isExpired: false,
+    isExpiringSoon: false,
+    expiresText: expiresAt ? "Active" : "Never expires",
+  };
+}
+
+export function formatKeyExpiry(expiresAt: string | null): string {
+  if (!expiresAt) {
+    return "Never";
+  }
+  return formatTimestamp(expiresAt);
+}
+
+export function filterKeysOnPage(
+  keys: AdminKeyListItem[],
+  filters: KeyPageFilters,
+  nowMs: number = Date.now()
+): AdminKeyListItem[] {
+  const query = filters.searchQuery.trim().toLowerCase();
+
+  return keys.filter((key) => {
+    // 1. Search Query filter (matches name, id, or display_prefix)
+    if (query) {
+      const matchName = key.name.toLowerCase().includes(query);
+      const matchId = key.id.toLowerCase().includes(query);
+      const matchPrefix = key.display_prefix.toLowerCase().includes(query);
+      if (!matchName && !matchId && !matchPrefix) {
+        return false;
+      }
+    }
+
+    // 2. Status Filter
+    if (filters.status !== "all") {
+      const statusInfo = getKeyStatus(key.enabled, key.expires_at, nowMs);
+      if (filters.status === "active" && statusInfo.status !== "active") {
+        return false;
+      }
+      if (filters.status === "disabled" && statusInfo.status !== "disabled") {
+        return false;
+      }
+      if (filters.status === "expired" && statusInfo.status !== "expired") {
+        return false;
+      }
+      if (filters.status === "expiring" && statusInfo.status !== "expiring") {
+        return false;
+      }
+    }
+
+    // 3. Policy Filter
+    if (filters.policy !== "all") {
+      if (filters.policy === "allowlist" && !key.policy_summary.allow_models) {
+        return false;
+      }
+      if (filters.policy === "denylist" && !key.policy_summary.deny_models) {
+        return false;
+      }
+      if (filters.policy === "log_req" && !key.policy_summary.log_request_body) {
+        return false;
+      }
+      if (filters.policy === "log_res" && !key.policy_summary.log_response_body) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}

@@ -20,7 +20,7 @@ export interface CursorPaginationResult {
   page: number;
   hasNextPage: boolean;
   hasPrevPage: boolean;
-  goToNextPage: () => void;
+  goToNextPage: (explicitNextCursor?: string) => void;
   goToPrevPage: () => void;
   resetPagination: () => void;
 }
@@ -50,14 +50,18 @@ export function useCursorPagination(
     }
   }, [filterKey, resetPagination]);
 
-  const goToNextPage = useCallback(() => {
-    if (!nextCursor) {
-      return;
-    }
-    setCursorHistory((prev) => [...prev, currentCursor ?? ""]);
-    setCurrentCursor(nextCursor);
-    setPage((prev) => prev + 1);
-  }, [currentCursor, nextCursor]);
+  const goToNextPage = useCallback(
+    (explicitNextCursor?: string) => {
+      const target = explicitNextCursor ?? nextCursor;
+      if (!target) {
+        return;
+      }
+      setCursorHistory((prev) => [...prev, currentCursor ?? ""]);
+      setCurrentCursor(target);
+      setPage((prev) => prev + 1);
+    },
+    [currentCursor, nextCursor]
+  );
 
   const goToPrevPage = useCallback(() => {
     setCursorHistory((prev) => {

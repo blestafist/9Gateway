@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import React from "react";
+import keyListFixture from "../features/keys/fixtures/keyList.fixture.json";
 import { App } from "./App";
 import { RouteErrorBoundary } from "./shell/RouteErrorBoundary";
 
@@ -82,15 +83,29 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("navigates directly to /ui/keys and renders API Keys placeholder", async () => {
-    render(<App initialEntries={["/ui/keys"]} initialAuthState={{ isAuthenticated: true }} />);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(keyListFixture), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
 
-    await waitFor(() => {
-      expect(screen.getByTestId("keys-page")).toBeInTheDocument();
-      expect(document.title).toBe("API Keys | 9Gateway");
-    });
+    try {
+      render(<App initialEntries={["/ui/keys"]} initialAuthState={{ isAuthenticated: true }} />);
 
-    expect(screen.getByText("API Endpoint")).toBeInTheDocument();
-    expect(screen.getByText(/sk-c47/)).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByTestId("keys-page")).toBeInTheDocument();
+        expect(document.title).toBe("API Keys | 9Gateway");
+      });
+
+      expect(screen.getByText("API Endpoint")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getAllByText(/sk-c47/).length).toBeGreaterThan(0);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("redirects /ui/api-keys alias directly to /keys", async () => {

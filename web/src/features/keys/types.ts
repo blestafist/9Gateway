@@ -86,3 +86,14 @@ export interface KeyListFilters {
   limit?: number;
   cursor?: string;
 }
+
+export type KeyStatusFilter = "all" | "active" | "disabled" | "expired" | "expiring";
+
+export type KeyPolicyFilter = "all" | "allowlist" | "denylist" | "log_req" | "log_res";
+
+export interface KeyPageFilters {
+  searchQuery: string;
+  status: KeyStatusFilter;
+  policy: KeyPolicyFilter;
+}
+

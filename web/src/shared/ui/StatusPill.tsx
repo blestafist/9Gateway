@@ -1,10 +1,19 @@
 import React from "react";
+import { Badge, BadgeVariant } from "./Badge";
 
 export interface StatusPillProps {
   label: string;
+  variant?: BadgeVariant;
 }
 
-export const StatusPill: React.FC<StatusPillProps> = ({ label }) => {
+export const StatusPill: React.FC<StatusPillProps> = ({ label, variant }) => {
+  if (variant) {
+    return (
+      <Badge variant={variant} dot data-testid="status-pill">
+        {label}
+      </Badge>
+    );
+  }
   return (
     <span
       data-testid="status-pill"

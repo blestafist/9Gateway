@@ -50,10 +50,14 @@ export const PageHeader: React.FC = () => {
   const { isAuthenticated, logout } = useAuth();
 
   const currentPath = location.pathname.replace(/\/$/, "") || "/";
-  const info = ROUTE_DESCRIPTIONS[currentPath] || {
+  const defaultNotFound = {
     title: "Not Found",
     subtitle: "The requested route does not exist below /ui/",
   };
+  const keysFallback = ROUTE_DESCRIPTIONS["/keys"] ?? defaultNotFound;
+  const info =
+    ROUTE_DESCRIPTIONS[currentPath] ??
+    (currentPath.startsWith("/keys/") ? keysFallback : defaultNotFound);
 
   return (
     <header className="gw-page-header" data-testid="page-header">

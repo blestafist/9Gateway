@@ -23,6 +23,9 @@ export function getRouteTitle(pathname: string): string {
   if (ROUTE_TITLES[normalized]) {
     return ROUTE_TITLES[normalized];
   }
+  if (normalized.startsWith("/keys/")) {
+    return "API Keys";
+  }
   return "Page Not Found";
 }
 
