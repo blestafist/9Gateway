@@ -27,13 +27,15 @@ export interface RequestPolicyWindow {
 }
 
 export interface TokenPolicyWindow {
-  amount: number;
+  /** JSON numbers are retained for compatibility; decimal strings preserve int64 values. */
+  amount: number | string;
   duration: number;
 }
 
 export interface BudgetLimit {
   period: string;
-  amount_micros: number;
+  /** JSON numbers are retained for compatibility; decimal strings preserve int64 values. */
+  amount_micros: number | string;
 }
 
 export type TokenMode = "total" | "input_only" | "output_only" | string;

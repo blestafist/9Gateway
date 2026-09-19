@@ -1030,6 +1030,15 @@ func (handler *adminHandler) inspectTelemetry(request *http.Request) AdminTeleme
 			dropped = metricDrops
 		}
 	}
+	if handler.metrics != nil {
+		if depth == 0 {
+			depth = handler.metrics.queueDepth()
+		}
+		metricDrops := int64(handler.metrics.telemetry.values[1].Load())
+		if metricDrops > dropped {
+			dropped = metricDrops
+		}
+	}
 
 	return AdminTelemetrySummary{
 		QueueDepth:     depth,
@@ -1734,6 +1743,7 @@ type adminHandler struct {
 
 	startTime         time.Time
 	readiness         *Readiness
+	metrics           *gatewayMetrics
 	completionLogger  *CompletionLogger
 	usageWorker       *UsageObservationWorker
 	historyWorker     *HistoryPersistenceWorker
@@ -1756,6 +1766,14 @@ func newAdminHandler(credential string, service *adminKeyService) (*adminHandler
 		BodyRetentionSeconds:    604800,
 		MaxCapturedBodyBytes:    0,
 	}
+	var readiness *Readiness
+	if service != nil && service.repository != nil {
+		if provider, ok := service.repository.(interface{ ReadinessDatabase() *storage.DB }); ok {
+			readiness = NewReadiness(ReadinessConfig{
+				Database: provider.ReadinessDatabase(),
+			})
+		}
+	}
 	return &adminHandler{
 		credential:                 credential,
 		service:                    service,
@@ -1767,6 +1785,7 @@ func newAdminHandler(credential string, service *adminKeyService) (*adminHandler
 		usageTimeseriesCoordinator: analytics.NewCoordinatorWithGate[*storage.UsageTimeseriesData](gate, 32, 15*time.Second),
 		usageBreakdownCoordinator:  analytics.NewCoordinatorWithGate[*storage.UsageBreakdownData](gate, 32, 15*time.Second),
 		startTime:                  processStartTime,
+		readiness:                  readiness,
 		systemLimits:               limits,
 		telemetryCapacity:          128,
 	}, nil

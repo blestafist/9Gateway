@@ -50,6 +50,31 @@ const baseKeyDetail: AdminKeyDetail = {
 
 describe("T172 Key Policy Editor & Controls", () => {
   describe("Policy Conversion & Math Helpers", () => {
+    it("preserves int64 token and budget values at the JSON boundary", () => {
+      const maxInt64 = "9223372036854775807";
+      const detail: AdminKeyDetail = {
+        ...baseKeyDetail,
+        policy: {
+          ...baseKeyDetail.policy,
+          token_windows: [{ amount: maxInt64, duration: 60 }],
+          budget_limits: [{ period: "total", amount_micros: maxInt64 }],
+        },
+      };
+      const values = policyToFormValues(detail);
+      expect(values.token_windows[0]?.amount).toBe(maxInt64);
+      expect(values.budget_limits[0]?.amount).toBe("9223372036854.775807");
+      expect(validatePolicyForm(values).summary).toEqual([]);
+      expect(() => formValuesToPolicyPayload(values)).toThrow(/numeric JSON policy contract/);
+    });
+
+    it("rejects unsafe numeric int64 responses instead of rounding them", () => {
+      const unsafe = policyToFormValues({
+        ...baseKeyDetail,
+        policy: { ...baseKeyDetail.policy, token_windows: [{ amount: Number.MAX_SAFE_INTEGER + 2, duration: 60 }] },
+      });
+      expect(validatePolicyForm(unsafe).summary).toContain("Token limit #1 amount must be an integer greater than 0 and no greater than int64 max");
+    });
+
     it("losslessly converts micro-dollars to and from human dollar strings", () => {
       // Whole dollars
       expect(microsToDollarsString(5_000_000)).toBe("5");
@@ -354,6 +379,26 @@ describe("T172 Key Policy Editor & Controls", () => {
           })
         );
       });
+    });
+
+    it("submits exactly one PUT when confirmation is activated rapidly twice", async () => {
+      let resolvePut!: (response: Response) => void;
+      const putResponse = new Promise<Response>((resolve) => {
+        resolvePut = resolve;
+      });
+      const mockPut = vi.fn().mockReturnValue(putResponse);
+      globalThis.fetch = mockPut;
+      renderForm();
+
+      fireEvent.click(screen.getByTestId("log-request-body-switch"));
+      fireEvent.click(screen.getByTestId("save-policy-btn"));
+      const confirm = await screen.findByTestId("review-dialog-confirm-btn");
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+      await waitFor(() => expect(mockPut).toHaveBeenCalledTimes(1));
+
+      resolvePut(mockJsonResponse({ ...baseKeyDetail, policy: { ...baseKeyDetail.policy, log_request_body: true } }));
+      await waitFor(() => expect(screen.getByTestId("policy-success-alert")).toBeInTheDocument());
     });
 
     it("submits exactly one full replacement PUT request and updates server source of truth", async () => {

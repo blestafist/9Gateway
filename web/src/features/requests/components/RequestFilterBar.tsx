@@ -3,6 +3,7 @@ import { Tabs, Select, Input, Button } from "../../../shared/ui";
 import { AdminKeyListItem } from "../../keys";
 import { RequestRangePreset } from "../types";
 import { Calendar, ArrowRight, RefreshCw, X } from "lucide-react";
+import { isValidCustomRequestRange, parseStrictUtcRfc3339 } from "../helpers";
 
 export interface RequestFilterBarProps {
   keyId: string;
@@ -99,29 +100,28 @@ export const RequestFilterBar: React.FC<RequestFilterBarProps> = ({
       return;
     }
 
-    const startDate = new Date(s);
-    const endDate = new Date(b);
-
-    if (Number.isNaN(startDate.getTime())) {
+    const startDate = parseStrictUtcRfc3339(s);
+    const endDate = parseStrictUtcRfc3339(b);
+    if (!startDate) {
       setCustomError(
-        "Invalid Start UTC timestamp. Expected RFC3339 format (e.g. 2026-09-17T00:00:00Z)."
+        "Invalid Start UTC timestamp. Expected strict RFC3339 UTC format (e.g. 2026-09-17T00:00:00Z)."
       );
       return;
     }
-
-    if (Number.isNaN(endDate.getTime())) {
+    if (!endDate) {
       setCustomError(
-        "Invalid End UTC timestamp. Expected RFC3339 format (e.g. 2026-09-18T00:00:00Z)."
+        "Invalid End UTC timestamp. Expected strict RFC3339 UTC format (e.g. 2026-09-18T00:00:00Z)."
       );
       return;
     }
-
-    if (startDate.getTime() >= endDate.getTime()) {
+    if (!isValidCustomRequestRange(s, b)) {
       setCustomError("Start UTC timestamp must be strictly before End UTC timestamp.");
       return;
     }
 
-    onCustomRangeApply(startDate.toISOString(), endDate.toISOString());
+    // Keep the user's strict UTC values; the page normalizes them only after
+    // both bounds have passed validation.
+    onCustomRangeApply(s, b);
   };
 
   const hasActiveFilters = Boolean(keyId) || preset !== "all";

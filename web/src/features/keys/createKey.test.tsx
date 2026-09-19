@@ -118,6 +118,8 @@ describe("T171 Key Creation Helpers", () => {
 
     // Malformed input
     expect(validateCustomExpiry("invalid-date", fixedNowMs)).toBe("Invalid expiration date format.");
+    expect(validateCustomExpiry("2026-02-30T12:00", fixedNowMs)).toBe("Invalid expiration date format.");
+    expect(validateCustomExpiry("2028-02-29T12:00", fixedNowMs)).toBeNull();
 
     // Realistic no-Z value strictly in the past relative to UTC reference
     expect(validateCustomExpiry("2026-06-15T11:59", fixedNowMs)).toBe(

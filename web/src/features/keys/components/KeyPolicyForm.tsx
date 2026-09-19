@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
@@ -34,6 +34,8 @@ import {
   reorderItem,
   generateRowId,
   dollarsStringToMicros,
+  microsToDollarsString,
+  formatInteger,
 } from "../policyHelpers";
 
 export interface KeyPolicyFormProps {
@@ -77,6 +79,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
   const [is409Conflict, setIs409Conflict] = useState<boolean>(false);
   const [serverConflict, setServerConflict] = useState<boolean>(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const isSubmittingRef = useRef(false);
 
   // Compute dirty status
   const currentSerialized = useMemo(() => {
@@ -257,7 +260,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
 
   const handleUpdateTokenWindow = (
     index: number,
-    partial: { amount?: number | ""; durationValue?: number | ""; durationUnit?: DurationUnit }
+    partial: { amount?: number | string; durationValue?: number | ""; durationUnit?: DurationUnit }
   ) => {
     setValues((prev) => {
       const copy = [...prev.token_windows];
@@ -366,6 +369,8 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
 
   // Submission logic
   const executeSubmit = async () => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     setSubmitError(null);
     setIs409Conflict(false);
@@ -409,11 +414,13 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
       }
     } finally {
       setIsSubmitting(false);
+      isSubmittingRef.current = false;
     }
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingRef.current) return;
     setSubmitError(null);
     setIs409Conflict(false);
     setSuccessMessage(null);
@@ -525,6 +532,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
               variant="primary"
               onClick={() => void executeSubmit()}
               isLoading={isSubmitting}
+              disabled={isSubmitting}
               data-testid="conflict-retry-btn"
             >
               Retry Save
@@ -547,6 +555,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
               variant="secondary"
               onClick={() => void executeSubmit()}
               isLoading={isSubmitting}
+              disabled={isSubmitting}
               data-testid="general-retry-btn"
             >
               Retry
@@ -957,7 +966,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
                         error={amountError}
                         onChange={(e) =>
                           handleUpdateTokenWindow(index, {
-                            amount: e.target.value === "" ? "" : parseInt(e.target.value, 10),
+                            amount: e.target.value,
                           })
                         }
                         disabled={readOnly || isSubmitting}
@@ -1158,13 +1167,13 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
               let helperText = "";
               if (b.unit === "usd") {
                 const micros = dollarsStringToMicros(b.amount);
-                if (micros !== null && micros > 0) {
-                  helperText = `Equals ${micros.toLocaleString()} µ$`;
+                 if (micros !== null && micros !== "0") {
+                   helperText = `Equals ${formatInteger(micros)} µ$`;
                 }
               } else {
-                const num = parseInt(b.amount.trim(), 10);
-                if (!isNaN(num) && num > 0) {
-                  helperText = `Equals $${(num / 1_000_000).toFixed(6)} USD`;
+                const micros = b.amount.trim();
+                if (/^\d+$/.test(micros) && micros !== "0") {
+                  helperText = `Equals $${microsToDollarsString(micros)} USD`;
                 }
               }
 
@@ -1221,8 +1230,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
                             const m = dollarsStringToMicros(b.amount);
                             if (m !== null) nextAmount = String(m);
                           } else if (newUnit === "usd" && b.unit === "micros") {
-                            const n = parseInt(b.amount.trim(), 10);
-                            if (!isNaN(n)) nextAmount = String(n / 1_000_000);
+                             if (/^\d+$/.test(b.amount.trim())) nextAmount = microsToDollarsString(b.amount);
                           }
                           handleUpdateBudgetLimit(index, { unit: newUnit, amount: nextAmount });
                         }}
@@ -1365,9 +1373,10 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
             </Button>
             <Button
               variant="primary"
-              isLoading={isSubmitting}
-              onClick={() => void executeSubmit()}
-              data-testid="review-dialog-confirm-btn"
+               isLoading={isSubmitting}
+               disabled={isSubmitting}
+               onClick={() => void executeSubmit()}
+               data-testid="review-dialog-confirm-btn"
             >
               Confirm & Save Policy
             </Button>

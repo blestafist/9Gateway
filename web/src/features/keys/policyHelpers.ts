@@ -13,7 +13,8 @@ export interface RequestWindowInput {
 
 export interface TokenWindowInput {
   id: string;
-  amount: number | "";
+  /** Keep the token count textual while editing so unsafe integers are never rounded. */
+  amount: number | string;
   durationValue: number | "";
   durationUnit: DurationUnit;
 }
@@ -124,38 +125,69 @@ export function durationInputToSeconds(amount: number, unit: DurationUnit): numb
 /**
  * Converts micro-dollars (1 USD = 1,000,000 µ$) to a decimal dollar string without precision loss.
  */
-export function microsToDollarsString(micros: number): string {
-  if (micros <= 0) {
-    return "0";
+const MAX_INT64 = 9223372036854775807n;
+const MAX_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+export type IntegerValue = number | string;
+export function formatInteger(value: IntegerValue): string {
+  const normalized = integerString(value);
+  return normalized === null ? String(value) : BigInt(normalized).toLocaleString();
+}
+
+function integerString(value: IntegerValue): string | null {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    return String(value);
   }
-  const whole = Math.floor(micros / 1_000_000);
-  const remainder = micros % 1_000_000;
-  if (remainder === 0) {
-    return String(whole);
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  try {
+    const parsed = BigInt(trimmed);
+    if (parsed < 0n || parsed > MAX_INT64) return null;
+    return parsed.toString();
+  } catch {
+    return null;
   }
-  const remainderStr = String(remainder).padStart(6, "0").replace(/0+$/, "");
-  return `${whole}.${remainderStr}`;
+}
+
+function integerForPayload(value: IntegerValue): number {
+  const normalized = integerString(value);
+  if (normalized === null) throw new ValidationError("Integer value must be a non-negative safe integer or int64 decimal string");
+  const parsed = BigInt(normalized);
+  if (parsed > MAX_SAFE_INTEGER_BIGINT) {
+    throw new ValidationError("Unsafe int64 values cannot be submitted through the numeric JSON policy contract");
+  }
+  return Number(parsed);
+}
+
+/** Converts int64 micro-dollars to a decimal dollar string without precision loss. */
+export function microsToDollarsString(micros: IntegerValue): string {
+  const normalized = integerString(micros);
+  if (normalized === null) return "0";
+  const value = BigInt(normalized);
+  if (value === 0n) return "0";
+  const whole = value / 1_000_000n;
+  const remainder = value % 1_000_000n;
+  if (remainder === 0n) return whole.toString();
+  return `${whole}.${remainder.toString().padStart(6, "0").replace(/0+$/, "")}`;
 }
 
 /**
  * Converts a decimal dollar string (up to 6 decimal digits) to integer micro-dollars.
- * Returns null if invalid or exceeds 6 decimal places.
+ * Safe values retain the historical number return type; larger int64 values are strings.
  */
-export function dollarsStringToMicros(dollarsStr: string): number | null {
+export function dollarsStringToMicros(dollarsStr: string): number | string | null {
   const trimmed = dollarsStr.trim().replace(/^\$/, "");
-  if (!trimmed || !/^\d+(\.\d{1,6})?$/.test(trimmed)) {
-    return null;
-  }
+  if (!trimmed || !/^\d+(\.\d{1,6})?$/.test(trimmed)) return null;
   const parts = trimmed.split(".");
   const whole = parts[0] || "0";
-  const decimal = parts[1] || "";
-  const paddedDecimal = decimal.padEnd(6, "0").slice(0, 6);
-  const wholePart = parseInt(whole, 10);
-  const decimalPart = parseInt(paddedDecimal, 10);
-  if (Number.isNaN(wholePart) || Number.isNaN(decimalPart)) {
+  const decimal = (parts[1] || "").padEnd(6, "0");
+  try {
+    const micros = BigInt(whole) * 1_000_000n + BigInt(decimal || "0");
+    if (micros < 0n || micros > MAX_INT64) return null;
+    return micros <= MAX_SAFE_INTEGER_BIGINT ? Number(micros) : micros.toString();
+  } catch {
     return null;
   }
-  return wholePart * 1_000_000 + decimalPart;
 }
 
 /**
@@ -197,11 +229,14 @@ export function policyToFormValues(detail: AdminKeyDetail): KeyPolicyFormValues 
   });
 
   const tokenWindows: TokenWindowInput[] = (policy.token_windows || []).map((w) => {
+    const normalizedAmount = integerString(w.amount);
     const sec = typeof w.duration === "number" ? w.duration : parseDurationToSeconds(w.duration);
     const decomposed = secondsToDurationInput(sec);
     return {
       id: generateRowId(),
-      amount: w.amount,
+      // Preserve an unsafe numeric response unchanged so validation can reject
+      // it; never coerce it through a rounded representation.
+      amount: normalizedAmount ?? w.amount,
       durationValue: decomposed.amount,
       durationUnit: decomposed.unit,
     };
@@ -213,12 +248,14 @@ export function policyToFormValues(detail: AdminKeyDetail): KeyPolicyFormValues 
     else if (b.period === "month" || b.period === "monthly") period = "month";
     else period = "total";
 
-    const isTinyMicros = b.amount_micros < 1000 && b.amount_micros > 0;
+    const normalizedMicros = integerString(b.amount_micros);
+    if (normalizedMicros === null) throw new ValidationError("Policy budget amount is outside the supported int64 range");
+    const isTinyMicros = BigInt(normalizedMicros) < 1000n && BigInt(normalizedMicros) > 0n;
 
     return {
       id: generateRowId(),
       period,
-      amount: isTinyMicros ? String(b.amount_micros) : microsToDollarsString(b.amount_micros),
+      amount: isTinyMicros ? normalizedMicros : microsToDollarsString(normalizedMicros),
       unit: isTinyMicros ? "micros" : "usd",
     };
   });
@@ -312,8 +349,9 @@ export function validatePolicyForm(values: KeyPolicyFormValues): PolicyValidatio
     const amountField = `tok-window-amount-${index}`;
     const durationField = `tok-window-duration-${index}`;
 
-    if (w.amount === "" || typeof w.amount !== "number" || Number.isNaN(w.amount) || w.amount <= 0 || !Number.isInteger(w.amount)) {
-      recordError(amountField, `Token limit #${index + 1} amount must be an integer greater than 0`);
+    const tokenAmount = w.amount === "" ? null : integerString(w.amount);
+    if (tokenAmount === null || tokenAmount === "0") {
+      recordError(amountField, `Token limit #${index + 1} amount must be an integer greater than 0 and no greater than int64 max`);
     }
 
     if (w.durationValue === "" || typeof w.durationValue !== "number" || Number.isNaN(w.durationValue) || w.durationValue <= 0 || !Number.isInteger(w.durationValue)) {
@@ -358,13 +396,14 @@ export function validatePolicyForm(values: KeyPolicyFormValues): PolicyValidatio
       recordError(amountField, `Budget amount #${index + 1} cannot be empty`);
     } else if (b.unit === "usd") {
       const micros = dollarsStringToMicros(b.amount);
-      if (micros === null || micros <= 0) {
+      const isNonPositive = typeof micros === "number" ? micros <= 0 : micros === "0";
+      if (micros === null || isNonPositive) {
         recordError(amountField, `Budget amount #${index + 1} must be a valid dollar amount greater than $0 (max 6 decimal places)`);
       }
     } else {
-      const num = parseInt(b.amount.trim(), 10);
-      if (Number.isNaN(num) || num <= 0 || !Number.isInteger(num)) {
-        recordError(amountField, `Budget amount #${index + 1} must be an integer micro-dollar amount greater than 0`);
+      const num = integerString(b.amount);
+      if (num === null || num === "0") {
+        recordError(amountField, `Budget amount #${index + 1} must be an integer micro-dollar amount greater than 0 and no greater than int64 max`);
       }
     }
   });
@@ -391,16 +430,17 @@ export function formValuesToPolicyPayload(values: KeyPolicyFormValues): UpdateAd
   const tokenWindows = values.token_windows.map((w) => {
     const sec = durationInputToSeconds(Number(w.durationValue), w.durationUnit);
     return {
-      amount: Number(w.amount),
+      amount: integerForPayload(w.amount),
       duration: `${sec}s`,
     };
   });
 
   const budgetLimits = values.budget_limits.map((b) => {
-    const micros = b.unit === "usd" ? dollarsStringToMicros(b.amount)! : parseInt(b.amount.trim(), 10);
+    const micros = b.unit === "usd" ? dollarsStringToMicros(b.amount) : integerString(b.amount);
+    if (micros === null) throw new ValidationError("Budget amount is outside the supported int64 range");
     return {
       period: b.period,
-      amount_micros: micros,
+      amount_micros: integerForPayload(micros),
     };
   });
 

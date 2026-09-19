@@ -26,7 +26,6 @@ import {
   Skeleton,
   EmptyState,
   Alert,
-  ToastProvider,
   useToast,
 } from "../../shared/ui";
 import { ThemeProvider, useTheme } from "../../shared/theme";
@@ -679,9 +678,7 @@ const CatalogInner: React.FC = () => {
 export const ComponentCatalog: React.FC = () => {
   return (
     <ThemeProvider>
-      <ToastProvider>
-        <CatalogInner />
-      </ToastProvider>
+      <CatalogInner />
     </ThemeProvider>
   );
 };

@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import React from "react";
 import keyListFixture from "../features/keys/fixtures/keyList.fixture.json";
 import requestListFixture from "../features/requests/fixtures/requestList.fixture.json";
+import requestDetailFixture from "../features/requests/fixtures/requestDetail.fixture.json";
 import { App } from "./App";
 import { RouteErrorBoundary } from "./shell/RouteErrorBoundary";
 
@@ -153,6 +154,48 @@ describe("T163 Shell & Navigation", () => {
         expect(screen.getByRole("table", { name: "Recent Requests" })).toBeInTheDocument();
         expect(screen.getAllByText("gpt-4o").length).toBeGreaterThan(0);
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("composes the production toast provider for failed request body downloads", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/bodies/")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { message: "Body pruned", code: "not_found" } }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      }
+      if (url.includes("/admin/v1/requests/") && !url.endsWith("/requests/")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(requestDetailFixture), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+
+    try {
+      render(
+        <App
+          initialEntries={[`/ui/requests/${requestDetailFixture.request_id}`]}
+          initialAuthState={{ isAuthenticated: true }}
+        />
+      );
+      const downloadButton = await screen.findByTestId("download-body-client_request-btn");
+      fireEvent.click(downloadButton);
+
+      const toast = await screen.findByTestId("toast-item");
+      expect(toast).toHaveAttribute("role", "alert");
+      expect(toast).toHaveTextContent("Body Not Found");
+      expect(await screen.findByTestId("body-download-error-alert")).toBeInTheDocument();
     } finally {
       globalThis.fetch = originalFetch;
     }

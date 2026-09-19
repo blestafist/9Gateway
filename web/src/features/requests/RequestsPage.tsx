@@ -18,7 +18,11 @@ import { listKeys, keyQueryKeys } from "../keys";
 import { listRequests } from "./api";
 import { requestQueryKeys } from "./queryKeys";
 import { RequestListFilters, RequestRangePreset } from "./types";
-import { computeRequestPresetBounds, isValidIsoDate } from "./helpers";
+import {
+  computeRequestPresetBounds,
+  isValidCustomRequestRange,
+  parseStrictUtcRfc3339,
+} from "./helpers";
 import { RequestFilterBar } from "./components/RequestFilterBar";
 import { RequestTable } from "./components/RequestTable";
 import { RequestCardList } from "./components/RequestCardList";
@@ -181,16 +185,24 @@ const RequestListView: React.FC = () => {
     [setSearchParams]
   );
 
-  // Compute effective RFC3339 bounds for request query
+  // A custom bookmark is all-or-nothing. Never turn one malformed/missing bound
+  // into an unbounded history query.
+  const hasInvalidCustomRange =
+    preset === "custom" && !isValidCustomRequestRange(customAfter, customBefore);
+
+  // Compute effective RFC3339 bounds for request query only after strict
+  // validation. The URL may remain intact so the operator can correct it or
+  // use the existing reset recovery action.
   const effectiveBounds = useMemo(() => {
     if (preset === "custom") {
+      if (hasInvalidCustomRange) return {};
       return {
-        after: isValidIsoDate(customAfter) ? new Date(customAfter).toISOString() : undefined,
-        before: isValidIsoDate(customBefore) ? new Date(customBefore).toISOString() : undefined,
+        after: parseStrictUtcRfc3339(customAfter)!.toISOString(),
+        before: parseStrictUtcRfc3339(customBefore)!.toISOString(),
       };
     }
     return computeRequestPresetBounds(preset);
-  }, [preset, customAfter, customBefore]);
+  }, [preset, customAfter, customBefore, hasInvalidCustomRange]);
 
   // Cursor pagination filter key resets page to 1 on filter change
   const filterKey = `${keyId}:${preset}:${effectiveBounds.after || ""}:${effectiveBounds.before || ""}:${pageSize}`;
@@ -229,6 +241,7 @@ const RequestListView: React.FC = () => {
     queryKey: requestQueryKeys.list(requestFilters),
     queryFn: ({ signal }) => listRequests(requestFilters, signal),
     placeholderData: keepPreviousData,
+    enabled: !hasInvalidCustomRange,
   });
 
   const hasNextPage = Boolean(data?.next_cursor);
@@ -240,14 +253,13 @@ const RequestListView: React.FC = () => {
 
   // Prefetch single next page
   useEffect(() => {
-    if (data?.next_cursor) {
-      void queryClient.prefetchQuery({
-        queryKey: requestQueryKeys.list({ ...requestFilters, cursor: data.next_cursor }),
-        queryFn: ({ signal }) =>
-          listRequests({ ...requestFilters, cursor: data.next_cursor }, signal),
-      });
-    }
-  }, [data?.next_cursor, requestFilters, queryClient]);
+    if (hasInvalidCustomRange || !data?.next_cursor) return;
+    void queryClient.prefetchQuery({
+      queryKey: requestQueryKeys.list({ ...requestFilters, cursor: data.next_cursor }),
+      queryFn: ({ signal }) =>
+        listRequests({ ...requestFilters, cursor: data.next_cursor }, signal),
+    });
+  }, [data?.next_cursor, requestFilters, queryClient, hasInvalidCustomRange]);
 
   // Handlers for filter controls
   const handleKeyIdChange = useCallback(
@@ -314,7 +326,10 @@ const RequestListView: React.FC = () => {
     [navigate, searchParams]
   );
 
-  const loadedRequests = useMemo(() => data?.requests || [], [data?.requests]);
+  const loadedRequests = useMemo(
+    () => (hasInvalidCustomRange ? [] : data?.requests || []),
+    [data?.requests, hasInvalidCustomRange]
+  );
 
   // Error inspection
   const is401Error =
@@ -333,12 +348,13 @@ const RequestListView: React.FC = () => {
     Boolean(currentCursor);
 
   const isInvalidParams =
-    isError &&
-    error &&
-    typeof error === "object" &&
-    "status" in error &&
-    error.status === 400 &&
-    !currentCursor;
+    hasInvalidCustomRange ||
+    (isError &&
+      error &&
+      typeof error === "object" &&
+      "status" in error &&
+      error.status === 400 &&
+      !currentCursor);
 
   // Selected key name for contextual empty description
   const selectedKeyName = useMemo(() => {

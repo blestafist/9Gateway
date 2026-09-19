@@ -37,12 +37,51 @@ export function computeRequestPresetBounds(
   }
 }
 
-export function isValidIsoDate(val: string | null | undefined): boolean {
-  if (!val || typeof val !== "string" || !val.trim()) {
-    return false;
-  }
+const STRICT_UTC_RFC3339 =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
+
+/**
+ * Request history bounds are deliberately narrower than Date.parse: bookmarks
+ * must carry an explicit UTC timestamp and must not be silently normalized.
+ */
+export function parseStrictUtcRfc3339(
+  val: string | null | undefined
+): Date | null {
+  if (!val || typeof val !== "string") return null;
+  const match = STRICT_UTC_RFC3339.exec(val.trim());
+  if (!match) return null;
+
+  const [, year, month, day, hour, minute, second] = match;
   const date = new Date(val.trim());
-  return !Number.isNaN(date.getTime());
+  if (Number.isNaN(date.getTime())) return null;
+
+  // Date.parse normalizes out-of-range calendar fields, so verify the fields
+  // independently before accepting the value.
+  if (
+    date.getUTCFullYear() !== Number(year) ||
+    date.getUTCMonth() + 1 !== Number(month) ||
+    date.getUTCDate() !== Number(day) ||
+    date.getUTCHours() !== Number(hour) ||
+    date.getUTCMinutes() !== Number(minute) ||
+    date.getUTCSeconds() !== Number(second)
+  ) {
+    return null;
+  }
+
+  return date;
+}
+
+export function isValidIsoDate(val: string | null | undefined): boolean {
+  return parseStrictUtcRfc3339(val) !== null;
+}
+
+export function isValidCustomRequestRange(
+  after: string | null | undefined,
+  before: string | null | undefined
+): boolean {
+  const start = parseStrictUtcRfc3339(after);
+  const end = parseStrictUtcRfc3339(before);
+  return start !== null && end !== null && start.getTime() < end.getTime();
 }
 
 export function truncateId(id: string, head = 8, tail = 6): string {

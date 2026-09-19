@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "../shared/theme";
 import { AdminQueryProvider } from "../shared/query";
+import { ToastProvider } from "../shared/ui";
 import { AuthProvider } from "../features/auth";
 import { AppRoutes } from "./AppRoutes";
 
@@ -21,42 +22,48 @@ export const App: React.FC<AppProps> = ({ initialEntries, initialAuthState }) =>
 
   if (initialEntries && initialEntries.length > 0) {
     return (
-      <ThemeProvider>
-        <AdminQueryProvider>
+      <ToastProvider>
+        <ThemeProvider>
+          <AdminQueryProvider>
           <MemoryRouter initialEntries={initialEntries} basename="/ui">
             <AuthProvider initialAuthState={initialAuthState}>
               <AppRoutes />
             </AuthProvider>
           </MemoryRouter>
-        </AdminQueryProvider>
-      </ThemeProvider>
+          </AdminQueryProvider>
+        </ThemeProvider>
+      </ToastProvider>
     );
   }
 
   if (isTestOrNonUiPath) {
     return (
-      <ThemeProvider>
-        <AdminQueryProvider>
+      <ToastProvider>
+        <ThemeProvider>
+          <AdminQueryProvider>
           <MemoryRouter initialEntries={["/ui/overview"]} basename="/ui">
             <AuthProvider initialAuthState={initialAuthState}>
               <AppRoutes />
             </AuthProvider>
           </MemoryRouter>
-        </AdminQueryProvider>
-      </ThemeProvider>
+          </AdminQueryProvider>
+        </ThemeProvider>
+      </ToastProvider>
     );
   }
 
   return (
-    <ThemeProvider>
-      <AdminQueryProvider>
+    <ToastProvider>
+      <ThemeProvider>
+        <AdminQueryProvider>
         <BrowserRouter basename="/ui">
           <AuthProvider initialAuthState={initialAuthState}>
             <AppRoutes />
           </AuthProvider>
         </BrowserRouter>
-      </AdminQueryProvider>
-    </ThemeProvider>
+        </AdminQueryProvider>
+      </ThemeProvider>
+    </ToastProvider>
   );
 };
 

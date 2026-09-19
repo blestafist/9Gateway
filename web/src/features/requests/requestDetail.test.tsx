@@ -783,6 +783,50 @@ describe("T174 Request Details and Safe Body Viewer", () => {
     });
   });
 
+  describe("Direct Body Download Lifecycle", () => {
+    it("aborts and suppresses stale download effects when navigating away", async () => {
+      let bodySignal: AbortSignal | undefined;
+      let resolveBody: (() => void) | undefined;
+      const bodyPending = new Promise<void>((resolve) => {
+        resolveBody = resolve;
+      });
+      globalThis.fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const urlStr = String(input);
+        if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+          return mockJsonResponse(baseRequestDetail);
+        }
+        if (urlStr.includes("/bodies/client_request")) {
+          bodySignal = init?.signal ?? undefined;
+          await bodyPending;
+          return mockOctetStreamResponse("late body", 9, false, "text/plain");
+        }
+        return new Response("Not found", { status: 404 });
+      });
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      const createObjectURLSpy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:stale");
+
+      try {
+        const view = renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+        fireEvent.click(await screen.findByTestId("download-body-client_request-btn"));
+        await waitFor(() => expect(bodySignal).toBeDefined());
+
+        view.unmount();
+        expect(bodySignal?.aborted).toBe(true);
+
+        resolveBody?.();
+        await act(async () => {
+          await Promise.resolve();
+        });
+        expect(clickSpy).not.toHaveBeenCalled();
+        expect(createObjectURLSpy).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("toast-item")).not.toBeInTheDocument();
+      } finally {
+        clickSpy.mockRestore();
+        createObjectURLSpy.mockRestore();
+      }
+    });
+  });
+
   describe("Direct Body Download Error Feedback", () => {
     it("surfaces accessible user feedback when direct body download fails due to retention 404", async () => {
       globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {

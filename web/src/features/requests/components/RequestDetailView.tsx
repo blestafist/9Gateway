@@ -1,4 +1,4 @@
-import React, { useState, lazy, Suspense, useMemo } from "react";
+import React, { useState, lazy, Suspense, useMemo, useEffect, useRef } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useQuery, onlineManager } from "@tanstack/react-query";
 import {
@@ -149,6 +149,26 @@ export const RequestDetailView: React.FC<RequestDetailViewProps> = ({
     title: string;
     message: string;
   } | null>(null);
+  const downloadControllerRef = useRef<AbortController | null>(null);
+  const downloadOperationRef = useRef(0);
+
+  // A direct download is not a query-cache operation, so explicitly tear it
+  // down when the detail route changes or the view leaves the tree.
+  useEffect(() => {
+    // Runs before the new requestId operation begins, while the component is
+    // still mounted and state updates are safe.
+    downloadOperationRef.current += 1;
+    downloadControllerRef.current?.abort();
+    downloadControllerRef.current = null;
+    setDownloadingKind(null);
+    setDownloadError(null);
+
+    return () => {
+      downloadOperationRef.current += 1;
+      downloadControllerRef.current?.abort();
+      downloadControllerRef.current = null;
+    };
+  }, [requestId]);
 
   const handleOpenBodyViewer = (kind: RequestBodyKind) => {
     setActiveBodyKind(kind);
@@ -161,15 +181,21 @@ export const RequestDetailView: React.FC<RequestDetailViewProps> = ({
   };
 
   const handleDirectDownload = async (kind: RequestBodyKind) => {
+    downloadControllerRef.current?.abort();
+    const controller = new AbortController();
+    downloadControllerRef.current = controller;
+    const operationId = ++downloadOperationRef.current;
     setDownloadingKind(kind);
     setDownloadError(null);
     try {
-      const content = await getRequestBody(requestId, kind);
+      const content = await getRequestBody(requestId, kind, controller.signal);
+      if (controller.signal.aborted || operationId !== downloadOperationRef.current) return;
       const rawBytes = content.bytes ?? new TextEncoder().encode(content.data);
       const ext = content.content_type.includes("json") ? "json" : "bin";
       const filename = `request-${truncateId(requestId)}-${kind}.${ext}`;
       downloadBodyBytes(rawBytes, filename, content.content_type);
     } catch (err: unknown) {
+      if (controller.signal.aborted || operationId !== downloadOperationRef.current) return;
       const feedback = getBodyDownloadErrorMessage(err);
       setDownloadError({
         kind,
@@ -182,7 +208,10 @@ export const RequestDetailView: React.FC<RequestDetailViewProps> = ({
         variant: "danger",
       });
     } finally {
-      setDownloadingKind(null);
+      if (operationId === downloadOperationRef.current) {
+        setDownloadingKind(null);
+        downloadControllerRef.current = null;
+      }
     }
   };
 

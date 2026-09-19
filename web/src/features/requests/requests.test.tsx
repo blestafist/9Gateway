@@ -539,6 +539,32 @@ describe("T173 Request History Explorer", () => {
     });
   });
 
+  it.each([
+    ["date-only start", "2026-09-17", "2026-09-18T00:00:00Z"],
+    ["local-time start", "2026-09-17T00:00:00", "2026-09-18T00:00:00Z"],
+    ["malformed end", "2026-09-17T00:00:00Z", "not-a-date"],
+    ["reversed bounds", "2026-09-19T00:00:00Z", "2026-09-18T00:00:00Z"],
+  ])("rejects %s bookmarked custom ranges without a partial list query", async (_label, after, before) => {
+    const requestFetch = vi.fn();
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/admin/v1/keys")) {
+        return Promise.resolve(mockJsonResponse({ keys: mockKeys }));
+      }
+      if (url.includes("/admin/v1/requests")) {
+        requestFetch(url);
+        return Promise.resolve(mockJsonResponse({ requests: mockOutcomesRequests }));
+      }
+      return Promise.resolve(mockJsonResponse({}));
+    });
+
+    renderRequestsPage(`/requests?range=custom&after=${encodeURIComponent(after)}&before=${encodeURIComponent(before)}`);
+
+    expect(await screen.findByTestId("requests-invalid-params-alert")).toBeInTheDocument();
+    expect(requestFetch).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Reset Filters" })).toBeInTheDocument();
+  });
+
   it("survives a valid copied link and restores filters", async () => {
     let lastRequestedUrl = "";
     globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {

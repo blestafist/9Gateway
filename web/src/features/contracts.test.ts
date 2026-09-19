@@ -137,26 +137,36 @@ describe("Contract Fixtures and Runtime Validation", () => {
         })
       ).toThrow(ValidationError);
 
-      expect(() =>
-        validateKeyDetail({
-          ...keyDetailFixture,
-          policy: {
-            ...keyDetailFixture.policy,
-            token_windows: [{ amount: "1000", duration: 3600 }],
-          },
-        })
-      ).toThrow(ValidationError);
+       expect(
+         validateKeyDetail({
+           ...keyDetailFixture,
+           policy: {
+             ...keyDetailFixture.policy,
+             token_windows: [{ amount: "1000", duration: 3600 }],
+           },
+         }).policy.token_windows[0]?.amount
+       ).toBe(1000);
 
-      expect(() =>
-        validateKeyDetail({
-          ...keyDetailFixture,
-          policy: {
-            ...keyDetailFixture.policy,
-            budget_limits: [{ period: "daily", amount_micros: "5000000" }],
-          },
-        })
-      ).toThrow(ValidationError);
-    });
+       expect(
+         validateKeyDetail({
+           ...keyDetailFixture,
+           policy: {
+             ...keyDetailFixture.policy,
+             budget_limits: [{ period: "daily", amount_micros: "5000000" }],
+           },
+         }).policy.budget_limits[0]?.amount_micros
+       ).toBe(5000000);
+
+       expect(() =>
+         validateKeyDetail({
+           ...keyDetailFixture,
+           policy: {
+             ...keyDetailFixture.policy,
+             token_windows: [{ amount: Number.MAX_SAFE_INTEGER + 1, duration: 3600 }],
+           },
+         })
+       ).toThrow(ValidationError);
+     });
 
     it("rejects missing required key-detail fields", () => {
       const base = { ...keyDetailFixture };

@@ -12,8 +12,9 @@ quality gates, and release integration.
 Review fixes for T171-T175:
 addressed review findings across admin system telemetry & readiness constructor semantics,
 custom key expiry UTC datetime-local handling and validation, RequestDetailView direct
-download errors surfaced via toast and accessible alerts, BodyViewer view mode fallback
-on kind/content switching, and toast close styling.
+download lifecycle/error feedback, BodyViewer view mode fallback, request-range bookmark
+validation, duplicate policy submits, and lossless int64 policy handling with unsafe numeric
+values rejected at the UI contract boundary.
 
 T175 added a safe admin system information API:
 connects authenticated `GET /admin/v1/system` returning version, commit, build time,

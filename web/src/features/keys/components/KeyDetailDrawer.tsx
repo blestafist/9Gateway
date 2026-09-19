@@ -12,14 +12,13 @@ import {
 } from "../../../shared/ui";
 import {
   formatTimestamp,
-  formatCostMicros,
-  formatTokenCount,
   formatDurationSeconds,
 } from "../../../shared/formatters";
 import { getKeyDetail } from "../api";
 import { keyQueryKeys } from "../queryKeys";
 import { getKeyStatus } from "../helpers";
 import { KeyPolicyForm } from "./KeyPolicyForm";
+import { formatInteger, microsToDollarsString } from "../policyHelpers";
 
 export interface KeyDetailDrawerProps {
   keyId: string | null;
@@ -374,7 +373,7 @@ export const KeyDetailDrawer: React.FC<KeyDetailDrawerProps> = ({
                       <ul className="gw-key-detail-list">
                         {detail.policy.token_windows.map((w, i) => (
                           <li key={i}>
-                            {formatTokenCount(w.amount)} tokens per {formatDurationSeconds(w.duration)} ({detail.policy.token_mode || "total"})
+                            {formatInteger(w.amount)} tokens per {formatDurationSeconds(w.duration)} ({detail.policy.token_mode || "total"})
                           </li>
                         ))}
                       </ul>
@@ -392,7 +391,7 @@ export const KeyDetailDrawer: React.FC<KeyDetailDrawerProps> = ({
                       <ul className="gw-key-detail-list">
                         {detail.policy.budget_limits.map((b, i) => (
                           <li key={i}>
-                            {formatCostMicros(b.amount_micros)} ({b.period})
+                            ${microsToDollarsString(b.amount_micros)} ({b.period})
                           </li>
                         ))}
                       </ul>

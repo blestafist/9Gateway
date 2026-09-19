@@ -186,6 +186,18 @@ export function parseCustomExpiryToMs(customVal: string): number {
   if (!trimmed) {
     return NaN;
   }
+  // Date.parse normalizes impossible calendar dates (for example Feb 30) on
+  // some runtimes. Validate the calendar components before parsing so an
+  // expiry can never silently move into a different date.
+  const dateMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/);
+  if (dateMatch) {
+    const year = Number(dateMatch[1]);
+    const month = Number(dateMatch[2]);
+    const day = Number(dateMatch[3]);
+    if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) {
+      return NaN;
+    }
+  }
   const hasTime = /[T\s]\d{1,2}:\d{2}/.test(trimmed);
   const hasTimezone = hasTime && /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(trimmed);
 

@@ -13,6 +13,26 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const MAX_INT64 = 9223372036854775807n;
+function validateInt64Value(value: unknown, label: string): number | string {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new ValidationError(`${label} must be a safe non-negative integer or decimal string`);
+    }
+    return value;
+  }
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new ValidationError(`${label} must be a safe non-negative integer or decimal string`);
+  }
+  try {
+    const parsed = BigInt(value);
+    if (parsed < 0n || parsed > MAX_INT64) throw new Error("out of range");
+    return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
+  } catch {
+    throw new ValidationError(`${label} must be a safe non-negative integer or decimal string`);
+  }
+}
+
 export function validateKeyPolicySummary(raw: unknown): KeyPolicySummary {
   if (!isObject(raw)) {
     throw new ValidationError("Key policy summary must be an object");
@@ -140,7 +160,7 @@ export function validateKeyPolicy(raw: unknown): AdminKeyPolicy {
     });
   }
 
-  let normalizedTokenWindows: { amount: number; duration: number }[] = [];
+  let normalizedTokenWindows: { amount: number | string; duration: number }[] = [];
   if (raw.token_windows !== undefined) {
     if (!Array.isArray(raw.token_windows)) {
       throw new ValidationError("Key policy token_windows must be an array");
@@ -149,14 +169,12 @@ export function validateKeyPolicy(raw: unknown): AdminKeyPolicy {
       if (!isObject(w)) {
         throw new ValidationError("Key policy token_windows item must be an object");
       }
-      if (typeof w.amount !== "number" || Number.isNaN(w.amount)) {
-        throw new ValidationError("Key policy token_windows amount must be a number");
-      }
-      const durationSec = parseDurationToSeconds(w.duration as string | number);
-      return {
-        amount: w.amount,
-        duration: durationSec,
-      };
+       const amount = validateInt64Value(w.amount, "Key policy token_windows amount");
+       const durationSec = parseDurationToSeconds(w.duration as string | number);
+       return {
+         amount,
+         duration: durationSec,
+       };
     });
   }
 
@@ -171,21 +189,20 @@ export function validateKeyPolicy(raw: unknown): AdminKeyPolicy {
     throw new ValidationError("Key policy max_concurrent_requests must be a number");
   }
 
+  let normalizedBudgetLimits: { period: string; amount_micros: number | string }[] = [];
   if (raw.budget_limits !== undefined) {
     if (!Array.isArray(raw.budget_limits)) {
       throw new ValidationError("Key policy budget_limits must be an array");
     }
-    for (const b of raw.budget_limits) {
+    normalizedBudgetLimits = raw.budget_limits.map((b) => {
       if (!isObject(b)) {
         throw new ValidationError("Key policy budget_limits item must be an object");
       }
       if (typeof b.period !== "string") {
         throw new ValidationError("Key policy budget_limits period must be a string");
       }
-      if (typeof b.amount_micros !== "number" || Number.isNaN(b.amount_micros)) {
-        throw new ValidationError("Key policy budget_limits amount_micros must be a number");
-      }
-    }
+      return { period: b.period, amount_micros: validateInt64Value(b.amount_micros, "Key policy budget_limits amount_micros") };
+    });
   }
 
   if (typeof raw.log_request_body !== "boolean") {
@@ -203,7 +220,7 @@ export function validateKeyPolicy(raw: unknown): AdminKeyPolicy {
     token_windows: normalizedTokenWindows,
     token_mode: typeof raw.token_mode === "string" ? raw.token_mode : "total",
     max_concurrent_requests: typeof raw.max_concurrent_requests === "number" ? raw.max_concurrent_requests : 0,
-    budget_limits: (raw.budget_limits as { period: string; amount_micros: number }[]) || [],
+    budget_limits: normalizedBudgetLimits,
     log_request_body: raw.log_request_body,
     log_response_body: raw.log_response_body,
   };
