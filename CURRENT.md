@@ -10,7 +10,7 @@ Queued: none.
 
 T179 completed end-to-end security, browser, and performance coverage:
 added Playwright journeys for authentication, protected deep links, API-key lifecycle, request body inspection, diagnostics, reload/back-forward, and logout/cache scrubbing; added security checks for CSP, framing/content sniffing, HttpOnly/SameSite cookies, CSRF, XSS, and credential persistence; added DOM, CLS, idle-network, long-task, bundle, dependency-boundary, proxy hot-path, and RSS-growth budgets; verified Chromium, light Chromium, Mobile Chromium, and Firefox; documented the WebKit host-library block and repeatable verification matrix in `docs/ui/budgets-and-verification.md`; added CI gates for Go and frontend quality/budget/E2E checks.
-The logout journey now waits for the authenticated overview render before starting a full-document navigation, avoiding a WebKit CI race without sleeps or relaxed timeouts.
+The WebKit journeys now wait for authenticated overview rendering and use normal in-app navigation before testing key workflows, avoiding document-navigation races without sleeps or relaxed timeouts. The Docker UI smoke check accepts the standards-equivalent uppercase doctype emitted by the production Vite build.
 
 T178 passed accessibility and responsive design gates:
 audited all console routes and modals (Login, Overview, Usage, Keys inventory, Create Key,

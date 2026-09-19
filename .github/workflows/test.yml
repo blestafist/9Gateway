@@ -78,4 +78,4 @@ jobs:
             sleep 2
           done
           curl --fail --silent http://127.0.0.1:8080/ready
-          curl --fail --silent http://127.0.0.1:8080/ui/ | grep -q '<!doctype html>'
+          curl --fail --silent http://127.0.0.1:8080/ui/ | grep -qi '<!doctype html>'
