@@ -1,5 +1,20 @@
 # syntax=docker/dockerfile:1
 
+# Keep the frontend toolchain out of the runtime image. Exact Node and npm
+# versions make the embedded asset input reproducible across release builders.
+FROM node:22.14.0-bookworm AS web-build
+ENV TZ=UTC
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --global npm@10.9.2 \
+    && test "$(node --version)" = "v22.14.0" \
+    && test "$(npm --version)" = "10.9.2" \
+    && npm ci --ignore-scripts --include=dev
+COPY web/ ./
+RUN npm run build \
+    && test -z "$(find dist -type f -name '*.map' -print -quit)"
+
 FROM golang:1.23-bookworm AS build
 
 ARG TARGETOS=linux
@@ -12,6 +27,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# The context excludes web/dist so stale local assets can never win over the
+# deterministic build above.
+COPY --from=web-build /web/dist ./web/dist
 
 # modernc.org/sqlite is pure Go, so CGO can remain disabled and both binaries
 # are statically linked for the target selected by BuildKit.

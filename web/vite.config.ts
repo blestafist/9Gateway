@@ -19,6 +19,8 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     manifest: true,
+    sourcemap: false,
+    assetsDir: "assets",
   },
   test: {
     globals: true,

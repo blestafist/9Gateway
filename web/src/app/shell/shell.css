@@ -1141,6 +1141,14 @@
 
 /* Mobile viewports (< 768px) */
 @media (max-width: 767.98px) {
+  .gw-shell-container {
+    flex-direction: column;
+  }
+
+  .gw-shell-main {
+    width: 100%;
+  }
+
   .gw-command-trigger-btn {
     display: none;
   }

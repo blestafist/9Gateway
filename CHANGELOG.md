@@ -51,7 +51,21 @@ not create a git tag.
 - Added live HTTP/SQLite integration coverage and completed the milestone
   documentation, operations references, and release checklist.
 
+### Web UI milestone (T161-T180)
+
+- Added the responsive authenticated operator console under `/ui/` for overview,
+  usage, API keys, request history/details, body inspection, and diagnostics.
+- Integrated deterministic Vite production builds into Docker and CI with pinned
+  Node.js 22.14.0/npm 10.9.2, lockfile installs, npm cache mounts, and no
+  production source maps or frontend tooling in the runtime image.
+- Documented the UI quickstart, browser session/HTTPS requirements, supported
+  browsers, accessibility expectations, immutable asset caching, stale-asset
+  troubleshooting, and UI-visible admin APIs.
+- Completed the T161-T180 acceptance audit. Docker daemon-dependent image,
+  runtime, size, and vulnerability checks remain explicitly environment-blocked;
+  WebKit remains host-library blocked as recorded in the UI verification matrix.
+
 ### Scope boundary
 
-T161 and later tasks are out of scope. No Web UI, provider routing/translation,
-Redis, PostgreSQL, load testing, or other follow-on feature is included.
+No provider routing/translation, Redis, PostgreSQL, load testing, or T181+
+follow-on feature is included.

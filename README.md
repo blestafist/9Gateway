@@ -108,6 +108,19 @@ docker compose --profile observability up -d
 Prometheus is then available at <http://localhost:9090> and scrapes
 `http://gateway:8080/metrics` every 15 seconds.
 
+### Open the Web UI
+
+The production console is served by the gateway at <http://localhost:8080/ui/>; no
+Node.js or frontend tooling is required on an operator workstation. Log in with
+the `ADMIN_CREDENTIAL` value, then use **API Keys** to create the first gateway
+key. The console can then send a request through the same `/v1/*` proxy, and the
+Overview, Usage, Requests, and Request Details screens show the resulting
+accounting and history. Use **Log out** when finished; the session is an in-memory,
+opaque `HttpOnly`, `SameSite=Strict` cookie scoped to `/admin`, with idle and
+absolute expiry and no local-storage credential persistence.
+
+For a complete browser-session walkthrough, see the [deployment guide](docs/operations/deployment.md).
+
 Stop the deployment while retaining data, or remove its named volumes:
 
 ```sh
@@ -166,6 +179,7 @@ and the checked-in [example configuration](config.example.yaml).
 
 ## HTTP endpoints
 
+- `GET /ui/` serves the embedded Web UI (including client-side routes).
 - `GET /health` is an unauthenticated liveness response.
 - `GET /ready` is an unauthenticated readiness response with SQLite, schema,
   telemetry, upstream-URL, and lifecycle checks.
@@ -179,11 +193,9 @@ for exact request, response, and operational details.
 
 ## History
 
-The v0.1.0-rc1 candidate completes the T141-T160 milestone: admin read and
-policy APIs, `gwctl`, readiness and metrics, graceful shutdown, security
-hardening, SQLite request history, and Docker/Compose packaging. See
-[CHANGELOG.md](CHANGELOG.md) and the [release checklist](docs/release-checklist.md)
-for the candidate scope and verification status.
-
-T161 and later work is explicitly outside this release: Web UI and other
-future product features are not implemented here.
+The v0.1.0-rc1 candidate now includes the completed T161-T180 Web UI milestone:
+admin read and policy APIs, the embedded operator console, `gwctl`, readiness and
+metrics, graceful shutdown, security hardening, SQLite request history, and
+Docker/Compose packaging. See [CHANGELOG.md](CHANGELOG.md), the [deployment
+guide](docs/operations/deployment.md), and the [release checklist](docs/release-checklist.md)
+for scope and verification status.

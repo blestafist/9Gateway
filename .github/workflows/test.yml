@@ -1,5 +1,9 @@
 name: CI
 
+env:
+  NODE_VERSION: 22.14.0
+  NPM_VERSION: 10.9.2
+
 on:
   push:
   pull_request:
@@ -34,10 +38,13 @@ jobs:
           go-version-file: go.mod
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: npm ci
+      - run: npm install --global npm@${{ env.NPM_VERSION }}
+      - run: test "$(node --version)" = "v${{ env.NODE_VERSION }}"
+      - run: test "$(npm --version)" = "${{ env.NPM_VERSION }}"
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run test
       - run: npm run build

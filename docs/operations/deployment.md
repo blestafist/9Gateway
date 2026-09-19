@@ -6,7 +6,15 @@ companion service; 9router remains the upstream.
 
 ## Docker image
 
-`Dockerfile` is a two-stage build. It compiles static `gateway` and `gwctl`
+`Dockerfile` deterministically builds the Web UI before compiling the gateway.
+The frontend stage pins Node.js `22.14.0` and npm `10.9.2`, installs from the
+lockfile with `npm ci`, disables production source maps, and embeds only the
+hashed `web/dist` assets into the Go binary. BuildKit's npm cache mount speeds
+repeat builds without copying npm cache, Node modules, Playwright, or frontend
+source into the final image. The final image contains no Node runtime or
+writable web asset directory.
+
+`Dockerfile` is a multi-stage build. It compiles static `gateway` and `gwctl`
 with `CGO_ENABLED=0`; the runtime is
 `gcr.io/distroless/static-debian12:nonroot`. The final process is UID/GID
 65532, includes CA certificates and timezone data, has no shell or package
@@ -25,6 +33,17 @@ docker run --rm --name 9gateway \
   --env ADMIN_CREDENTIAL="$ADMIN_CREDENTIAL" \
   -p 8080:8080 9gateway:local
 ```
+
+Open <http://localhost:8080/ui/> after the container is ready. The browser
+session is an opaque, in-memory, `HttpOnly`, `SameSite=Strict` cookie scoped to
+`/admin`; it rotates at login, expires on idle/absolute limits or process
+restart, and is revoked by logout. The UI requires no Node.js installation.
+Use **API Keys** to create a gateway key, send a request to the configured
+upstream, then inspect Usage, Requests, and Request Details before logging out.
+The UI is served under `/ui/`, while the backend surfaces it calls are
+`/admin/ui/v1/session`, `/admin/v1/overview`, `/admin/v1/usage/*`,
+`/admin/v1/keys/*`, `/admin/v1/requests/*`, and `/admin/v1/system`; gateway
+traffic remains on `/v1/*`.
 
 The entrypoint is `/gateway` and its default command is
 `--config /etc/gateway/config.yaml`. `/gwctl` is on `PATH`:
@@ -72,6 +91,38 @@ Required variables are `UPSTREAM_API_KEY`, `ADMIN_CREDENTIAL`, and
 Check interpolation and YAML statically with `docker compose config` (with
 `.env`, or equivalent exported variables, present). A daemon is not needed for
 that command, but is needed to build or run services.
+
+## Development and release builds
+
+For local UI development, run the gateway and Vite together. The Vite server
+proxies gateway routes to port 8080 and serves the UI at `/ui/`:
+
+```sh
+go run ./cmd/gateway --config config.yaml
+npm --prefix web ci
+npm --prefix web run dev
+```
+
+For a production-like local build, use the pinned toolchain (`node --version`
+must be `v22.14.0` and `npm --version` must be `10.9.2`), then run:
+
+```sh
+npm --prefix web ci
+npm --prefix web run lint
+npm --prefix web run test
+npm --prefix web run build
+npm --prefix web run budget:check
+npm --prefix web run report:dependencies
+go fmt ./...
+go test ./...
+go build ./...
+```
+
+The release Docker build repeats the frontend build in an isolated stage, so a
+stale or locally generated `web/dist` cannot replace the lockfile build. Build
+with metadata using the `VERSION`, `COMMIT_SHA`, and `BUILD_DATE` arguments shown
+above. A clean checkout therefore needs Docker and does not need frontend
+artifacts committed to the repository.
 
 ## Binary deployment
 
@@ -127,6 +178,32 @@ fail, stops new work, waits for active handlers up to
 `shutdown_timeout_seconds` (default 30, maximum 600), completes accounting,
 drains bounded queues, and closes SQLite last. A second interrupt can force
 termination. Container runtimes should allow the configured deadline.
+
+## Browser support, HTTPS, accessibility, and troubleshooting
+
+The tested browser matrix is current Chromium desktop (dark and light),
+Chromium mobile emulation, and Firefox. WebKit is a separate optional check and
+requires its host libraries; see [UI verification](../ui/budgets-and-verification.md).
+The console follows the documented WCAG 2.2 AA keyboard, focus, contrast, and
+responsive behavior; see [accessibility notes](../ui/accessibility.md).
+
+For internet-facing use, terminate TLS at a trusted reverse proxy and forward
+only the required headers/configured trusted proxy addresses. Set
+`GATEWAY_TRUSTED_PROXIES` so the gateway can safely recognize direct TLS or the
+proxy's HTTPS connection when issuing the `Secure` browser-session cookie. Do
+not expose the admin UI over plaintext HTTP outside a local development network;
+never cache `/ui/` HTML or admin responses at a shared proxy. Hashed assets under
+`/ui/assets/` are immutable-cacheable; `index.html` and SPA fallbacks are
+`no-cache`, preventing stale asset manifests after a release.
+
+If `/ui/` is blank, verify the gateway was built with the web stage and inspect
+that `/ui/` returns HTML while `/ui/assets/*` returns the referenced files. If a
+browser reports a stale chunk after deployment, hard-refresh only after checking
+that the proxy is not caching `index.html`. A failed login usually indicates an
+incorrect `ADMIN_CREDENTIAL`, an expired session, or missing CSRF handling; the
+session cookie is intentionally inaccessible to JavaScript. If Docker cannot
+build, check that a Docker daemon and BuildKit are available; frontend-only
+checks can still run with the pinned local Node/npm versions.
 
 ## Platform notes
 
