@@ -45,10 +45,13 @@ describe("T171 Key Creation Helpers", () => {
     });
     URL.revokeObjectURL = vi.fn();
 
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     const appendSpy = vi.spyOn(document.body, "appendChild");
     const removeSpy = vi.spyOn(document.body, "removeChild");
 
     downloadKeySecret("test-key.txt", "sk-raw-secret-1234567890");
+
+    expect(clickSpy).toHaveBeenCalled();
 
     expect(capturedBlob).not.toBeNull();
     expect(capturedBlob!.type).toBe("text/plain;charset=utf-8");
@@ -61,6 +64,7 @@ describe("T171 Key Creation Helpers", () => {
     expect(appendSpy).toHaveBeenCalled();
     expect(removeSpy).toHaveBeenCalled();
 
+    clickSpy.mockRestore();
     URL.createObjectURL = originalCreateObjectURL;
     URL.revokeObjectURL = originalRevokeObjectURL;
   });
@@ -91,6 +95,7 @@ describe("T171 CreateKeyDialog and Lifecycle", () => {
         writeText: vi.fn().mockResolvedValue(undefined),
       },
     });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 
     globalThis.fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const urlStr = String(input);

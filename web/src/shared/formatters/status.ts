@@ -1,5 +1,8 @@
 const KNOWN_OUTCOMES: Record<string, string> = {
   success: "Success",
+  complete: "Complete",
+  custom_dispatch: "Custom Dispatch",
+  pre_upstream: "Pre-Upstream Rejection",
   model_rejected: "Model Rejected",
   rate_limited: "Rate Limited",
   token_limited: "Token Limited",
@@ -8,6 +11,8 @@ const KNOWN_OUTCOMES: Record<string, string> = {
   upstream_error: "Upstream Error",
   upstream_timeout: "Upstream Timeout",
   client_cancelled: "Client Cancelled",
+  cancelled: "Cancelled",
+  response_error: "Response Error",
   response_transport_error: "Transport Error",
   internal_error: "Internal Error",
   cursor_expired: "Cursor Expired",

@@ -43,6 +43,7 @@ export const AppRoutes: React.FC = () => {
         <Route path="keys/:id" element={renderProtectedLazyRoute(KeysPage)} />
         <Route path="api-keys" element={<Navigate to="/keys" replace />} />
         <Route path="requests" element={renderProtectedLazyRoute(RequestsPage)} />
+        <Route path="requests/:id" element={renderProtectedLazyRoute(RequestsPage)} />
         <Route path="system" element={renderProtectedLazyRoute(SystemPage)} />
         <Route path="login" element={renderLazyRoute(LoginPage)} />
 

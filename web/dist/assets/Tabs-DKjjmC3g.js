@@ -1,0 +1,11 @@
+import{c as v,r as u,j as b}from"./index-DeByn33x.js";/**
+ * @license lucide-react v1.47.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */const g={name:"arrow-right",size:24,node:[["path",{d:"M5 12h14",key:"1ays0h"}],["path",{d:"m12 5 7 7-7 7",key:"xquz4c"}]]};g.node;const D=v(g);/**
+ * @license lucide-react v1.47.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */const y={name:"refresh-cw",size:24,node:[["path",{d:"M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",key:"v9h5vc"}],["path",{d:"M21 3v5h-5",key:"1q7to0"}],["path",{d:"M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16",key:"3uifl3"}],["path",{d:"M8 16H3v5",key:"1cv678"}]]};y.node;const R=v(y),j=({items:i,activeTab:h,onChange:p,variant:w="segmented","aria-label":x,className:I=""})=>{const c=u.useId(),f=u.useRef(new Map),a=i.some(e=>e.content!==void 0&&e.content!==null),d=i.filter(e=>!e.disabled),k=(e,s)=>{var n;const r=d.findIndex(l=>l.id===s);if(r===-1)return;let t=-1;if(e.key==="ArrowRight"?(e.preventDefault(),t=(r+1)%d.length):e.key==="ArrowLeft"?(e.preventDefault(),t=(r-1+d.length)%d.length):e.key==="Home"?(e.preventDefault(),t=0):e.key==="End"&&(e.preventDefault(),t=d.length-1),t!==-1){const l=d[t];l&&(p(l.id),(n=f.current.get(l.id))==null||n.focus())}},o=i.find(e=>e.id===h);return b.jsxs("div",{className:`gw-tabs-container ${I}`,children:[b.jsx("div",{role:a?"tablist":"group","aria-label":x,className:`gw-tablist gw-tablist--${w}`,children:i.map(e=>{const s=e.id===h,r=`${c}-tab-${e.id}`,t=`${c}-panel-${e.id}`;return b.jsx("button",{ref:n=>{n?f.current.set(e.id,n):f.current.delete(e.id)},id:a?r:void 0,role:a?"tab":void 0,type:"button","aria-selected":a?s:void 0,"aria-pressed":a?void 0:s,"aria-controls":a&&e.content&&s?t:void 0,tabIndex:s?0:-1,disabled:e.disabled,className:"gw-tab",onClick:()=>!e.disabled&&p(e.id),onKeyDown:n=>k(n,e.id),children:e.label},e.id)})}),a&&o&&o.content&&b.jsx("div",{id:`${c}-panel-${o.id}`,role:"tabpanel","aria-labelledby":`${c}-tab-${o.id}`,tabIndex:0,className:"gw-tabpanel",children:o.content})]})};export{D as A,R,j as T};

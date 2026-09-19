@@ -2,12 +2,30 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T172`.
+Done: `T001`-`T173`.
 
-Current: `T173` - build the request history explorer.
+Current: `T174` - build request details and the safe body viewer.
 
-Queued: `T174`-`T180`, in dependency order from key/request workflows,
+Queued: `T175`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T173 built the request history explorer:
+connects `GET /admin/v1/requests` into a dense, accessible request explorer below
+`/ui/requests` featuring cursor pagination with bounded page sizes (10, 25, 50, 100;
+default 25), single-next-page prefetching, and zero URL/history cursor leakage;
+URL-backed filters for API key, completion range presets (all retained, 1h, 24h, 7d, 30d,
+and custom UTC with exact RFC3339 validation), and page size; bounded key selector
+using the existing admin key list with graceful handling for unknown or deleted key bookmarks;
+dense desktop table and intentional mobile card views presenting request ID, API key,
+method and route, model, non-color-only status and outcome badges, modes, token counts,
+estimated costs, microsecond durations, and completion timestamps; strict preservation of
+null vs explicit zero for token counts, estimated costs, and durations; non-sortable table
+headers preventing misleading sort affordances; explicit copy-ID action with polite
+screen-reader announcements and clipboard feedback; row deep links pointing to `/requests/:id`
+with route integration; contextual empty states for initial history, filtered keys, and
+filtered time ranges; honest handling of 401 session expiration, offline network connectivity,
+backend 500 errors, and 400 invalid parameter/cursor expiration with first-page restart;
+verified by unit, component, lifecycle, navigation, and contract tests.
 
 T172 built the key policy editor and status controls:
 connects `PUT /admin/v1/keys/:id/policy` into a structured, responsive policy editor

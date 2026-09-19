@@ -64,3 +64,20 @@ export interface RequestListFilters {
   after?: string;
   before?: string;
 }
+
+export type RequestRangePreset =
+  | "all"
+  | "1h"
+  | "24h"
+  | "7d"
+  | "30d"
+  | "custom";
+
+export interface RequestPageFilters {
+  keyId: string;
+  preset: RequestRangePreset;
+  after?: string;
+  before?: string;
+  pageSize: number;
+}
+

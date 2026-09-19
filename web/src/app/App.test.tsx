@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import React from "react";
 import keyListFixture from "../features/keys/fixtures/keyList.fixture.json";
+import requestListFixture from "../features/requests/fixtures/requestList.fixture.json";
 import { App } from "./App";
 import { RouteErrorBoundary } from "./shell/RouteErrorBoundary";
 
@@ -118,15 +119,43 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("navigates directly to /ui/requests and renders requests table shell", async () => {
-    render(<App initialEntries={["/ui/requests"]} initialAuthState={{ isAuthenticated: true }} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("requests-page")).toBeInTheDocument();
-      expect(document.title).toBe("Requests | 9Gateway");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/admin/v1/requests")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(requestListFixture), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      }
+      if (url.includes("/admin/v1/keys")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(keyListFixture), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
     });
 
-    expect(screen.getByRole("table", { name: "Recent Requests" })).toBeInTheDocument();
-    expect(screen.getAllByText("claude-sonnet-5").length).toBeGreaterThan(0);
+    try {
+      render(<App initialEntries={["/ui/requests"]} initialAuthState={{ isAuthenticated: true }} />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("requests-page")).toBeInTheDocument();
+        expect(document.title).toBe("Requests | 9Gateway");
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole("table", { name: "Recent Requests" })).toBeInTheDocument();
+        expect(screen.getAllByText("gpt-4o").length).toBeGreaterThan(0);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("navigates directly to /ui/system and renders system diagnostics", async () => {
