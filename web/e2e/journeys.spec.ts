@@ -283,6 +283,7 @@ test.describe("Web UI Critical Operator Journeys", () => {
     await page.fill('#admin-credential', gateway.adminCredential);
     await page.click('[data-testid="login-submit-btn"]');
     await page.waitForURL(`${gateway.baseURL}/ui/overview`);
+    await expect(page.locator('[data-testid="overview-page"]')).toBeVisible();
 
     // Navigate to keys to ensure a history entry exists
     await page.goto(`${gateway.baseURL}/ui/keys`);
