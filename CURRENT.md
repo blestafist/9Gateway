@@ -2,12 +2,25 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T170`.
+Done: `T001`-`T171`.
 
-Current: `T171` - add API key creation and one-time secret handling.
+Current: `T172` - build the key policy editor and status controls.
 
-Queued: `T172`-`T180`, in dependency order from key/request workflows,
+Queued: `T173`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T171 added API key creation and one-time secret handling:
+connects `POST /admin/v1/keys` into an accessible, focused creation dialog below `/ui/keys`;
+features inline name and expiration validation (with preset durations and custom UTC datetime enforcement),
+explicit submit progress, duplicate-submit prevention via ref locks and button disabling, and preservation
+of form inputs on conflict/validation/5xx server errors; returns raw secrets exactly once inside a blocking
+success step with masked password default, visibility toggle, explicit copy action with polite screen-reader
+announcements and error feedback, safe plain-text download (`9gateway-key-<name>-<prefix>.txt` containing only
+the raw secret), anti-autofill markers (`data-1p-ignore`, `data-lpignore`, `data-bwignore`, `data-form-type="other"`),
+and mandatory acknowledgement checkbox before dismissal; guarantees raw secret retention strictly in component
+memory with immediate scrubbing on modal dismissal, user logout, session expiry, or route unmount; ensures zero
+leakage into TanStack query cache, URLs/history, web storage, console/error logs, or clipboard without an explicit click;
+refreshes inventory data only on successful creation; verified by behavioral, validation, lifecycle, and contract tests.
 
 T170 built the API key inventory:
 connects `GET /admin/v1/keys` into an accessible, responsive key inventory below

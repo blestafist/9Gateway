@@ -53,3 +53,12 @@ if (typeof window !== "undefined" && typeof window.matchMedia === "undefined") {
     dispatchEvent: () => false,
   });
 }
+
+// Provide standard URL.createObjectURL / revokeObjectURL for Blob downloads in jsdom
+if (typeof URL.createObjectURL === "undefined") {
+  URL.createObjectURL = (blob: Blob) => `blob:mock-url-${blob.size}`;
+}
+if (typeof URL.revokeObjectURL === "undefined") {
+  URL.revokeObjectURL = () => {};
+}
+

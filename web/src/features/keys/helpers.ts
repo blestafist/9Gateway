@@ -146,3 +146,32 @@ export function filterKeysOnPage(
     return true;
   });
 }
+
+export function generateKeyDownloadFilename(name: string, prefixOrId: string): string {
+  const sanitizedName = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const base = sanitizedName || "api-key";
+  const sanitizedSuffix = prefixOrId
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, "");
+  return `9gateway-key-${base}${sanitizedSuffix ? `-${sanitizedSuffix}` : ""}.txt`;
+}
+
+export function downloadKeySecret(filename: string, secret: string): void {
+  const blob = new Blob([secret + "\n"], { type: "text/plain;charset=utf-8" });
+  if (typeof window !== "undefined" && typeof URL.createObjectURL === "function") {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }
+}
+

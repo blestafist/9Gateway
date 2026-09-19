@@ -393,3 +393,88 @@
   flex-direction: column;
   gap: 0.25rem;
 }
+
+/* ==========================================================================
+   Create Key Dialog & One-Time Secret Handoff Styles (T171)
+   ========================================================================== */
+
+.gw-create-key-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.gw-secret-handoff-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.gw-secret-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.gw-secret-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.gw-secret-meta-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 500;
+}
+
+.gw-secret-meta-value {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.gw-secret-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.gw-secret-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gw-secret-input {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.05em;
+  flex: 1;
+}
+
+.gw-secret-actions-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.gw-secret-acknowledgement {
+  padding: var(--space-3);
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+

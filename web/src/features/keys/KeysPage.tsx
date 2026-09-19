@@ -24,6 +24,7 @@ import { KeyTable } from "./components/KeyTable";
 import { KeyCardList } from "./components/KeyCardList";
 import { KeyPagination } from "./components/KeyPagination";
 import { KeyDetailDrawer } from "./components/KeyDetailDrawer";
+import { CreateKeyDialog } from "./components/CreateKeyDialog";
 import "./keys.css";
 
 const DEFAULT_PAGE_SIZE = 25;
@@ -33,6 +34,9 @@ export const KeysPage: React.FC = () => {
   const { id: routeKeyId } = useParams<{ id?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
+
+  // Create key dialog state
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
 
   // Active key ID for deep link detail drawer
   const keyIdFromQuery = searchParams.get("keyId");
@@ -291,14 +295,13 @@ export const KeysPage: React.FC = () => {
               </p>
             </div>
 
-            {/* Create Key Button (Reserved for T171) */}
+            {/* Create Key Button */}
             <Button
               variant="primary"
               size="sm"
               leftIcon={<Plus size={16} aria-hidden="true" />}
-              disabled
-              title="Key creation with one-time credential handoff will be added in T171"
-              aria-disabled="true"
+              onClick={() => setIsCreateDialogOpen(true)}
+              data-testid="open-create-key-btn"
             >
               Create Key
             </Button>
@@ -379,6 +382,12 @@ export const KeysPage: React.FC = () => {
         keyId={activeKeyId}
         isOpen={Boolean(activeKeyId)}
         onClose={handleCloseDrawer}
+      />
+
+      {/* Create Key Modal Dialog */}
+      <CreateKeyDialog
+        isOpen={isCreateDialogOpen}
+        onClose={() => setIsCreateDialogOpen(false)}
       />
     </div>
   );
