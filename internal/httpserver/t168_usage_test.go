@@ -380,7 +380,7 @@ func TestUsageSuccessResponsesAndBoundedMetadata(t *testing.T) {
 	}
 
 	// 1. Timeseries success with default (all-retained)
-	resp, body := get("/admin/v1/usage/timeseries")
+	resp, body := get("/admin/v1/usage/timeseries?before=" + t0.Format(time.RFC3339))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("timeseries status = %d, want 200", resp.StatusCode)
 	}
