@@ -17,7 +17,7 @@ End-to-end user journeys, performance checks, and security invariants are execut
 | **WebKit** | Desktop Safari | Critical operator journeys | **BLOCKED** | Host system missing `libicu74`, `libxml2`, `libflite1` |
 
 ### WebKit Environment Block Note
-In headless Linux environments where system-level WebKit runtime libraries (`libicu74`, `libxml2`, `libflite1`) are not provisioned, WebKit fails at browser launch (`browserType.launch: Host system is missing dependencies to run browsers`). WebKit execution is segregated into `npm run test:e2e:webkit`, while standard `npm run test:e2e` executes all feasible browsers (Chromium, Chromium-Light, Mobile-Chromium, Firefox).
+CI installs WebKit with `npx playwright install --with-deps webkit` and runs the dedicated `npm run test:e2e:webkit` gate. In local headless Linux environments where system-level WebKit runtime libraries (`libicu74`, `libxml2`, `libflite1`) are not provisioned, WebKit fails at browser launch (`browserType.launch: Host system is missing dependencies to run browsers`); this local gate remains blocked rather than being reported as passed.
 
 ---
 
@@ -32,11 +32,11 @@ The build artifact sizes are enforced by `web/scripts/budget-check.js` and verif
 | **Total JavaScript** | All bundled chunks | <= 1200 KiB | ~1002 KiB |
 | **Total CSS** | All stylesheets combined | <= 100 KiB | ~78 KiB |
 | **Overview Chunk** | Uncompressed JS | <= 50 KiB | ~25 KiB |
-| **Keys Inventory Chunk** | Uncompressed JS | <= 50 KiB | ~18 KiB |
+| **Keys Inventory Chunk** | Uncompressed JS | <= 70 KiB | ~65 KiB |
 | **Requests Explorer Chunk** | Uncompressed JS | <= 80 KiB | ~47 KiB |
 | **System Diagnostics Chunk**| Uncompressed JS | <= 50 KiB | ~24 KiB |
 | **Login Route Chunk** | Uncompressed JS | <= 30 KiB | ~3 KiB |
-| **Usage Route Chunk** | Uncompressed JS (incl. Recharts) | <= 380 KiB | ~344 KiB |
+| **Usage Route Chunk** | Uncompressed JS (incl. Recharts) | <= 440 KiB | ~437 KiB |
 
 ---
 

@@ -2,8 +2,10 @@
 
 This records T180 completion and release-candidate readiness. The Go and web
 suites, production asset build, budgets, accessibility, and feasible browser
-projects are green. Checks requiring a Docker daemon or unavailable browser host
-libraries were not run and are explicitly not represented as passed. The
+projects are green. CI now covers Docker image/runtime smoke checks and installs
+WebKit with host dependencies; this local environment did not run Docker smoke
+or WebKit because its daemon/host libraries are unavailable, and those checks
+are not represented as local passes. The
 candidate is prepared but not tagged.
 
 | Area | Result | Evidence |
@@ -32,9 +34,11 @@ were visually reviewed at desktop/mobile dark/light viewports and checked for
 horizontal overflow. Markdown links and file references in the release docs
 point to checked-in files.
 
-The focused `go test -race ./...` run reports the pre-existing
-`TestT179_GatewayRSSGrowthUnderUIAndCachedAnalytics` RSS budget failure (about
-61 MiB versus 32 MiB); the rest of the race suite passes. `npm audit
+The focused `go test -race ./internal/httpserver -run TestT179_GatewayRSSGrowthUnderUIAndCachedAnalytics`
+run now deterministically populates and re-hits representative overview and
+usage-timeseries analytics cache entries; RSS remains a local environment
+measurement and is not claimed as passed when the host exceeds the documented
+32 MiB budget. `npm audit
 --audit-level=high` reports two moderate transitive Vitest advisories requiring
 a breaking major upgrade, so no forced dependency upgrade was applied.
 The Compose config command was requested, but this environment has no Docker

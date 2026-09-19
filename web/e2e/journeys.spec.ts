@@ -125,13 +125,16 @@ test.describe("Web UI Critical Operator Journeys", () => {
     await expect(secretDisplay).toBeVisible();
     const rawSecret = await secretDisplay.inputValue();
     expect(rawSecret).toContain("sk-gw-");
+    // Secret handoff runs without trace/screenshot/video artifacts. The dialog
+    // owns cleanup when dismissed; assert the raw value is gone afterward.
 
     // Copy action and ack checkbox
     await expect(page.locator('[data-testid="copy-key-btn"]')).toBeVisible();
     await page.locator('text=I have saved this API key in a secure location').click();
     await page.click('[data-testid="done-secret-btn"]');
 
-    // Modal dismissed, key appears in table or card list
+    // Modal dismissed, key appears in table or card list and raw secret is gone.
+    await expect(page.locator('[data-testid="secret-key-display"]')).not.toBeAttached();
     await expect(page.locator('[data-testid="create-key-form"]')).not.toBeVisible();
     const keyElement = page.locator(':is([data-testid^="key-row-"], [data-testid^="key-card-"]):visible').filter({ hasText: keyName }).first();
     await expect(keyElement).toBeVisible();

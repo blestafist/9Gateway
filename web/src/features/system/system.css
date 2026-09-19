@@ -68,8 +68,20 @@
 
 .gw-system-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 1.25rem;
+  min-width: 0;
+}
+
+.gw-system-grid > * {
+  min-width: 0;
+}
+
+@media (max-width: 360px) {
+  .gw-system-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.875rem;
+  }
 }
 
 .gw-system-card-title {

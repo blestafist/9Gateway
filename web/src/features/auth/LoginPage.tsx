@@ -128,7 +128,7 @@ export const LoginPage: React.FC = () => {
                 actionIcon={showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 actionLabel={showPassword ? "Hide credential" : "Show credential"}
                 onActionClick={() => setShowPassword(!showPassword)}
-                helperText="Admin credential configured via GATEWAY_ADMIN_KEY."
+                helperText="Admin credential configured via ADMIN_CREDENTIAL."
               />
             </div>
           </CardContent>

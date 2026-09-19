@@ -46,9 +46,35 @@ jobs:
       - run: test "$(npm --version)" = "${{ env.NPM_VERSION }}"
       - run: npm ci --ignore-scripts
       - run: npm run lint
-      - run: npm run test
       - run: npm run build
+      - run: npm run test
       - run: npm run budget:check
       - run: npm run report:dependencies
-      - run: npx playwright install --with-deps chromium firefox
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:e2e
+      - run: npm run test:e2e:webkit
+
+  docker:
+    name: Docker Linux Image & Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp config.example.yaml config.yaml
+      - run: docker build --tag 9gateway:ci .
+      - name: Inspect non-root runtime contract
+        run: |
+          test "$(docker image inspect 9gateway:ci --format '{{.Config.User}}')" = "65532:65532"
+          docker image inspect 9gateway:ci --format '{{json .Config.Healthcheck}}' | grep -q '/gateway'
+      - name: Start stack and smoke readiness/UI
+        env:
+          UPSTREAM_API_KEY: ci-upstream-key
+          ADMIN_CREDENTIAL: ci-admin-credential
+          AUTH_PEPPER: ci-auth-pepper-012345678901234567890123456789
+        run: |
+          docker compose up -d --build
+          trap 'docker compose down -v' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:8080/ready && break
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:8080/ui/ | grep -q '<!doctype html>'

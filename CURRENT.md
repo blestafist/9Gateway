@@ -323,15 +323,20 @@ cancellation still immediately cancels upstream. Docker live tests against
 9router covered GPT Luna, Claude Sonnet 5, and Antigravity Gemini 3.8 in both
 streaming modes, including long-form responses.
 
-T180 completed the Web UI release integration: Docker and CI use pinned
-Node.js 22.14.0/npm 10.9.2 inputs, BuildKit caches npm downloads, production
-source maps are disabled and checked, and only deterministic static assets are
-copied into the non-root distroless image. README and deployment documentation
-cover `/ui/`, the end-to-end operator quickstart, session and HTTPS behavior,
-browser/accessibility support, cache troubleshooting, and the UI API surfaces.
-The final audit retains T179's browser/security/performance evidence; WebKit is
-host-library blocked and Docker image/runtime, image-size, vulnerability, and
-container quickstart checks remain unrun when no Docker daemon is available.
+T180 completed the Web UI release integration and final-review fixes: Docker and CI use
+verified immutable digests with readable Node.js 22.14.0/npm 10.9.2 inputs, BuildKit
+caches npm downloads, production source maps are disabled and checked, and only
+deterministic static assets are copied into the non-root distroless image. CI now
+builds and smoke-tests the image and installs/runs WebKit with dependencies. The
+budget gate resolves every lazy route through the Vite manifest; the command palette
+traps focus; the System grid reflows at 320px; secret-handoff browser artifacts are
+disabled and cleared; and the RSS test exercises overview, timeseries, and breakdown
+cache entries deterministically. Login guidance and the four checked-in screenshots
+use ADMIN_CREDENTIAL. README and deployment documentation cover `/ui/`, the
+end-to-end operator quickstart, session and HTTPS behavior, browser/accessibility
+support, cache troubleshooting, and the UI API surfaces. This local environment
+still cannot run Docker because the daemon socket is inaccessible, and WebKit local
+execution remains host-library blocked; CI is the supported gate for both.
 
 Web UI direction: React/TypeScript/Vite in `web/`, built into and served by the
 Go binary under `/ui/`. The visual target is a dense, responsive dark-first

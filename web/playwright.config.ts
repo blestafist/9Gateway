@@ -14,8 +14,8 @@ export default defineConfig({
     ["html", { open: "never", outputFolder: "playwright-report" }],
   ],
   use: {
-    trace: "retain-on-failure",
-    screenshot: "only-on-failure",
+    trace: "off",
+    screenshot: "off",
     video: "off",
   },
   projects: [

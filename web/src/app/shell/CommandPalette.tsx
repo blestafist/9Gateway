@@ -204,6 +204,29 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
 
   // Keyboard navigation within palette
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Tab") {
+      const focusable = Array.from(
+        e.currentTarget.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+        )
+      );
+      if (focusable.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusable[0] as HTMLElement;
+      const last = focusable[focusable.length - 1] as HTMLElement;
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !e.currentTarget.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !e.currentTarget.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
+      return;
+    }
+
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();

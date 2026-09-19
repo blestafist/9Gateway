@@ -2,7 +2,7 @@
 
 # Keep the frontend toolchain out of the runtime image. Exact Node and npm
 # versions make the embedded asset input reproducible across release builders.
-FROM node:22.14.0-bookworm AS web-build
+FROM node:22.14.0-bookworm@sha256:e5ddf893cc6aeab0e5126e4edae35aa43893e2836d1d246140167ccc2616f5d7 AS web-build
 ENV TZ=UTC
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
@@ -15,7 +15,7 @@ COPY web/ ./
 RUN npm run build \
     && test -z "$(find dist -type f -name '*.map' -print -quit)"
 
-FROM golang:1.23-bookworm AS build
+FROM golang:1.23-bookworm@sha256:167053a2bb901972bf2c1611f8f52c44d5fe7e762e5cab213708d82c421614db AS build
 
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -45,7 +45,7 @@ RUN mkdir -p /out/data /out/config \
 
 # Distroless static includes only the runtime files needed here, including CA
 # certificates and zoneinfo. The nonroot variant uses UID/GID 65532.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 ARG VERSION=dev
 ARG COMMIT_SHA=unknown

@@ -74,6 +74,33 @@ describe("T177 Global UX States & Interaction Polish", () => {
       expect(screen.getByText(/No matching commands found/)).toBeInTheDocument();
     });
 
+    it("traps Tab focus inside the modal and restores focus when closed", async () => {
+      const handleClose = vi.fn();
+      const outside = document.createElement("button");
+      outside.textContent = "Open palette";
+      document.body.appendChild(outside);
+      outside.focus();
+
+      const { rerender } = render(<PaletteWrapper isOpen={true} onClose={handleClose} />);
+      const dialog = screen.getByTestId("command-palette");
+      const input = screen.getByRole("combobox");
+      fireEvent.change(input, { target: { value: "theme" } });
+      const clearButton = screen.getByRole("button", { name: "Clear search query" });
+      await waitFor(() => expect(input).toHaveFocus());
+
+      clearButton.focus();
+      fireEvent.keyDown(dialog, { key: "Tab" });
+      expect(input).toHaveFocus();
+
+      input.focus();
+      fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+      expect(clearButton).toHaveFocus();
+
+      rerender(<PaletteWrapper isOpen={false} onClose={handleClose} />);
+      await waitFor(() => expect(outside).toHaveFocus());
+      outside.remove();
+    });
+
     it("supports keyboard navigation: ArrowDown, ArrowUp, Enter, and Escape", () => {
       const handleClose = vi.fn();
       render(<PaletteWrapper isOpen={true} onClose={handleClose} />);
