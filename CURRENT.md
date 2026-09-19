@@ -2,12 +2,30 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T171`.
+Done: `T001`-`T172`.
 
-Current: `T172` - build the key policy editor and status controls.
+Current: `T173` - build the request history explorer.
 
-Queued: `T173`-`T180`, in dependency order from key/request workflows,
+Queued: `T174`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T172 built the key policy editor and status controls:
+connects `PUT /admin/v1/keys/:id/policy` into a structured, responsive policy editor
+within the key detail route below `/ui/keys`; cleanly separates inventory (`KeyInventory`),
+creation secret handoff (`CreateKeyDialog`), policy editor (`KeyPolicyForm`), and key detail
+composition (`KeyDetailDrawer`) behind the API Keys feature entry (`web/src/features/keys/index.ts`);
+provides exact lossless round-trip conversions between seconds and human units (s, m, h, d)
+and between integer micro-dollars and USD with up to 6 decimal places (and µ$ unit); supports
+dynamic adding, removing, and reordering for allowed models, denied models, request windows,
+token windows, and budget limits; cleanly distinguishes unlimited/omitted from explicit zero;
+explains policy semantics inline including allow-vs-deny precedence, payload body logging
+sensitivity, budget resets and reservations, and immediate key disabling; performs field-level
+validation with submit summary alert and automatic focus on the first errored field; provides
+a security-sensitive review summary confirmation modal before submitting high-impact changes;
+warns before discarding dirty edits via beforeunload and modal dialog; preserves unsaved edits
+on 409 conflict with safe retry; detects concurrent server modifications from background refetches
+with an explicit conflict/reload decision; updates TanStack query cache using the server response
+as the single source of truth; verified by unit, component, lifecycle, validation, and contract tests.
 
 T171 added API key creation and one-time secret handling:
 connects `POST /admin/v1/keys` into an accessible, focused creation dialog below `/ui/keys`;

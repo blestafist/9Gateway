@@ -11,18 +11,13 @@ import {
   IconButton,
   Badge,
   Alert,
-  EmptyState,
-  Skeleton,
 } from "../../shared/ui";
 import { useCursorPagination } from "../../shared/pagination";
 import { listKeys } from "./api";
 import { keyQueryKeys } from "./queryKeys";
 import { KeyPageFilters } from "./types";
 import { filterKeysOnPage } from "./helpers";
-import { KeyFilterBar } from "./components/KeyFilterBar";
-import { KeyTable } from "./components/KeyTable";
-import { KeyCardList } from "./components/KeyCardList";
-import { KeyPagination } from "./components/KeyPagination";
+import { KeyInventory } from "./components/KeyInventory";
 import { KeyDetailDrawer } from "./components/KeyDetailDrawer";
 import { CreateKeyDialog } from "./components/CreateKeyDialog";
 import "./keys.css";
@@ -309,71 +304,23 @@ export const KeysPage: React.FC = () => {
         </CardHeader>
 
         <CardContent>
-          {/* Client-Side Search and Filtering Controls */}
-          <KeyFilterBar
+          <KeyInventory
+            keys={loadedKeys}
+            filteredKeys={filteredKeys}
+            isLoading={isLoading && !data}
+            isFetching={isFetching}
             filters={filters}
             onFilterChange={handleFilterChange}
             onResetFilters={handleResetFilters}
             pageSize={pageSize}
             onPageSizeChange={handlePageSizeChange}
-            filteredCount={filteredKeys.length}
-            totalCount={loadedKeys.length}
+            page={page}
+            hasNextPage={hasNextPage}
+            hasPrevPage={hasPrevPage}
+            onNextPage={handleNextPage}
+            onPrevPage={goToPrevPage}
+            onSelectKey={handleSelectKey}
           />
-
-          {/* Initial Loading Skeleton */}
-          {isLoading && !data && (
-            <div data-testid="keys-loading-skeleton" style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-              <Skeleton height="44px" />
-              <Skeleton height="44px" />
-              <Skeleton height="44px" />
-            </div>
-          )}
-
-          {/* Empty State: No keys returned from server on this page */}
-          {!isLoading && loadedKeys.length === 0 && (
-            <EmptyState
-              title="No API Keys Found"
-              description="No gateway API keys have been created yet. Create a key using the admin CLI or API to begin routing traffic."
-              data-testid="keys-empty-state"
-            />
-          )}
-
-          {/* Empty Filter State: Keys exist on page, but filters match none */}
-          {!isLoading && loadedKeys.length > 0 && filteredKeys.length === 0 && (
-            <EmptyState
-              title="No Matching Keys on This Page"
-              description="No keys on the current page match your active search and filter criteria. Note that filtering operates on the loaded page only."
-              action={
-                <Button variant="secondary" size="sm" onClick={handleResetFilters}>
-                  Clear Filters
-                </Button>
-              }
-              data-testid="keys-empty-filter-state"
-            />
-          )}
-
-          {/* Desktop Table View */}
-          {filteredKeys.length > 0 && (
-            <KeyTable keys={filteredKeys} onSelectKey={handleSelectKey} />
-          )}
-
-          {/* Mobile Deliberate Cards View */}
-          {filteredKeys.length > 0 && (
-            <KeyCardList keys={filteredKeys} onSelectKey={handleSelectKey} />
-          )}
-
-          {/* Cursor Pagination Bar */}
-          {!isLoading && loadedKeys.length > 0 && (
-            <KeyPagination
-              page={page}
-              hasNextPage={hasNextPage}
-              hasPrevPage={hasPrevPage}
-              onNextPage={handleNextPage}
-              onPrevPage={goToPrevPage}
-              isFetching={isFetching}
-              itemCount={filteredKeys.length}
-            />
-          )}
         </CardContent>
       </Card>
 

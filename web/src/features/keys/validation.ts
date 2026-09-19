@@ -1,4 +1,5 @@
 import { ValidationError } from "../../shared/transport";
+import { parseDurationToSeconds } from "./policyHelpers";
 import {
   AdminKeyDetail,
   AdminKeyListItem,
@@ -119,38 +120,44 @@ export function validateKeyPolicy(raw: unknown): AdminKeyPolicy {
     }
   }
 
+  let normalizedRequestWindows: { amount: number; duration: number }[] = [];
   if (raw.request_windows !== undefined) {
     if (!Array.isArray(raw.request_windows)) {
       throw new ValidationError("Key policy request_windows must be an array");
     }
-    for (const w of raw.request_windows) {
+    normalizedRequestWindows = raw.request_windows.map((w) => {
       if (!isObject(w)) {
         throw new ValidationError("Key policy request_windows item must be an object");
       }
       if (typeof w.amount !== "number" || Number.isNaN(w.amount)) {
         throw new ValidationError("Key policy request_windows amount must be a number");
       }
-      if (typeof w.duration !== "number" || Number.isNaN(w.duration)) {
-        throw new ValidationError("Key policy request_windows duration must be a number");
-      }
-    }
+      const durationSec = parseDurationToSeconds(w.duration as string | number);
+      return {
+        amount: w.amount,
+        duration: durationSec,
+      };
+    });
   }
 
+  let normalizedTokenWindows: { amount: number; duration: number }[] = [];
   if (raw.token_windows !== undefined) {
     if (!Array.isArray(raw.token_windows)) {
       throw new ValidationError("Key policy token_windows must be an array");
     }
-    for (const w of raw.token_windows) {
+    normalizedTokenWindows = raw.token_windows.map((w) => {
       if (!isObject(w)) {
         throw new ValidationError("Key policy token_windows item must be an object");
       }
       if (typeof w.amount !== "number" || Number.isNaN(w.amount)) {
         throw new ValidationError("Key policy token_windows amount must be a number");
       }
-      if (typeof w.duration !== "number" || Number.isNaN(w.duration)) {
-        throw new ValidationError("Key policy token_windows duration must be a number");
-      }
-    }
+      const durationSec = parseDurationToSeconds(w.duration as string | number);
+      return {
+        amount: w.amount,
+        duration: durationSec,
+      };
+    });
   }
 
   if (raw.token_mode !== undefined && typeof raw.token_mode !== "string") {
@@ -192,8 +199,8 @@ export function validateKeyPolicy(raw: unknown): AdminKeyPolicy {
   return {
     allowed_models: (raw.allowed_models as string[]) || [],
     denied_models: (raw.denied_models as string[]) || [],
-    request_windows: (raw.request_windows as { amount: number; duration: number }[]) || [],
-    token_windows: (raw.token_windows as { amount: number; duration: number }[]) || [],
+    request_windows: normalizedRequestWindows,
+    token_windows: normalizedTokenWindows,
     token_mode: typeof raw.token_mode === "string" ? raw.token_mode : "total",
     max_concurrent_requests: typeof raw.max_concurrent_requests === "number" ? raw.max_concurrent_requests : 0,
     budget_limits: (raw.budget_limits as { period: string; amount_micros: number }[]) || [],

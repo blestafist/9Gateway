@@ -8,6 +8,7 @@ export interface SwitchProps {
   disabled?: boolean;
   id?: string;
   "aria-label"?: string;
+  "data-testid"?: string;
 }
 
 export const Switch: React.FC<SwitchProps> = ({
@@ -18,6 +19,7 @@ export const Switch: React.FC<SwitchProps> = ({
   disabled = false,
   id: customId,
   "aria-label": customAriaLabel,
+  "data-testid": customDataTestId,
 }) => {
   const generatedId = useId();
   const switchId = customId || generatedId;
@@ -48,6 +50,7 @@ export const Switch: React.FC<SwitchProps> = ({
         aria-label={!label ? customAriaLabel : undefined}
         disabled={disabled}
         className="gw-switch"
+        data-testid={customDataTestId}
         onClick={() => !disabled && onChange(!checked)}
         onKeyDown={handleKeyDown}
       >
