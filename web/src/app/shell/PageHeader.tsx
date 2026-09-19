@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Sun, Moon, ChevronRight, User, LogOut } from "lucide-react";
+import { Sun, Moon, ChevronRight, User, LogOut, Search } from "lucide-react";
 import { IconButton, StatusPill } from "../../shared/ui";
 import { useTheme } from "../../shared/theme";
 import { useAuth } from "../../features/auth";
@@ -44,7 +44,15 @@ const ROUTE_DESCRIPTIONS: Record<string, { title: string; subtitle: string }> = 
   },
 };
 
-export const PageHeader: React.FC = () => {
+export interface PageHeaderProps {
+  onOpenCommandPalette?: () => void;
+  isOnline?: boolean;
+}
+
+export const PageHeader: React.FC<PageHeaderProps> = ({
+  onOpenCommandPalette,
+  isOnline = true,
+}) => {
   const location = useLocation();
   const { theme, toggleTheme } = useTheme();
   const { isAuthenticated, logout } = useAuth();
@@ -55,9 +63,17 @@ export const PageHeader: React.FC = () => {
     subtitle: "The requested route does not exist below /ui/",
   };
   const keysFallback = ROUTE_DESCRIPTIONS["/keys"] ?? defaultNotFound;
+  const requestsFallback = {
+    title: "Request Details",
+    subtitle: "Inspect request parameters, streaming latency, and captured bodies",
+  };
+
+  const isKeyDetail = currentPath.startsWith("/keys/") && currentPath !== "/keys";
+  const isRequestDetail = currentPath.startsWith("/requests/") && currentPath !== "/requests";
+
   const info =
     ROUTE_DESCRIPTIONS[currentPath] ??
-    (currentPath.startsWith("/keys/") ? keysFallback : defaultNotFound);
+    (isKeyDetail ? keysFallback : isRequestDetail ? requestsFallback : defaultNotFound);
 
   return (
     <header className="gw-page-header" data-testid="page-header">
@@ -71,6 +87,26 @@ export const PageHeader: React.FC = () => {
             <li aria-hidden="true" className="gw-breadcrumbs-sep">
               <ChevronRight size={12} />
             </li>
+            {isKeyDetail && (
+              <>
+                <li className="gw-breadcrumbs-item">
+                  <Link to="/keys">API Keys</Link>
+                </li>
+                <li aria-hidden="true" className="gw-breadcrumbs-sep">
+                  <ChevronRight size={12} />
+                </li>
+              </>
+            )}
+            {isRequestDetail && (
+              <>
+                <li className="gw-breadcrumbs-item">
+                  <Link to="/requests">Requests</Link>
+                </li>
+                <li aria-hidden="true" className="gw-breadcrumbs-sep">
+                  <ChevronRight size={12} />
+                </li>
+              </>
+            )}
             <li className="gw-breadcrumbs-item gw-breadcrumbs-current" aria-current="page">
               {info.title}
             </li>
@@ -86,7 +122,24 @@ export const PageHeader: React.FC = () => {
 
       {/* Header Right Actions */}
       <div className="gw-page-header-actions">
-        <StatusPill label="Gateway Online" />
+        {onOpenCommandPalette && (
+          <button
+            type="button"
+            className="gw-command-trigger-btn"
+            onClick={onOpenCommandPalette}
+            aria-label="Open Command Palette (Ctrl+K)"
+            data-testid="command-palette-trigger"
+          >
+            <Search size={14} aria-hidden="true" />
+            <span className="gw-command-trigger-label">Search commands...</span>
+            <kbd className="gw-kbd-shortcut">Ctrl+K</kbd>
+          </button>
+        )}
+
+        <StatusPill
+          label={isOnline ? "Gateway Online" : "Offline"}
+          variant={isOnline ? undefined : "warning"}
+        />
 
         <IconButton
           icon={theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}

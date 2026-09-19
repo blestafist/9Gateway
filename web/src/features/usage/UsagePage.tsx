@@ -24,11 +24,28 @@ import { RetentionNotice } from "./components/RetentionNotice";
 import { UsageKpiCards, UsageKpisData } from "./components/UsageKpiCards";
 import { LazyChartCard } from "./components/charts/LazyChartCard";
 import { RankingsCard } from "./components/RankingsCard";
-import { AlertTriangle, LogIn, RefreshCw } from "lucide-react";
+import { AlertTriangle, LogIn, RefreshCw, WifiOff } from "lucide-react";
 import "./usage.css";
 
 export const UsagePage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
+
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== "undefined" ? navigator.onLine : true
+  );
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   // URL search parameter parsing with defaults
   const rangeParam = searchParams.get("range") as UsageRangePreset | null;
@@ -507,10 +524,33 @@ export const UsagePage: React.FC = () => {
       />
 
       {/* 2. Error and Alert States */}
+      {!isOnline && (
+        <Alert
+          variant="warning"
+          icon={<WifiOff size={18} />}
+          title="Network Connection Offline"
+          data-testid="usage-offline-alert"
+        >
+          You are currently offline. Displayed analytics data may be outdated.
+        </Alert>
+      )}
+
       {is401 && (
-        <Alert variant="danger" title="Session Expired" icon={<LogIn size={16} />}>
+        <Alert
+          variant="danger"
+          title="Session Expired"
+          icon={<LogIn size={16} />}
+          action={
+            <Link to="/login" style={{ textDecoration: "none" }}>
+              <Button size="sm" variant="secondary">
+                Sign In
+              </Button>
+            </Link>
+          }
+          data-testid="usage-401-alert"
+        >
           Your administrative session has expired. Please{" "}
-          <Link to="/ui/login" style={{ color: "inherit", textDecoration: "underline" }}>
+          <Link to="/login" style={{ color: "inherit", textDecoration: "underline" }}>
             log in again
           </Link>{" "}
           to access telemetry data.

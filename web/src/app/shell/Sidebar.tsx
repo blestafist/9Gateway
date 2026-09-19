@@ -30,12 +30,14 @@ export interface SidebarProps {
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   onNavigate?: () => void;
+  isOnline?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   isCollapsed,
   onToggleCollapse,
   onNavigate,
+  isOnline = true,
 }) => {
   return (
     <aside
@@ -110,7 +112,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 Policy Proxy
               </span>
             </div>
-            <StatusPill label="Online" />
+            <StatusPill
+              label={isOnline ? "Online" : "Offline"}
+              variant={isOnline ? undefined : "warning"}
+            />
           </div>
         )}
 

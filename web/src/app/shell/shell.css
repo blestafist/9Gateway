@@ -905,11 +905,245 @@
 }
 
 /* ==========================================================================
+   Command Palette & Header Trigger
+   ========================================================================== */
+
+.gw-command-trigger-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1-5) var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color var(--transition-fast), background-color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.gw-command-trigger-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-surface-3);
+  border-color: var(--border-strong);
+}
+
+.gw-command-trigger-btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--border-focus);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.gw-command-trigger-label {
+  font-size: var(--font-size-sm);
+}
+
+.gw-kbd-shortcut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  color: var(--text-muted);
+  background-color: var(--bg-surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+}
+
+.gw-command-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal-backdrop);
+  background-color: var(--bg-overlay);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 10vh 1rem 2rem;
+  overflow-y: auto;
+}
+
+.gw-command-palette {
+  position: relative;
+  width: 100%;
+  max-width: 580px;
+  background-color: var(--bg-surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  outline: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: gw-command-scale-in var(--transition-fast);
+}
+
+@keyframes gw-command-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98) translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.gw-command-palette-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2-5);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-2);
+}
+
+.gw-command-search-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.gw-command-palette-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--font-size-md);
+  font-family: inherit;
+  outline: none;
+}
+
+.gw-command-palette-input::placeholder {
+  color: var(--text-muted);
+}
+
+.gw-command-input-clear-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.gw-command-input-clear-btn:hover {
+  color: var(--text-primary);
+}
+
+.gw-command-palette-body {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: var(--space-2) 0;
+}
+
+.gw-command-palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.gw-command-palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2-5) var(--space-4);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  gap: var(--space-3);
+}
+
+.gw-command-palette-item:hover,
+.gw-command-palette-item--selected {
+  background-color: var(--bg-surface-3);
+}
+
+.gw-command-item-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.gw-command-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.gw-command-palette-item--selected .gw-command-item-icon {
+  color: var(--accent-primary);
+}
+
+.gw-command-item-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gw-command-item-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.gw-command-item-desc {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gw-command-item-shortcut {
+  flex-shrink: 0;
+}
+
+.gw-command-empty {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.gw-command-palette-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-4);
+  background-color: var(--bg-surface-2);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.gw-command-footer-hints {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.gw-command-footer-scope {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+/* ==========================================================================
    Responsive Breakpoints
    ========================================================================== */
 
 /* Mobile viewports (< 768px) */
 @media (max-width: 767.98px) {
+  .gw-command-trigger-btn {
+    display: none;
+  }
   .gw-sidebar {
     display: none !important;
   }

@@ -2,12 +2,25 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T176`.
+Done: `T001`-`T177`.
 
-Current: `T177` - complete global UX states and interaction polish.
+Current: `T178` - pass accessibility and responsive design gates.
 
-Queued: `T178`-`T180`, in dependency order from key/request workflows,
+Queued: `T179`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T177 completed global UX states and interaction polish:
+standardized route loading, background refresh, empty state, inline error, offline, stale data,
+mutation progress, success feedback, destructive warning, and session-expired patterns across
+all console routes; implemented an accessible, responsive Command & Search Palette (`Ctrl+K` / `⌘K`)
+featuring in-memory search and keyboard navigation over page destinations, theme toggle, current page
+query refresh, and session logout with zero indexing or DOM leakage of server data, keys, or payload bodies;
+added discoverable global shortcuts with strict typing-field guards preventing execution while editing
+text or forms; implemented client-side route error boundary recovery without full browser reloads;
+added scroll restoration to top and screen-reader focus restoration to `#main-content` upon route changes;
+added duplicate toast suppression within debounce windows; integrated online/offline status monitoring
+into shell status indicators and page alerts; added hierarchical breadcrumbs with direct parent navigation
+for `/requests/:id` and `/keys/:id`; verified by isolated unit, shell, lifecycle, and cross-page interaction tests.
 
 Review fixes for T171-T175:
 addressed review findings across admin system telemetry & readiness constructor semantics,

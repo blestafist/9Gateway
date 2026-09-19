@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import {
   Card,
@@ -274,6 +275,15 @@ export const SystemPage: React.FC = () => {
           variant="danger"
           title={isAuthError ? "Session Expired" : isOfflineErr ? "Network Connection Lost" : "Failed to Load System Diagnostics"}
           icon={isOfflineErr ? <WifiOff size={18} /> : <AlertTriangle size={18} />}
+          action={
+            isAuthError ? (
+              <Link to="/login" style={{ textDecoration: "none" }}>
+                <Button size="sm" variant="secondary">
+                  Sign In
+                </Button>
+              </Link>
+            ) : undefined
+          }
         >
           {isAuthError
             ? "Your operator session has expired or is unauthenticated. Please log in again to inspect system internals."

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Outlet, NavLink, Link, useLocation } from "react-router-dom";
-import { Menu, Zap, Sun, Moon } from "lucide-react";
+import { Menu, Zap, Sun, Moon, Search } from "lucide-react";
 import { Drawer, IconButton, StatusPill } from "../../shared/ui";
 import { useTheme } from "../../shared/theme";
 import { SkipLink } from "./SkipLink";
@@ -8,6 +8,8 @@ import { Sidebar, NAV_ITEMS } from "./Sidebar";
 import { PageHeader } from "./PageHeader";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { RouteLoadingFallback } from "./RouteLoadingFallback";
+import { CommandPalette } from "./CommandPalette";
+import { useGlobalShortcuts } from "./useGlobalShortcuts";
 import { usePageTitle } from "./usePageTitle";
 import "./shell.css";
 
@@ -25,9 +27,56 @@ function getInitialCollapsedState(): boolean {
 export const AppShell: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState<boolean>(getInitialCollapsedState);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== "undefined" ? navigator.onLine : true
+  );
+
   const mobileMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
+
+  // Monitor connectivity state
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  // Safe global keyboard shortcuts (Command Palette, chords, theme, help)
+  useGlobalShortcuts({
+    onOpenCommandPalette: () => setIsCommandPaletteOpen(true),
+    isCommandPaletteOpen,
+  });
+
+  // Scroll and focus restoration on route change
+  useEffect(() => {
+    if (
+      typeof window !== "undefined" &&
+      typeof window.scrollTo === "function" &&
+      !navigator.userAgent?.includes("jsdom")
+    ) {
+      try {
+        window.scrollTo(0, 0);
+      } catch {
+        // Restricted environment
+      }
+    }
+    const mainContent = document.getElementById("main-content");
+    if (mainContent) {
+      mainContent.scrollTop = 0;
+      if (!document.querySelector(".gw-dialog-backdrop, .gw-drawer-backdrop, .gw-command-palette-backdrop")) {
+        mainContent.focus({ preventScroll: true });
+      }
+    }
+  }, [location.pathname]);
 
   // Keep page title synchronized with active route
   usePageTitle();
@@ -58,6 +107,7 @@ export const AppShell: React.FC = () => {
       <Sidebar
         isCollapsed={isCollapsed}
         onToggleCollapse={handleToggleCollapse}
+        isOnline={isOnline}
       />
 
       {/* Mobile Top Header (visible on screens < 768px) */}
@@ -69,9 +119,9 @@ export const AppShell: React.FC = () => {
           aria-controls="mobile-navigation-drawer"
           variant="ghost"
           size="md"
-           ref={mobileMenuTriggerRef}
-           onClick={() => setIsMobileDrawerOpen(true)}
-           data-testid="mobile-menu-btn"
+          ref={mobileMenuTriggerRef}
+          onClick={() => setIsMobileDrawerOpen(true)}
+          data-testid="mobile-menu-btn"
         />
 
         <Link to="/overview" className="gw-mobile-brand">
@@ -82,6 +132,15 @@ export const AppShell: React.FC = () => {
         </Link>
 
         <div className="gw-mobile-actions">
+          <IconButton
+            icon={<Search size={18} />}
+            aria-label="Open Command Palette"
+            variant="ghost"
+            size="md"
+            onClick={() => setIsCommandPaletteOpen(true)}
+            data-testid="mobile-command-palette-btn"
+          />
+
           <IconButton
             icon={theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
@@ -99,9 +158,9 @@ export const AppShell: React.FC = () => {
         onClose={() => setIsMobileDrawerOpen(false)}
         title="9Gateway Console"
         description="Operations navigation"
-         placement="left"
-         restoreFocusTo={mobileMenuTriggerRef}
-       >
+        placement="left"
+        restoreFocusTo={mobileMenuTriggerRef}
+      >
         <div id="mobile-navigation-drawer" className="gw-mobile-drawer-nav">
           {NAV_ITEMS.map((item) => (
             <NavLink
@@ -128,14 +187,20 @@ export const AppShell: React.FC = () => {
                 v0.1.0-dev
               </span>
             </div>
-            <StatusPill label="Online" />
+            <StatusPill
+              label={isOnline ? "Online" : "Offline"}
+              variant={isOnline ? undefined : "warning"}
+            />
           </div>
         </div>
       </Drawer>
 
       {/* Main Content Frame */}
       <div className="gw-shell-main">
-        <PageHeader />
+        <PageHeader
+          onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+          isOnline={isOnline}
+        />
 
         <main id="main-content" tabIndex={-1} className="gw-main-content">
           <RouteErrorBoundary>
@@ -145,6 +210,12 @@ export const AppShell: React.FC = () => {
           </RouteErrorBoundary>
         </main>
       </div>
+
+      {/* Accessible Command & Search Palette */}
+      <CommandPalette
+        isOpen={isCommandPaletteOpen}
+        onClose={() => setIsCommandPaletteOpen(false)}
+      />
     </div>
   );
 };

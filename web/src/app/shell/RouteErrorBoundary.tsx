@@ -1,9 +1,12 @@
-import { Component, ErrorInfo, ReactNode } from "react";
+import React, { Component, ErrorInfo, ReactNode } from "react";
+import { useInRouterContext, useNavigate, useLocation } from "react-router-dom";
 import { Alert, Button } from "../../shared/ui";
 import { RotateCcw, Home } from "lucide-react";
 
-interface Props {
+interface InnerProps {
   children: ReactNode;
+  locationKey?: string;
+  onNavigateHome?: () => void;
 }
 
 interface State {
@@ -11,7 +14,7 @@ interface State {
   error: Error | null;
 }
 
-export class RouteErrorBoundary extends Component<Props, State> {
+class RouteErrorBoundaryInner extends Component<InnerProps, State> {
   public state: State = {
     hasError: false,
     error: null,
@@ -28,8 +31,24 @@ export class RouteErrorBoundary extends Component<Props, State> {
     }
   }
 
+  public componentDidUpdate(prevProps: InnerProps) {
+    // Automatically recover without full reload when user navigates away safely
+    if (prevProps.locationKey !== this.props.locationKey && this.state.hasError) {
+      this.setState({ hasError: false, error: null });
+    }
+  }
+
   private handleRetry = () => {
     this.setState({ hasError: false, error: null });
+  };
+
+  private handleReturnHome = () => {
+    this.setState({ hasError: false, error: null });
+    if (this.props.onNavigateHome) {
+      this.props.onNavigateHome();
+    } else if (typeof window !== "undefined") {
+      window.location.href = "/ui/overview";
+    }
   };
 
   public render() {
@@ -53,10 +72,7 @@ export class RouteErrorBoundary extends Component<Props, State> {
               variant="secondary"
               size="sm"
               leftIcon={<Home size={16} />}
-              onClick={() => {
-                this.setState({ hasError: false, error: null });
-                window.location.href = "/ui/overview";
-              }}
+              onClick={this.handleReturnHome}
             >
               Return to Overview
             </Button>
@@ -68,3 +84,24 @@ export class RouteErrorBoundary extends Component<Props, State> {
     return this.props.children;
   }
 }
+
+const RouteErrorBoundaryRouterBridge: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  return (
+    <RouteErrorBoundaryInner
+      locationKey={location.key}
+      onNavigateHome={() => navigate("/overview")}
+    >
+      {children}
+    </RouteErrorBoundaryInner>
+  );
+};
+
+export const RouteErrorBoundary: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const inRouter = useInRouterContext();
+  if (inRouter) {
+    return <RouteErrorBoundaryRouterBridge>{children}</RouteErrorBoundaryRouterBridge>;
+  }
+  return <RouteErrorBoundaryInner>{children}</RouteErrorBoundaryInner>;
+};

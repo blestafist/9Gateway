@@ -109,6 +109,7 @@ const ToastMessage: React.FC<{
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const counterRef = useRef(0);
+  const recentToastsRef = useRef<Map<string, { id: string; timestamp: number }>>(new Map());
 
   const dismiss = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -116,9 +117,34 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const show = useCallback(
     (toast: Omit<ToastItem, "id"> & { id?: string }): string => {
-      const id = toast.id || `toast-${Date.now()}-${++counterRef.current}`;
+      const now = Date.now();
+      const dedupKey = `${toast.title}:${toast.variant || "info"}:${toast.description || ""}`;
+      const recent = recentToastsRef.current.get(dedupKey);
+
+      // Suppress duplicate toasts emitted within 1500ms
+      if (recent && now - recent.timestamp < 1500) {
+        return recent.id;
+      }
+
+      // Clean up old entries
+      if (recentToastsRef.current.size > 50) {
+        for (const [k, v] of recentToastsRef.current.entries()) {
+          if (now - v.timestamp > 10000) {
+            recentToastsRef.current.delete(k);
+          }
+        }
+      }
+
+      const id = toast.id || `toast-${now}-${++counterRef.current}`;
+      recentToastsRef.current.set(dedupKey, { id, timestamp: now });
+
       const newItem: ToastItem = { ...toast, id };
-      setToasts((prev) => [...prev, newItem]);
+      setToasts((prev) => {
+        if (prev.some((t) => t.id === id)) {
+          return prev.map((t) => (t.id === id ? newItem : t));
+        }
+        return [...prev, newItem];
+      });
       return id;
     },
     []
