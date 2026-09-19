@@ -62,3 +62,8 @@ if (typeof URL.revokeObjectURL === "undefined") {
   URL.revokeObjectURL = () => {};
 }
 
+// Provide canvas getContext mock to suppress jsdom warnings during axe runs
+if (typeof window !== "undefined" && window.HTMLCanvasElement) {
+  window.HTMLCanvasElement.prototype.getContext = (() => null) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+}
+

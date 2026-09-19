@@ -258,6 +258,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
             aria-autocomplete="list"
             aria-controls="command-palette-results"
             aria-activedescendant={selectedCommand ? selectedCommand.id : undefined}
+            aria-label="Search commands or destinations"
             placeholder="Type a command or search (e.g. 'theme', 'usage', 'requests')..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}

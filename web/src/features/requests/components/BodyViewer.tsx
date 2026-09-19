@@ -223,7 +223,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   type="button"
                   role="tab"
                   aria-selected={isSelected}
-                  aria-controls={`body-panel-${kind}`}
+                  aria-controls={isSelected && !isLoading && bodyContent ? `body-panel-${kind}` : undefined}
                   id={`body-tab-${kind}`}
                   className={`gw-body-kind-tab ${isSelected ? "gw-body-kind-tab-active" : ""}`}
                   onClick={() => setSelectedKind(kind)}
@@ -395,6 +395,8 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   <pre
                     className="gw-body-pre"
                     tabIndex={0}
+                    role="region"
+                    aria-label="Request body text preview"
                     data-testid="body-pre-text"
                   >
                     <code>{textPreview.text}</code>
@@ -405,6 +407,8 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   <pre
                     className="gw-body-pre gw-body-hex-pre"
                     tabIndex={0}
+                    role="region"
+                    aria-label="Request body hex preview"
                     data-testid="body-pre-hex"
                   >
                     <code>{hexPreview.hex}</code>
@@ -415,6 +419,8 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   <pre
                     className="gw-body-pre"
                     tabIndex={0}
+                    role="region"
+                    aria-label="Request body JSON preview"
                     data-testid="body-pre-json"
                   >
                     <code>{jsonResult.pretty}</code>

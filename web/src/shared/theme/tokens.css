@@ -57,6 +57,12 @@
   --z-modal: 60;
   --z-toast: 100;
   --z-tooltip: 110;
+
+  /* Safe Area Insets */
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
 }
 
 /* Dark Theme (Default) */
@@ -256,3 +262,36 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* Forced Colors (Windows High Contrast Mode) */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 3px solid Highlight !important;
+    outline-offset: 2px !important;
+  }
+
+  .gw-btn,
+  .gw-icon-btn,
+  .gw-card,
+  .gw-dialog,
+  .gw-drawer,
+  .gw-input,
+  .gw-select,
+  .gw-table,
+  .gw-badge,
+  .gw-status-pill,
+  .gw-alert {
+    border: 1px solid ButtonBorder !important;
+  }
+
+  .gw-btn--primary {
+    background-color: Highlight !important;
+    color: HighlightText !important;
+    border-color: Highlight !important;
+  }
+
+  .gw-skip-link:focus {
+    outline: 3px solid Highlight !important;
+  }
+}
+

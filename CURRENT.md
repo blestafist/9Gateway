@@ -2,12 +2,31 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T177`.
+Done: `T001`-`T178`.
 
-Current: `T178` - pass accessibility and responsive design gates.
+Current: `T179` - add end-to-end security, browser, and performance coverage.
 
-Queued: `T179`-`T180`, in dependency order from key/request workflows,
+Queued: `T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T178 passed accessibility and responsive design gates:
+audited all console routes and modals (Login, Overview, Usage, Keys inventory, Create Key,
+Key Policy drawer, Requests explorer, Request Details, Body Viewer, System diagnostics,
+Command Palette, and Route Error Fallbacks) against WCAG 2.2 Level AA;
+integrated automated axe-core accessibility scanner suite (`web/src/tests/a11y.test.tsx`)
+enforcing zero serious or critical accessibility violations across all mounted screens,
+modals, drawers, and composable UI primitives;
+fixed BodyViewer dynamic tabpanel referencing where tabs only bind `aria-controls` to
+rendered active panels, eliminating broken ARIA pointers;
+added labeled, keyboard-reachable scroll regions (`role="region"`, `tabIndex={0}`,
+`aria-label`) to `Table`, `BodyViewer` text/hex previews, and `DiagnosticsSummaryModal`;
+removed redundant nested table wrappers in `RequestTable`;
+added accessible labels to the Command Palette combobox input;
+hardened design tokens in `tokens.css` with dedicated Windows High Contrast Mode
+`@media (forced-colors: active)` border and focus ring rules, and `--safe-area-*` tokens;
+verified responsive reflow across 320px, 375px, 768px, 1024px, and 1440px viewports with
+`overflow-x: hidden` preventing accidental document horizontal scrollbars;
+documented repeatable automated and manual test procedures and matrix in `docs/ui/accessibility.md`.
 
 T177 completed global UX states and interaction polish:
 standardized route loading, background refresh, empty state, inline error, offline, stale data,

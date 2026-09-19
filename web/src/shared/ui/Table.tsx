@@ -3,17 +3,26 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 
 export interface TableProps extends React.TableHTMLAttributes<HTMLTableElement> {
   containerClassName?: string;
+  containerAriaLabel?: string;
   children: React.ReactNode;
 }
 
 export const Table = React.forwardRef<HTMLTableElement, TableProps>(
-  ({ containerClassName = "", className = "", children, ...props }, ref) => (
-    <div className={`gw-table-container ${containerClassName}`}>
-      <table ref={ref} className={`gw-table ${className}`} {...props}>
-        {children}
-      </table>
-    </div>
-  )
+  ({ containerClassName = "", containerAriaLabel, className = "", children, ...props }, ref) => {
+    const label = containerAriaLabel || props["aria-label"] || "Data table";
+    return (
+      <div
+        className={`gw-table-container ${containerClassName}`}
+        role="region"
+        aria-label={`${label} scroll region`}
+        tabIndex={0}
+      >
+        <table ref={ref} className={`gw-table ${className}`} {...props}>
+          {children}
+        </table>
+      </div>
+    );
+  }
 );
 Table.displayName = "Table";
 

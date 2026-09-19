@@ -43,9 +43,8 @@ export const RequestTable: React.FC<RequestTableProps> = ({
 
   return (
     <div className="gw-requests-table-view" data-testid="requests-table-view">
-      <div className="gw-table-container">
-        <Table aria-label="Recent Requests">
-          <TableHeader>
+      <Table aria-label="Recent Requests">
+        <TableHeader>
             <TableRow>
               <TableHead>Time</TableHead>
               <TableHead>Request ID</TableHead>
@@ -214,7 +213,6 @@ export const RequestTable: React.FC<RequestTableProps> = ({
             })}
           </TableBody>
         </Table>
-      </div>
 
       {/* Screen reader notification for copy ID */}
       <div className="gw-sr-only" aria-live="polite" aria-atomic="true">
