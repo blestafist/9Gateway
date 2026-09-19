@@ -56,24 +56,34 @@ describe("T171 Key Creation Helpers", () => {
     const appendSpy = vi.spyOn(document.body, "appendChild");
     const removeSpy = vi.spyOn(document.body, "removeChild");
 
-    downloadKeySecret("test-key.txt", "sk-raw-secret-1234567890");
+    vi.useFakeTimers();
+    try {
+      downloadKeySecret("test-key.txt", "sk-raw-secret-1234567890");
 
-    expect(clickSpy).toHaveBeenCalled();
+      expect(clickSpy).toHaveBeenCalled();
 
-    expect(capturedBlob).not.toBeNull();
-    expect(capturedBlob!.type).toBe("text/plain;charset=utf-8");
+      expect(capturedBlob).not.toBeNull();
+      expect(capturedBlob!.type).toBe("text/plain;charset=utf-8");
 
-    const createdAnchor = appendSpy.mock.calls[0]?.[0] as HTMLAnchorElement;
-    expect(createdAnchor).toBeDefined();
-    capturedFilename = createdAnchor.download;
-    expect(capturedFilename).toBe("test-key.txt");
+      const createdAnchor = appendSpy.mock.calls[0]?.[0] as HTMLAnchorElement;
+      expect(createdAnchor).toBeDefined();
+      capturedFilename = createdAnchor.download;
+      expect(capturedFilename).toBe("test-key.txt");
 
-    expect(appendSpy).toHaveBeenCalled();
-    expect(removeSpy).toHaveBeenCalled();
+      expect(appendSpy).toHaveBeenCalled();
+      expect(removeSpy).toHaveBeenCalled();
 
-    clickSpy.mockRestore();
-    URL.createObjectURL = originalCreateObjectURL;
-    URL.revokeObjectURL = originalRevokeObjectURL;
+      // Revocation must be deferred to prevent Firefox/Safari download cancellation races
+      expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1000);
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-url");
+    } finally {
+      vi.useRealTimers();
+      clickSpy.mockRestore();
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+    }
   });
 
   it("computes expiration RFC3339 timestamps for presets and custom UTC values", () => {

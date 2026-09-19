@@ -168,10 +168,17 @@ export function downloadKeySecret(filename: string, secret: string): void {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = filename;
+    anchor.style.display = "none";
     document.body.appendChild(anchor);
-    anchor.click();
+    try {
+      anchor.click();
+    } catch {
+      // jsdom environment throws on synthetic anchor navigation
+    }
     document.body.removeChild(anchor);
-    URL.revokeObjectURL(url);
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 1000);
   }
 }
 

@@ -781,6 +781,83 @@ describe("T174 Request Details and Safe Body Viewer", () => {
       expect(screen.getByTestId("view-mode-text")).toHaveClass("gw-btn--primary");
       expect(screen.queryByTestId("view-mode-json")).not.toBeInTheDocument();
     });
+
+    it("handles body copy failure gracefully without false 'Copied' feedback", async () => {
+      const originalClipboard = navigator.clipboard;
+      const writeTextMock = vi.fn().mockRejectedValue(new Error("Clipboard permission denied"));
+      Object.assign(navigator, {
+        clipboard: { writeText: writeTextMock },
+      });
+
+      try {
+        globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+          const urlStr = typeof url === "string" ? url : url.toString();
+          if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+            return mockJsonResponse(baseRequestDetail);
+          }
+          if (urlStr.includes("/bodies/client_request")) {
+            return mockOctetStreamResponse('{"test":"copy-failure"}', 23, false, "application/json");
+          }
+          return new Response("Not found", { status: 404 });
+        });
+
+        renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+        fireEvent.click(await screen.findByTestId("open-body-client_request-btn"));
+
+        const copyBtn = await screen.findByTestId("copy-body-text-btn");
+        expect(copyBtn).toHaveTextContent("Copy");
+
+        fireEvent.click(copyBtn);
+
+        expect(await screen.findByTestId("copy-error-alert")).toBeInTheDocument();
+        expect(screen.getByTestId("copy-error-alert")).toHaveTextContent(
+          "Failed to copy preview text to clipboard."
+        );
+
+        // Crucial: copyBtn must NOT report "Copied" on rejection
+        expect(copyBtn).toHaveTextContent("Copy");
+        expect(screen.queryByText("Copied")).not.toBeInTheDocument();
+      } finally {
+        Object.assign(navigator, { clipboard: originalClipboard });
+      }
+    });
+
+    it("copies body preview text and displays 'Copied' feedback on success", async () => {
+      const originalClipboard = navigator.clipboard;
+      const writeTextMock = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, {
+        clipboard: { writeText: writeTextMock },
+      });
+
+      try {
+        globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+          const urlStr = typeof url === "string" ? url : url.toString();
+          if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+            return mockJsonResponse(baseRequestDetail);
+          }
+          if (urlStr.includes("/bodies/client_request")) {
+            return mockOctetStreamResponse('{"test":"copy-success"}', 23, false, "application/json");
+          }
+          return new Response("Not found", { status: 404 });
+        });
+
+        renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+        fireEvent.click(await screen.findByTestId("open-body-client_request-btn"));
+
+        const copyBtn = await screen.findByTestId("copy-body-text-btn");
+        expect(copyBtn).toHaveTextContent("Copy");
+
+        fireEvent.click(copyBtn);
+
+        await waitFor(() => {
+          expect(writeTextMock).toHaveBeenCalled();
+          expect(copyBtn).toHaveTextContent("Copied");
+        });
+        expect(screen.queryByTestId("copy-error-alert")).not.toBeInTheDocument();
+      } finally {
+        Object.assign(navigator, { clipboard: originalClipboard });
+      }
+    });
   });
 
   describe("Direct Body Download Lifecycle", () => {

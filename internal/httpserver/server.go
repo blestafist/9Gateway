@@ -237,13 +237,19 @@ func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	if historyWorker != nil {
 		admin.systemLimits.RequestRetentionSeconds = int64(historyWorker.requestRetention / time.Second)
 		admin.systemLimits.BodyRetentionSeconds = int64(historyWorker.bodyRetention / time.Second)
-		admin.telemetryCapacity = cap(historyWorker.queue)
 	}
-	if usageWorker != nil && admin.telemetryCapacity == 0 {
-		admin.telemetryCapacity = cap(usageWorker.queue)
+	totalTelemetryCapacity := 0
+	if historyWorker != nil {
+		totalTelemetryCapacity += cap(historyWorker.queue)
 	}
-	if completionLogger != nil && admin.telemetryCapacity == 0 {
-		admin.telemetryCapacity = cap(completionLogger.queue)
+	if usageWorker != nil {
+		totalTelemetryCapacity += cap(usageWorker.queue)
+	}
+	if completionLogger != nil {
+		totalTelemetryCapacity += cap(completionLogger.queue)
+	}
+	if totalTelemetryCapacity > 0 {
+		admin.telemetryCapacity = totalTelemetryCapacity
 	}
 	admin.systemLimits.MaxCapturedBodyBytes = tokenConfig.MaxCapturedBodyBytes
 

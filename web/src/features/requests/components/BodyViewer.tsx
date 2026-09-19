@@ -49,6 +49,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
   const [bodyContent, setBodyContent] = useState<RequestBodyContent | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [is404, setIs404] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<ViewMode>("text");
   const [copied, setCopied] = useState<boolean>(false);
@@ -58,6 +59,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
     const controller = new AbortController();
     setIsLoading(true);
     setErrorMessage(null);
+    setCopyError(null);
     setIs404(false);
     setBodyContent(null);
 
@@ -140,7 +142,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
     downloadBodyBytes(rawBytes, filename, bodyContent.content_type);
   }, [bodyContent, jsonResult.isValid, activeViewMode, requestId, selectedKind, rawBytes]);
 
-  const handleCopyText = useCallback(() => {
+  const handleCopyText = useCallback(async () => {
     const textToCopy =
       activeViewMode === "json" && jsonResult.pretty
         ? jsonResult.pretty
@@ -148,10 +150,21 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
           ? hexPreview.hex
           : textPreview.text;
 
-    if (typeof navigator !== "undefined" && navigator.clipboard) {
-      void navigator.clipboard.writeText(textToCopy);
+    try {
+      if (
+        typeof navigator === "undefined" ||
+        !navigator.clipboard ||
+        typeof navigator.clipboard.writeText !== "function"
+      ) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(textToCopy);
       setCopied(true);
+      setCopyError(null);
       setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+      setCopyError("Failed to copy preview text to clipboard.");
     }
   }, [activeViewMode, jsonResult.pretty, hexPreview.hex, textPreview.text]);
 
@@ -334,6 +347,13 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                 </Button>
               </div>
             </div>
+
+            {/* Copy error feedback if clipboard fails */}
+            {copyError && (
+              <Alert variant="danger" data-testid="copy-error-alert">
+                {copyError}
+              </Alert>
+            )}
 
             {/* Truncation Warning */}
             {bodyContent.truncated && (

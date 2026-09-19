@@ -896,9 +896,9 @@ type AdminStorageSummary struct {
 
 // AdminTelemetrySummary contains telemetry queue pressure and drop counters.
 // Semantics:
-// - queue_depth: snapshot gauge integer
-// - queue_capacity: snapshot integer
-// - dropped_records: monotonic counter int64
+// - queue_depth: snapshot gauge integer (sum across all active telemetry worker queues)
+// - queue_capacity: snapshot integer (total capacity summed across all active telemetry worker queues)
+// - dropped_records: monotonic counter int64 (sum across all active telemetry workers)
 type AdminTelemetrySummary struct {
 	QueueDepth     int   `json:"queue_depth"`
 	QueueCapacity  int   `json:"queue_capacity"`
@@ -996,29 +996,30 @@ func inspectStorage(ctx context.Context, database *storage.DB) AdminStorageSumma
 
 func (handler *adminHandler) inspectTelemetry(request *http.Request) AdminTelemetrySummary {
 	depth := 0
-	capacity := handler.telemetryCapacity
+	capacity := 0
 	var dropped int64
 
+	// Telemetry depth, capacity, and drops are aggregated across all active worker queues
+	// (completion logger, usage observation, history persistence) to provide a consistent
+	// measure of queue saturation across the entire telemetry subsystem.
 	if handler.completionLogger != nil {
 		depth += len(handler.completionLogger.queue)
-		if capacity == 0 {
-			capacity = cap(handler.completionLogger.queue)
-		}
+		capacity += cap(handler.completionLogger.queue)
 		dropped += int64(handler.completionLogger.dropped.Load())
 	}
 	if handler.usageWorker != nil {
 		depth += handler.usageWorker.Pending()
-		if capacity == 0 {
-			capacity = cap(handler.usageWorker.queue)
-		}
+		capacity += cap(handler.usageWorker.queue)
 		dropped += int64(handler.usageWorker.Dropped())
 	}
 	if handler.historyWorker != nil {
 		depth += handler.historyWorker.Pending()
-		if capacity == 0 {
-			capacity = cap(handler.historyWorker.queue)
-		}
+		capacity += cap(handler.historyWorker.queue)
 		dropped += int64(handler.historyWorker.Dropped())
+	}
+
+	if capacity == 0 {
+		capacity = handler.telemetryCapacity
 	}
 
 	if metrics := metricsFromRequest(request); metrics != nil {

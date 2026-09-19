@@ -212,9 +212,9 @@ func TestSystemHealthyPayload(t *testing.T) {
 		t.Errorf("expected SQLite == Storage, got %+v vs %+v", payload.SQLite, payload.Storage)
 	}
 
-	// Telemetry check
-	if payload.Telemetry.QueueCapacity != 64 {
-		t.Errorf("expected Telemetry.QueueCapacity = 64, got %d", payload.Telemetry.QueueCapacity)
+	// Telemetry check (capacity is aggregated across completionLogger, usageWorker, historyWorker: 64*3 = 192)
+	if payload.Telemetry.QueueCapacity != 192 {
+		t.Errorf("expected Telemetry.QueueCapacity = 192, got %d", payload.Telemetry.QueueCapacity)
 	}
 	if payload.Telemetry.QueueDepth < 0 {
 		t.Errorf("expected Telemetry.QueueDepth >= 0, got %d", payload.Telemetry.QueueDepth)
