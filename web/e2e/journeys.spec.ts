@@ -123,10 +123,9 @@ test.describe("Web UI Critical Operator Journeys", () => {
     await expect(page.locator('[data-testid="secret-handoff-step"]')).toBeVisible();
     const secretDisplay = page.locator('[data-testid="secret-key-display"]');
     await expect(secretDisplay).toBeVisible();
-    const rawSecret = await secretDisplay.inputValue();
-    expect(rawSecret).toContain("sk-gw-");
-    // Secret handoff runs without trace/screenshot/video artifacts. The dialog
-    // owns cleanup when dismissed; assert the raw value is gone afterward.
+    await expect(secretDisplay).toHaveAttribute("type", "password");
+    // The handoff is visible and masked; dismissing it must remove the secret UI
+    // without copying the raw value into test variables or assertion output.
 
     // Copy action and ack checkbox
     await expect(page.locator('[data-testid="copy-key-btn"]')).toBeVisible();
