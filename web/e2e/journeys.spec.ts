@@ -107,6 +107,10 @@ test.describe("Web UI Critical Operator Journeys", () => {
     await expect(page.locator('[data-testid="overview-page"]')).toBeVisible();
 
     // Navigate to keys
+    const keysMenuBtn = page.locator('[data-testid="mobile-menu-btn"]');
+    if (await keysMenuBtn.isVisible()) {
+      await keysMenuBtn.click();
+    }
     await page.locator('a[href="/ui/keys"]:visible').first().click();
     await expect(page).toHaveURL(`${gateway.baseURL}/ui/keys`);
     await expect(page.locator('[data-testid="keys-page"]')).toBeVisible();
