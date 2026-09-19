@@ -545,6 +545,93 @@ describe("T172 Key Policy Editor & Controls", () => {
       fireEvent.click(confirmDiscardBtn);
       expect(onCancel).toHaveBeenCalled();
     });
+
+    it("blocks submit and displays warning when key has int64 max token amount", async () => {
+      const maxInt64 = "9223372036854775807";
+      const keyWithUnsafeToken: AdminKeyDetail = {
+        ...baseKeyDetail,
+        policy: {
+          ...baseKeyDetail.policy,
+          token_windows: [{ amount: maxInt64, duration: 3600 }],
+        },
+      };
+
+      renderForm({ keyDetail: keyWithUnsafeToken });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("unsupported-numeric-alert")).toBeInTheDocument();
+      });
+
+      // The alert explains the limitation
+      expect(screen.getByText(/exceed JavaScript safe integers/i)).toBeInTheDocument();
+
+      // The token input shows the unsafe value with helper text
+      const tokenInput = screen.getByTestId("tok-amount-0");
+      expect((tokenInput as HTMLInputElement).value).toBe(maxInt64);
+      expect(screen.getByText(/Exceeds safe integer limit/i)).toBeInTheDocument();
+
+      // Save button is disabled
+      expect(screen.getByTestId("save-policy-btn")).toBeDisabled();
+    });
+
+    it("blocks submit and displays warning when key has int64 max budget micros", async () => {
+      const maxInt64 = "9223372036854775807";
+      const keyWithUnsafeBudget: AdminKeyDetail = {
+        ...baseKeyDetail,
+        policy: {
+          ...baseKeyDetail.policy,
+          budget_limits: [{ period: "total", amount_micros: maxInt64 }],
+        },
+      };
+
+      renderForm({ keyDetail: keyWithUnsafeBudget });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("unsupported-numeric-alert")).toBeInTheDocument();
+      });
+
+      // The alert explains the limitation clearly
+      expect(screen.getByText(/numeric JSON contract cannot represent these values/i)).toBeInTheDocument();
+
+      // The budget display shows converted USD value
+      const budgetAmountInput = screen.getByTestId("budget-amount-0");
+      expect(budgetAmountInput).toHaveValue("9223372036854.775807");
+
+      // Helper text indicates it exceeds safe value
+      expect(screen.getByText(/Exceeds safe value supported by Web UI/i)).toBeInTheDocument();
+
+      // Save button is disabled
+      expect(screen.getByTestId("save-policy-btn")).toBeDisabled();
+    });
+
+    it("allows returning to representable token value and clearing unsupported state", async () => {
+      const maxInt64 = "9223372036854775807";
+      const keyWithUnsafeToken: AdminKeyDetail = {
+        ...baseKeyDetail,
+        policy: {
+          ...baseKeyDetail.policy,
+          token_windows: [{ amount: maxInt64, duration: 3600 }],
+        },
+      };
+
+      renderForm({ keyDetail: keyWithUnsafeToken });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("unsupported-numeric-alert")).toBeInTheDocument();
+      });
+
+      // Change token amount to a safe value
+      const tokenInput = screen.getByTestId("tok-amount-0");
+      fireEvent.change(tokenInput, { target: { value: "1000000" } });
+
+      // Unsupported alert disappears
+      await waitFor(() => {
+        expect(screen.queryByTestId("unsupported-numeric-alert")).not.toBeInTheDocument();
+      });
+
+      // Save button is now enabled (form is dirty)
+      expect(screen.getByTestId("save-policy-btn")).not.toBeDisabled();
+    });
   });
 
   describe("KeyDetailDrawer Composition & Modes", () => {

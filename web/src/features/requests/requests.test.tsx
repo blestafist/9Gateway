@@ -544,6 +544,9 @@ describe("T173 Request History Explorer", () => {
     ["local-time start", "2026-09-17T00:00:00", "2026-09-18T00:00:00Z"],
     ["malformed end", "2026-09-17T00:00:00Z", "not-a-date"],
     ["reversed bounds", "2026-09-19T00:00:00Z", "2026-09-18T00:00:00Z"],
+    ["leading whitespace start", " 2026-09-17T00:00:00Z", "2026-09-18T00:00:00Z"],
+    ["trailing whitespace end", "2026-09-17T00:00:00Z", "2026-09-18T00:00:00Z "],
+    ["whitespace-padded start and end", "  2026-09-17T00:00:00Z ", " 2026-09-18T00:00:00Z  "],
   ])("rejects %s bookmarked custom ranges without a partial list query", async (_label, after, before) => {
     const requestFetch = vi.fn();
     globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {

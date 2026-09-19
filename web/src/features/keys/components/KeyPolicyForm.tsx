@@ -36,6 +36,11 @@ import {
   dollarsStringToMicros,
   microsToDollarsString,
   formatInteger,
+  isUnsupportedInt64,
+  isBudgetLimitUnsupported,
+  hasUnsupportedNumericPolicyValues,
+  serializePolicyPayloadSafe,
+  getFormValuesFingerprint,
 } from "../policyHelpers";
 
 export interface KeyPolicyFormProps {
@@ -57,8 +62,11 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
 
   // Baseline data loaded from server
   const [initialUpdatedAt, setInitialUpdatedAt] = useState<string>(keyDetail.updated_at);
-  const [initialSerialized, setInitialSerialized] = useState<string>(() =>
-    JSON.stringify(formValuesToPolicyPayload(policyToFormValues(keyDetail)))
+  const [initialSerialized, setInitialSerialized] = useState<string | null>(() =>
+    serializePolicyPayloadSafe(policyToFormValues(keyDetail))
+  );
+  const [initialFormFingerprint, setInitialFormFingerprint] = useState<string>(() =>
+    getFormValuesFingerprint(policyToFormValues(keyDetail))
   );
 
   // Active form state
@@ -81,18 +89,24 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const isSubmittingRef = useRef(false);
 
-  // Compute dirty status
+  // Compute dirty status and unsupported numeric representation
   const currentSerialized = useMemo(() => {
-    try {
-      return JSON.stringify(formValuesToPolicyPayload(values));
-    } catch {
-      return "";
-    }
+    return serializePolicyPayloadSafe(values);
+  }, [values]);
+
+  const hasUnsupportedNumeric = useMemo(() => {
+    return hasUnsupportedNumericPolicyValues(values);
   }, [values]);
 
   const isDirty = useMemo(() => {
-    return currentSerialized !== initialSerialized;
-  }, [currentSerialized, initialSerialized]);
+    if (initialSerialized !== null) {
+      return currentSerialized !== initialSerialized;
+    }
+    if (currentSerialized !== null) {
+      return true;
+    }
+    return getFormValuesFingerprint(values) !== initialFormFingerprint;
+  }, [currentSerialized, initialSerialized, values, initialFormFingerprint]);
 
   // Report dirty status change
   useEffect(() => {
@@ -123,7 +137,8 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
       const freshValues = policyToFormValues(detail);
       setValues(freshValues);
       setInitialUpdatedAt(detail.updated_at);
-      setInitialSerialized(JSON.stringify(formValuesToPolicyPayload(freshValues)));
+      setInitialSerialized(serializePolicyPayloadSafe(freshValues));
+      setInitialFormFingerprint(getFormValuesFingerprint(freshValues));
       setValidationErrors({ summary: [], fieldErrors: {} });
       setSubmitError(null);
       setIs409Conflict(false);
@@ -369,7 +384,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
 
   // Submission logic
   const executeSubmit = async () => {
-    if (isSubmittingRef.current) return;
+    if (isSubmittingRef.current || hasUnsupportedNumeric) return;
     isSubmittingRef.current = true;
     setIsSubmitting(true);
     setSubmitError(null);
@@ -389,7 +404,8 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
       const freshValues = policyToFormValues(updated);
       setValues(freshValues);
       setInitialUpdatedAt(updated.updated_at);
-      setInitialSerialized(JSON.stringify(formValuesToPolicyPayload(freshValues)));
+      setInitialSerialized(serializePolicyPayloadSafe(freshValues));
+      setInitialFormFingerprint(getFormValuesFingerprint(freshValues));
       setSuccessMessage("Key policy and status replaced successfully.");
       onSuccess?.(updated);
     } catch (err: unknown) {
@@ -420,7 +436,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingRef.current) return;
+    if (isSubmittingRef.current || hasUnsupportedNumeric) return;
     setSubmitError(null);
     setIs409Conflict(false);
     setSuccessMessage(null);
@@ -564,6 +580,20 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
           data-testid="policy-submit-error-alert"
         >
           {submitError}
+        </Alert>
+      )}
+
+      {/* Unsupported Numeric Values Banner */}
+      {hasUnsupportedNumeric && (
+        <Alert
+          variant="warning"
+          title="Unsupported Numeric Policy Values"
+          data-testid="unsupported-numeric-alert"
+        >
+          This key policy contains token or budget limits that exceed JavaScript safe integers
+          (up to {Number.MAX_SAFE_INTEGER.toLocaleString()}). The Web UI numeric JSON contract
+          cannot represent these values for submission. To replace this policy, adjust all limits
+          to representable values or manage them using the admin CLI.
         </Alert>
       )}
 
@@ -950,6 +980,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
               const durationField = `tok-window-duration-${index}`;
               const amountError = validationErrors.fieldErrors[amountField];
               const durationError = validationErrors.fieldErrors[durationField];
+              const isUnsafeInt = isUnsupportedInt64(w.amount);
 
               return (
                 <div key={w.id} className="gw-policy-window-row" data-testid={`tok-window-row-${index}`}>
@@ -964,6 +995,11 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
                         value={w.amount}
                         placeholder="e.g. 100000"
                         error={amountError}
+                        helperText={
+                          isUnsafeInt
+                            ? `Exceeds safe integer limit (${Number.MAX_SAFE_INTEGER.toLocaleString()})`
+                            : undefined
+                        }
                         onChange={(e) =>
                           handleUpdateTokenWindow(index, {
                             amount: e.target.value,
@@ -1165,10 +1201,13 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
 
               // Display equivalent conversion helper
               let helperText = "";
-              if (b.unit === "usd") {
+              const isUnsafeBudget = isBudgetLimitUnsupported(b);
+              if (isUnsafeBudget) {
+                helperText = "Exceeds safe value supported by Web UI numeric policy contract";
+              } else if (b.unit === "usd") {
                 const micros = dollarsStringToMicros(b.amount);
-                 if (micros !== null && micros !== "0") {
-                   helperText = `Equals ${formatInteger(micros)} µ$`;
+                if (micros !== null && micros !== "0") {
+                  helperText = `Equals ${formatInteger(micros)} µ$`;
                 }
               } else {
                 const micros = b.amount.trim();
@@ -1347,7 +1386,7 @@ export const KeyPolicyForm: React.FC<KeyPolicyFormProps> = ({
             type="submit"
             variant="primary"
             isLoading={isSubmitting}
-            disabled={!isDirty || isSubmitting}
+            disabled={!isDirty || isSubmitting || hasUnsupportedNumeric}
             data-testid="save-policy-btn"
           >
             Save Policy Replacement

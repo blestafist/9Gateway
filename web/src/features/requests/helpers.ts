@@ -48,11 +48,11 @@ export function parseStrictUtcRfc3339(
   val: string | null | undefined
 ): Date | null {
   if (!val || typeof val !== "string") return null;
-  const match = STRICT_UTC_RFC3339.exec(val.trim());
+  const match = STRICT_UTC_RFC3339.exec(val);
   if (!match) return null;
 
   const [, year, month, day, hour, minute, second] = match;
-  const date = new Date(val.trim());
+  const date = new Date(val);
   if (Number.isNaN(date.getTime())) return null;
 
   // Date.parse normalizes out-of-range calendar fields, so verify the fields

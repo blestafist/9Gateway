@@ -159,6 +159,47 @@ function integerForPayload(value: IntegerValue): number {
   return Number(parsed);
 }
 
+export function isUnsupportedInt64(value: IntegerValue): boolean {
+  if (typeof value === "number") {
+    return !Number.isSafeInteger(value);
+  }
+  const normalized = integerString(value);
+  if (normalized === null) return false;
+  try {
+    const parsed = BigInt(normalized);
+    return parsed > MAX_SAFE_INTEGER_BIGINT;
+  } catch {
+    return false;
+  }
+}
+
+export function isBudgetLimitUnsupported(limit: BudgetLimitInput): boolean {
+  if (!limit.amount || limit.amount.trim() === "") return false;
+  if (limit.unit === "usd") {
+    const micros = dollarsStringToMicros(limit.amount);
+    if (micros === null) return false;
+    if (typeof micros === "string") {
+      try {
+        return BigInt(micros) > MAX_SAFE_INTEGER_BIGINT;
+      } catch {
+        return false;
+      }
+    }
+    return !Number.isSafeInteger(micros);
+  } else {
+    return isUnsupportedInt64(limit.amount);
+  }
+}
+
+export function hasUnsupportedNumericPolicyValues(values: KeyPolicyFormValues): boolean {
+  const hasTokenUnsafe = values.token_windows.some((w) => isUnsupportedInt64(w.amount));
+  const hasBudgetUnsafe = values.budget_limits.some((b) => isBudgetLimitUnsupported(b));
+  const hasReqUnsafe = values.request_windows.some(
+    (w) => typeof w.amount === "number" && !Number.isSafeInteger(w.amount)
+  );
+  return hasTokenUnsafe || hasBudgetUnsafe || hasReqUnsafe;
+}
+
 /** Converts int64 micro-dollars to a decimal dollar string without precision loss. */
 export function microsToDollarsString(micros: IntegerValue): string {
   const normalized = integerString(micros);
@@ -460,6 +501,50 @@ export function formValuesToPolicyPayload(values: KeyPolicyFormValues): UpdateAd
       log_response_body: values.log_response_body,
     },
   };
+}
+
+/**
+ * Safely serializes policy form values to a JSON payload string.
+ * Returns null if the values cannot be represented by the numeric JSON contract.
+ */
+export function serializePolicyPayloadSafe(values: KeyPolicyFormValues): string | null {
+  try {
+    return JSON.stringify(formValuesToPolicyPayload(values));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Produces a stable serialized fingerprint of user-editable form values.
+ * Used for dirty checking even when values are outside the numeric contract.
+ */
+export function getFormValuesFingerprint(v: KeyPolicyFormValues): string {
+  return JSON.stringify({
+    enabled: v.enabled,
+    allowed_models: v.allowed_models,
+    denied_models: v.denied_models,
+    request_windows: v.request_windows.map((w) => ({
+      amount: w.amount,
+      durVal: w.durationValue,
+      durUnit: w.durationUnit,
+    })),
+    token_windows: v.token_windows.map((w) => ({
+      amount: String(w.amount),
+      durVal: w.durationValue,
+      durUnit: w.durationUnit,
+    })),
+    token_mode: v.token_mode,
+    concurrency_mode: v.concurrency_mode,
+    max_concurrent_requests: v.max_concurrent_requests,
+    budget_limits: v.budget_limits.map((b) => ({
+      period: b.period,
+      amount: b.amount,
+      unit: b.unit,
+    })),
+    log_request_body: v.log_request_body,
+    log_response_body: v.log_response_body,
+  });
 }
 
 /**
