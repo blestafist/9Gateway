@@ -1,0 +1,61 @@
+{
+  "version": "dev",
+  "commit": "unknown",
+  "build_time": "unknown",
+  "build_date": "unknown",
+  "start_time": "2026-09-19T08:00:00Z",
+  "uptime_seconds": 120,
+  "ready": false,
+  "readiness": {
+    "ready": false,
+    "checks": {
+      "sqlite": {
+        "name": "sqlite",
+        "status": "pass"
+      },
+      "schema": {
+        "name": "schema",
+        "status": "fail",
+        "message": "database schema version 8 does not match current version 9"
+      },
+      "telemetry": {
+        "name": "telemetry",
+        "status": "fail",
+        "message": "telemetry queue dropped 42 records"
+      },
+      "upstream": {
+        "name": "upstream",
+        "status": "fail",
+        "message": "upstream connection refused"
+      },
+      "lifecycle": {
+        "name": "lifecycle",
+        "status": "fail",
+        "message": "gateway is shutting down"
+      }
+    }
+  },
+  "storage": {
+    "status": "degraded",
+    "healthy": false,
+    "schema_version": 8,
+    "current_schema_version": 9
+  },
+  "sqlite": {
+    "status": "degraded",
+    "healthy": false,
+    "schema_version": 8,
+    "current_schema_version": 9
+  },
+  "telemetry": {
+    "queue_depth": 190,
+    "queue_capacity": 192,
+    "dropped_records": 42
+  },
+  "active_requests": 15,
+  "limits": {
+    "request_retention_seconds": 1209600,
+    "body_retention_seconds": 259200,
+    "max_captured_body_bytes": 0
+  }
+}

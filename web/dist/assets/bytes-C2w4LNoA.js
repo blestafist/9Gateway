@@ -1,0 +1,1 @@
+function t(r){return r==null?"—":r===0?"0 B":r<1024?`${r} B`:r<1024*1024?`${(r/1024).toFixed(1).replace(/\.0$/,"")} KB`:r<1024*1024*1024?`${(r/1048576).toFixed(1).replace(/\.0$/,"")} MB`:`${parseFloat((r/(1024*1024*1024)).toFixed(2))} GB`}function i(r){return r==null?"—":`${r.toLocaleString()} bytes`}export{i as a,t as f};

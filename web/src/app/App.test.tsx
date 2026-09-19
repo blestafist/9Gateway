@@ -202,15 +202,52 @@ describe("T163 Shell & Navigation", () => {
   });
 
   it("navigates directly to /ui/system and renders system diagnostics", async () => {
-    render(<App initialEntries={["/ui/system"]} initialAuthState={{ isAuthenticated: true }} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("system-page")).toBeInTheDocument();
-      expect(document.title).toBe("System Diagnostics | 9Gateway");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/admin/v1/system")) {
+        return new Response(JSON.stringify({
+          version: "v0.1.0-rc1",
+          commit: "abcdef1",
+          build_time: "2026-09-14T00:00:00Z",
+          build_date: "2026-09-14T00:00:00Z",
+          start_time: "2026-09-19T08:00:00Z",
+          uptime_seconds: 3600,
+          ready: true,
+          readiness: {
+            ready: true,
+            checks: {
+              sqlite: { name: "sqlite", status: "pass" },
+              schema: { name: "schema", status: "pass" },
+              telemetry: { name: "telemetry", status: "pass" },
+              upstream: { name: "upstream", status: "pass" },
+              lifecycle: { name: "lifecycle", status: "pass" }
+            }
+          },
+          storage: { status: "healthy", healthy: true, schema_version: 9, current_schema_version: 9 },
+          sqlite: { status: "healthy", healthy: true, schema_version: 9, current_schema_version: 9 },
+          telemetry: { queue_depth: 0, queue_capacity: 192, dropped_records: 0 },
+          active_requests: 0,
+          limits: { request_retention_seconds: 2592000, body_retention_seconds: 604800, max_captured_body_bytes: 1048576 }
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return originalFetch(url);
     });
 
-    expect(screen.getByText("Gateway Core Health")).toBeInTheDocument();
-    expect(screen.getByText("SQLite Storage")).toBeInTheDocument();
+    try {
+      render(<App initialEntries={["/ui/system"]} initialAuthState={{ isAuthenticated: true }} />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("system-page")).toBeInTheDocument();
+        expect(document.title).toBe("System Diagnostics | 9Gateway");
+      });
+
+      expect(screen.getByText("System & Diagnostics")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /diagnostics summary/i })).toBeInTheDocument();
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("navigates directly to /ui/login and renders operator auth placeholder", async () => {

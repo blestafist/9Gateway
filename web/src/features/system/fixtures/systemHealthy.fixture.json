@@ -1,0 +1,57 @@
+{
+  "version": "v0.1.0-rc1",
+  "commit": "abcdef1",
+  "build_time": "2026-09-14T00:00:00Z",
+  "build_date": "2026-09-14T00:00:00Z",
+  "start_time": "2026-09-19T08:00:00Z",
+  "uptime_seconds": 3600,
+  "ready": true,
+  "readiness": {
+    "ready": true,
+    "checks": {
+      "sqlite": {
+        "name": "sqlite",
+        "status": "pass"
+      },
+      "schema": {
+        "name": "schema",
+        "status": "pass"
+      },
+      "telemetry": {
+        "name": "telemetry",
+        "status": "pass"
+      },
+      "upstream": {
+        "name": "upstream",
+        "status": "pass"
+      },
+      "lifecycle": {
+        "name": "lifecycle",
+        "status": "pass"
+      }
+    }
+  },
+  "storage": {
+    "status": "healthy",
+    "healthy": true,
+    "schema_version": 9,
+    "current_schema_version": 9
+  },
+  "sqlite": {
+    "status": "healthy",
+    "healthy": true,
+    "schema_version": 9,
+    "current_schema_version": 9
+  },
+  "telemetry": {
+    "queue_depth": 0,
+    "queue_capacity": 192,
+    "dropped_records": 0
+  },
+  "active_requests": 0,
+  "limits": {
+    "request_retention_seconds": 2592000,
+    "body_retention_seconds": 604800,
+    "max_captured_body_bytes": 1048576
+  }
+}

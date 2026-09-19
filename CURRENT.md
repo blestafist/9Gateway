@@ -2,11 +2,11 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T175`.
+Done: `T001`-`T176`.
 
-Current: `T176` - build the System and diagnostics page.
+Current: `T177` - complete global UX states and interaction polish.
 
-Queued: `T177`-`T180`, in dependency order from key/request workflows,
+Queued: `T178`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
 
 Review fixes for T171-T175:
@@ -15,6 +15,21 @@ custom key expiry UTC datetime-local handling and validation, RequestDetailView 
 download lifecycle/error feedback, BodyViewer view mode fallback, request-range bookmark
 validation, duplicate policy submits, and lossless int64 policy handling with unsafe numeric
 values rejected at the UI contract boundary.
+
+T176 built the System and diagnostics page:
+connects `GET /admin/v1/system` into an accessible, responsive diagnostics dashboard below
+`/ui/system`; presents overall readiness badge, individual readiness checks (`sqlite`,
+`schema`, `telemetry`, `upstream`, `lifecycle`) with failure messages and context-safe
+documentation links, build/runtime indicators (version, commit, build time, start time, uptime),
+telemetry queue pressure and drops with active request gauges, storage status with schema
+version comparison and mismatch alert, and operational retention and body-capture limits;
+clearly distinguishes null, unknown, zero, warning, and failure states with icon, text, and color;
+provides a safe diagnostics summary modal displaying an exact allowlisted non-secret text
+preview and copy-to-clipboard action with toast confirmation; implements visible-tab adaptive
+polling (>= 60s) pausing on document hidden or offline events, manual refresh deduplication
+preventing concurrent queries, and stale snapshot preservation with warning alert on background
+refresh failure; ensures zero leakage of secrets or internal paths in DOM, URL, or diagnostics text,
+and query cache scrubbing on logout; verified by unit, component, lifecycle, navigation, and contract tests.
 
 T175 added a safe admin system information API:
 connects authenticated `GET /admin/v1/system` returning version, commit, build time,

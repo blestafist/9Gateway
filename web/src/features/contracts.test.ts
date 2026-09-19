@@ -7,6 +7,9 @@ import requestDetailFixture from "./requests/fixtures/requestDetail.fixture.json
 import requestBodyFixture from "./requests/fixtures/requestBody.fixture.json";
 import readinessPassFixture from "./system/fixtures/readinessPass.fixture.json";
 import readinessFailFixture from "./system/fixtures/readinessFail.fixture.json";
+import systemHealthyFixture from "./system/fixtures/systemHealthy.fixture.json";
+import systemDegradedFixture from "./system/fixtures/systemDegraded.fixture.json";
+import systemUnavailableFixture from "./system/fixtures/systemUnavailable.fixture.json";
 import overviewFixture from "./overview/fixtures/overview.fixture.json";
 import overviewNullsFixture from "./overview/fixtures/overviewNulls.fixture.json";
 import overviewEmptyFixture from "./overview/fixtures/overviewEmpty.fixture.json";
@@ -21,7 +24,7 @@ import {
   validateRequestDetail,
   validateRequestBodyContent,
 } from "./requests/validation";
-import { validateReadinessResponse } from "./system/validation";
+import { validateReadinessResponse, validateSystemResponse } from "./system/validation";
 import { validateOverviewResponse } from "./overview/validation";
 import { ValidationError } from "../shared/transport";
 
@@ -399,6 +402,32 @@ describe("Contract Fixtures and Runtime Validation", () => {
     it("rejects invalid readiness responses", () => {
       expect(() => validateReadinessResponse({ ready: "not-bool" })).toThrow(ValidationError);
       expect(() => validateReadinessResponse(null)).toThrow(ValidationError);
+    });
+
+    it("successfully decodes systemHealthyFixture", () => {
+      const decoded = validateSystemResponse(systemHealthyFixture);
+      expect(decoded.ready).toBe(true);
+      expect(decoded.storage.status).toBe("healthy");
+      expect(decoded.storage.schema_version).toBe(9);
+      expect(decoded.telemetry.queue_capacity).toBe(192);
+      expect(decoded.limits.request_retention_seconds).toBe(2592000);
+    });
+
+    it("successfully decodes systemDegradedFixture", () => {
+      const decoded = validateSystemResponse(systemDegradedFixture);
+      expect(decoded.ready).toBe(false);
+      expect(decoded.storage.status).toBe("degraded");
+      expect(decoded.storage.schema_version).toBe(8);
+      expect(decoded.readiness.checks.schema?.status).toBe("fail");
+      expect(decoded.telemetry.dropped_records).toBe(42);
+    });
+
+    it("successfully decodes systemUnavailableFixture with null schema_version", () => {
+      const decoded = validateSystemResponse(systemUnavailableFixture);
+      expect(decoded.ready).toBe(false);
+      expect(decoded.storage.status).toBe("unavailable");
+      expect(decoded.storage.schema_version).toBeNull();
+      expect(decoded.uptime_seconds).toBe(0);
     });
   });
 

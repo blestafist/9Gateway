@@ -1,0 +1,61 @@
+{
+  "version": "dev",
+  "commit": "unknown",
+  "build_time": "unknown",
+  "build_date": "unknown",
+  "start_time": "2026-09-19T08:00:00Z",
+  "uptime_seconds": 0,
+  "ready": false,
+  "readiness": {
+    "ready": false,
+    "checks": {
+      "sqlite": {
+        "name": "sqlite",
+        "status": "fail",
+        "message": "database connection closed"
+      },
+      "schema": {
+        "name": "schema",
+        "status": "fail",
+        "message": "database schema check unavailable"
+      },
+      "telemetry": {
+        "name": "telemetry",
+        "status": "fail",
+        "message": "telemetry queue closed"
+      },
+      "upstream": {
+        "name": "upstream",
+        "status": "pass"
+      },
+      "lifecycle": {
+        "name": "lifecycle",
+        "status": "fail",
+        "message": "gateway is closed"
+      }
+    }
+  },
+  "storage": {
+    "status": "unavailable",
+    "healthy": false,
+    "schema_version": null,
+    "current_schema_version": 9
+  },
+  "sqlite": {
+    "status": "unavailable",
+    "healthy": false,
+    "schema_version": null,
+    "current_schema_version": 9
+  },
+  "telemetry": {
+    "queue_depth": 0,
+    "queue_capacity": 128,
+    "dropped_records": 0
+  },
+  "active_requests": 0,
+  "limits": {
+    "request_retention_seconds": 2592000,
+    "body_retention_seconds": 604800,
+    "max_captured_body_bytes": 1048576
+  }
+}
