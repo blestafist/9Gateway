@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { Copy, Check } from "lucide-react";
 import { IconButton } from "../../../shared/ui";
 import {
@@ -21,6 +21,7 @@ export const RequestCardList: React.FC<RequestCardListProps> = ({
   requests,
   onSelectRequest,
 }) => {
+  const location = useLocation();
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleCopy = (id: string, e: React.MouseEvent) => {
@@ -81,7 +82,10 @@ export const RequestCardList: React.FC<RequestCardListProps> = ({
             <div className="gw-request-card-id-row">
               <span className="gw-card-meta-label">ID:</span>
               <Link
-                to={`/requests/${encodeURIComponent(req.request_id)}`}
+                to={{
+                  pathname: `/requests/${encodeURIComponent(req.request_id)}`,
+                  search: location.search,
+                }}
                 className="gw-request-id-link"
                 onClick={(e) => e.stopPropagation()}
                 title={req.request_id}

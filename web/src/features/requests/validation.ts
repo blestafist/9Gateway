@@ -134,21 +134,23 @@ export function validateRequestDetail(raw: unknown): AdminRequestDetail {
 export function validateRequestBodyContent(
   requestId: string,
   kind: RequestBodyKind,
-  raw: { status: number; headers: Headers; data: string }
+  raw: { status: number; headers: Headers; data: string; bytes?: Uint8Array }
 ): RequestBodyContent {
   const originalSizeHeader = raw.headers.get("X-Original-Size");
   const truncatedHeader = raw.headers.get("X-Truncated");
   const contentType = raw.headers.get("Content-Type") || "application/octet-stream";
 
-  const originalSize = originalSizeHeader ? parseInt(originalSizeHeader, 10) : raw.data.length;
+  const bytes = raw.bytes ?? new TextEncoder().encode(raw.data);
+  const originalSize = originalSizeHeader ? parseInt(originalSizeHeader, 10) : bytes.length;
   const truncated = truncatedHeader === "true";
 
   return {
     request_id: requestId,
     kind,
-    original_size: Number.isNaN(originalSize) ? raw.data.length : originalSize,
+    original_size: Number.isNaN(originalSize) ? bytes.length : originalSize,
     truncated,
     content_type: contentType,
     data: raw.data,
+    bytes,
   };
 }

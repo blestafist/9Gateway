@@ -33,6 +33,7 @@ export interface RawResponseResult {
   status: number;
   headers: Headers;
   data: string;
+  bytes?: Uint8Array;
 }
 
 function isMutationMethod(method: string): boolean {
@@ -71,11 +72,16 @@ function sleepWithJitter(
   });
 }
 
+interface BoundedStreamResult {
+  text: string;
+  bytes: Uint8Array;
+}
+
 async function readBoundedStream(
   response: Response,
   maxBytes: number,
   signal?: AbortSignal
-): Promise<string> {
+): Promise<BoundedStreamResult> {
   const contentLength = response.headers.get("content-length");
   if (contentLength) {
     const parsedLength = parseInt(contentLength, 10);
@@ -89,22 +95,36 @@ async function readBoundedStream(
   }
 
   if (!response.body || typeof response.body.getReader !== "function") {
-    const text = await response.text();
-    const byteLength = new TextEncoder().encode(text).byteLength;
-    if (byteLength > maxBytes) {
-      throw new OversizedResponseError(
-        `Response size exceeds maximum limit of ${maxBytes} bytes`,
-        byteLength,
-        maxBytes
-      );
+    let bytes: Uint8Array;
+    let text: string;
+    if (typeof response.arrayBuffer === "function") {
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > maxBytes) {
+        throw new OversizedResponseError(
+          `Response size exceeds maximum limit of ${maxBytes} bytes`,
+          buffer.byteLength,
+          maxBytes
+        );
+      }
+      bytes = new Uint8Array(buffer);
+      text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } else {
+      text = await response.text();
+      bytes = new TextEncoder().encode(text);
+      if (bytes.byteLength > maxBytes) {
+        throw new OversizedResponseError(
+          `Response size exceeds maximum limit of ${maxBytes} bytes`,
+          bytes.byteLength,
+          maxBytes
+        );
+      }
     }
-    return text;
+    return { text, bytes };
   }
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const chunks: Uint8Array[] = [];
   let totalBytes = 0;
-  let result = "";
 
   try {
     while (true) {
@@ -126,10 +146,17 @@ async function readBoundedStream(
         );
       }
 
-      result += decoder.decode(value, { stream: true });
+      chunks.push(value);
     }
-    result += decoder.decode();
-    return result;
+
+    const combined = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(combined);
+    return { text, bytes: combined };
   } finally {
     try {
       reader.releaseLock?.();
@@ -209,8 +236,8 @@ async function executeWithRetry<T>(
 
         let envelope: SafeErrorEnvelope | null = null;
         try {
-          const errText = await readBoundedStream(response, 64 * 1024, options.signal);
-          envelope = JSON.parse(errText) as SafeErrorEnvelope;
+          const errResult = await readBoundedStream(response, 64 * 1024, options.signal);
+          envelope = JSON.parse(errResult.text) as SafeErrorEnvelope;
         } catch {
           // Keep envelope null if not JSON or read failed
         }
@@ -218,7 +245,7 @@ async function executeWithRetry<T>(
         throw new AdminApiError(response.status, envelope);
       }
 
-      const bodyText = await readBoundedStream(response, maxBytes, options.signal);
+      const streamResult = await readBoundedStream(response, maxBytes, options.signal);
 
       if (getGeneration() !== startGeneration) {
         throw new GenerationMismatchError();
@@ -228,18 +255,19 @@ async function executeWithRetry<T>(
         const rawResult: RawResponseResult = {
           status: response.status,
           headers: response.headers,
-          data: bodyText,
+          data: streamResult.text,
+          bytes: streamResult.bytes,
         };
         return rawResult as unknown as T;
       }
 
       if (options.responseType === "text") {
-        return bodyText as unknown as T;
+        return streamResult.text as unknown as T;
       }
 
       let parsed: unknown;
       try {
-        parsed = JSON.parse(bodyText);
+        parsed = JSON.parse(streamResult.text);
       } catch (err) {
         throw new ValidationError("Failed to parse JSON response from admin API", err);
       }

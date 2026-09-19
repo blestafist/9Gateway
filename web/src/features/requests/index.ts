@@ -8,5 +8,8 @@ export * from "./components/RequestTable";
 export * from "./components/RequestCardList";
 export * from "./components/RequestPagination";
 export * from "./components/RequestFilterBar";
+export * from "./components/RequestMetadataSection";
+export * from "./components/RequestTimeline";
+export * from "./components/RequestDetailView";
 export * from "./RequestsPage";
 export { default } from "./RequestsPage";

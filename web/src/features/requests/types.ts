@@ -55,6 +55,7 @@ export interface RequestBodyContent {
   truncated: boolean;
   content_type: string;
   data: string;
+  bytes?: Uint8Array;
 }
 
 export interface RequestListFilters {

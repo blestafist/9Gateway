@@ -2,12 +2,27 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T173`.
+Done: `T001`-`T174`.
 
-Current: `T174` - build request details and the safe body viewer.
+Current: `T175` - add a safe admin system information API.
 
-Queued: `T175`-`T180`, in dependency order from key/request workflows,
+Queued: `T176`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T174 built request details and the safe body viewer:
+connects `GET /admin/v1/requests/:id` and `GET /admin/v1/requests/:id/bodies/:kind` into
+a detailed, accessible request inspection view below `/ui/requests/:id` with back-navigation
+preserving URL filter state; renders complete request identity, API key, route, model,
+status code, terminal outcome badges, streaming mode, timing and latency waterfall timeline,
+token usage, and cost with strict preservation of null vs explicit zero; lazy loads the
+`BodyViewer` component only upon explicit operator disclosure/action; previews available
+request, response, or stream-aggregation bodies up to 256 KiB with text and hex views,
+original capture size indicators, and truncation warnings; handles binary, NUL bytes,
+gzip compression, SSE fragments, invalid UTF-8, and malicious markup safely without
+HTML injection or remote leaks; offers exact-byte download matching authoritative
+server payload bytes; guarantees captured bodies are never cached in TanStack query cache
+beyond the mounted view, never persisted to web storage or session history, and scrubbed
+upon navigation or unmount; verified by unit, component, lifecycle, navigation, and contract tests.
 
 T173 built the request history explorer:
 connects `GET /admin/v1/requests` into a dense, accessible request explorer below

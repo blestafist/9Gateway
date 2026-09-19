@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { Copy, Check } from "lucide-react";
 import {
   Table,
@@ -29,6 +29,7 @@ export const RequestTable: React.FC<RequestTableProps> = ({
   requests,
   onSelectRequest,
 }) => {
+  const location = useLocation();
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleCopy = (id: string, e: React.MouseEvent) => {
@@ -95,7 +96,10 @@ export const RequestTable: React.FC<RequestTableProps> = ({
                   <TableCell>
                     <div className="gw-request-id-cell">
                       <Link
-                        to={`/requests/${encodeURIComponent(req.request_id)}`}
+                        to={{
+                          pathname: `/requests/${encodeURIComponent(req.request_id)}`,
+                          search: location.search,
+                        }}
                         className="gw-request-id-link"
                         onClick={(e) => e.stopPropagation()}
                         title={req.request_id}

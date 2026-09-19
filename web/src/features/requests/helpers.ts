@@ -1,4 +1,4 @@
-import { RequestRangePreset } from "./types";
+import { RequestBodyKind, RequestRangePreset } from "./types";
 
 export interface RangeBounds {
   after?: string;
@@ -109,4 +109,117 @@ export function formatModes(
   }
 
   return delivered || requested || upstream || "—";
+}
+
+export const MAX_PREVIEW_BYTES = 256 * 1024; // 256 KiB = 262,144 bytes
+
+export function formatBodyKindLabel(kind: RequestBodyKind): string {
+  switch (kind) {
+    case "client_request":
+      return "Client Request";
+    case "upstream_request":
+      return "Upstream Request";
+    case "response":
+      return "Response";
+    default:
+      return kind;
+  }
+}
+
+export function formatRawTextPreview(
+  bytes: Uint8Array,
+  maxBytes = MAX_PREVIEW_BYTES
+): { text: string; isPreviewTruncated: boolean } {
+  const isPreviewTruncated = bytes.length > maxBytes;
+  const slice = isPreviewTruncated ? bytes.subarray(0, maxBytes) : bytes;
+
+  // Use TextDecoder in non-fatal mode to replace invalid sequences with \uFFFD
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const rawText = decoder.decode(slice);
+
+  // Replace NUL bytes with visible representation symbol (U+2400)
+  const safeText = rawText.replace(/\0/g, "\u2400");
+
+  return { text: safeText, isPreviewTruncated };
+}
+
+export function formatHexPreview(
+  bytes: Uint8Array,
+  maxBytes = MAX_PREVIEW_BYTES
+): { hex: string; isPreviewTruncated: boolean } {
+  const isPreviewTruncated = bytes.length > maxBytes;
+  const slice = isPreviewTruncated ? bytes.subarray(0, maxBytes) : bytes;
+
+  const lines: string[] = [];
+  const total = slice.length;
+
+  for (let offset = 0; offset < total; offset += 16) {
+    const chunk = slice.subarray(offset, Math.min(offset + 16, total));
+    const offsetHex = offset.toString(16).padStart(8, "0");
+
+    const byteHexes: string[] = [];
+    let asciiChars = "";
+
+    for (let i = 0; i < 16; i++) {
+      if (i < chunk.length) {
+        const b = chunk[i]!;
+        byteHexes.push(b.toString(16).padStart(2, "0"));
+        asciiChars += b >= 32 && b <= 126 ? String.fromCharCode(b) : ".";
+      } else {
+        byteHexes.push("  ");
+      }
+    }
+
+    // Split 16 bytes into two groups of 8 with double space
+    const firstGroup = byteHexes.slice(0, 8).join(" ");
+    const secondGroup = byteHexes.slice(8, 16).join(" ");
+    const hexGroup = `${firstGroup}  ${secondGroup}`;
+
+    lines.push(`${offsetHex}  ${hexGroup}  |${asciiChars}|`);
+  }
+
+  return { hex: lines.join("\n"), isPreviewTruncated };
+}
+
+export function tryFormatPrettyJson(text: string): {
+  isValid: boolean;
+  pretty: string | null;
+} {
+  if (!text || !text.trim()) {
+    return { isValid: false, pretty: null };
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return { isValid: true, pretty: JSON.stringify(parsed, null, 2) };
+  } catch {
+    return { isValid: false, pretty: null };
+  }
+}
+
+export function downloadBodyBytes(
+  bytes: Uint8Array,
+  filename: string,
+  contentType = "application/octet-stream"
+): void {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return;
+  }
+  const blob = new Blob([bytes as unknown as BlobPart], { type: contentType });
+  if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    try {
+      a.click();
+    } catch {
+      // jsdom environment throws on synthetic anchor navigation
+    }
+    document.body.removeChild(a);
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 1000);
+  }
 }

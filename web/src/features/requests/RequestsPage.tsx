@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
-import { useNavigate, useSearchParams, Link } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient, keepPreviousData, onlineManager } from "@tanstack/react-query";
 import { AlertCircle, WifiOff } from "lucide-react";
 import {
@@ -23,11 +23,12 @@ import { RequestFilterBar } from "./components/RequestFilterBar";
 import { RequestTable } from "./components/RequestTable";
 import { RequestCardList } from "./components/RequestCardList";
 import { RequestPagination } from "./components/RequestPagination";
+import { RequestDetailView } from "./components/RequestDetailView";
 import "./requests.css";
 
 const DEFAULT_PAGE_SIZE = 25;
 
-export const RequestsPage: React.FC = () => {
+const RequestListView: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
@@ -305,9 +306,12 @@ export const RequestsPage: React.FC = () => {
 
   const handleSelectRequest = useCallback(
     (requestId: string) => {
-      navigate(`/requests/${encodeURIComponent(requestId)}`);
+      navigate({
+        pathname: `/requests/${encodeURIComponent(requestId)}`,
+        search: searchParams.toString() ? `?${searchParams.toString()}` : "",
+      });
     },
-    [navigate]
+    [navigate, searchParams]
   );
 
   const loadedRequests = useMemo(() => data?.requests || [], [data?.requests]);
@@ -544,6 +548,14 @@ export const RequestsPage: React.FC = () => {
       </Card>
     </div>
   );
+};
+
+export const RequestsPage: React.FC = () => {
+  const { id } = useParams<{ id?: string }>();
+  if (id) {
+    return <RequestDetailView requestId={id} />;
+  }
+  return <RequestListView />;
 };
 
 export default RequestsPage;
