@@ -231,6 +231,22 @@ func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	if err != nil {
 		return nil, err
 	}
+	admin.completionLogger = completionLogger
+	admin.usageWorker = usageWorker
+	admin.historyWorker = historyWorker
+	if historyWorker != nil {
+		admin.systemLimits.RequestRetentionSeconds = int64(historyWorker.requestRetention / time.Second)
+		admin.systemLimits.BodyRetentionSeconds = int64(historyWorker.bodyRetention / time.Second)
+		admin.telemetryCapacity = cap(historyWorker.queue)
+	}
+	if usageWorker != nil && admin.telemetryCapacity == 0 {
+		admin.telemetryCapacity = cap(usageWorker.queue)
+	}
+	if completionLogger != nil && admin.telemetryCapacity == 0 {
+		admin.telemetryCapacity = cap(completionLogger.queue)
+	}
+	admin.systemLimits.MaxCapturedBodyBytes = tokenConfig.MaxCapturedBodyBytes
+
 	router := routeWithAdmin(proxy, admin, service.auth)
 	handler := newHandlerWithCompletionLoggerAndHistory(completionLogger, historyWorker, usageWorker, router)
 	// The concrete storage repository supplies the database used by readiness.
@@ -238,11 +254,13 @@ func newHandlerWithAdminAndLimitersAndTokenConfigAndTokenLimiterAndUsageObservat
 	// simply have no deep storage check available until an embedder adds one via
 	// WithReadiness.
 	if provider, ok := repository.(interface{ ReadinessDatabase() *storage.DB }); ok {
-		handler = WithReadiness(handler, NewReadiness(ReadinessConfig{
+		readiness := NewReadiness(ReadinessConfig{
 			Database:               provider.ReadinessDatabase(),
 			UpstreamBaseURL:        upstreamBaseURL,
 			UsageObservationWorker: usageWorker,
-		}))
+		})
+		admin.setReadiness(readiness)
+		handler = WithReadiness(handler, readiness)
 	}
 	return handler, nil
 }

@@ -110,12 +110,36 @@ func WithReadiness(next http.Handler, readiness *Readiness) http.Handler {
 			readiness.ServeHTTP(response, request)
 			return
 		}
+		if readiness != nil && readinessFromContext(request.Context()) == nil {
+			request = request.WithContext(withReadinessContext(request.Context(), readiness))
+		}
 		if next != nil {
 			next.ServeHTTP(response, request)
 			return
 		}
 		http.NotFound(response, request)
 	})
+}
+
+type readinessContextKey struct{}
+
+func readinessFromContext(ctx context.Context) *Readiness {
+	if ctx == nil {
+		return nil
+	}
+	r, _ := ctx.Value(readinessContextKey{}).(*Readiness)
+	return r
+}
+
+func readinessFromRequest(request *http.Request) *Readiness {
+	if request == nil {
+		return nil
+	}
+	return readinessFromContext(request.Context())
+}
+
+func withReadinessContext(ctx context.Context, readiness *Readiness) context.Context {
+	return context.WithValue(ctx, readinessContextKey{}, readiness)
 }
 
 type readinessCheck struct {
@@ -131,8 +155,17 @@ type readinessResult struct {
 	commit  string
 }
 
-func (readiness *Readiness) ServeHTTP(response http.ResponseWriter, request *http.Request) {
-	ctx, cancel := context.WithTimeout(request.Context(), readinessTimeout)
+func (readiness *Readiness) Check(ctx context.Context) readinessResult {
+	if readiness == nil {
+		metadata := version.Current()
+		return readinessResult{
+			ready:   false,
+			checks:  readinessUnavailableChecks(),
+			version: metadata.Version,
+			commit:  metadata.Commit,
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, readinessTimeout)
 	defer cancel()
 
 	checks := make(map[string]readinessCheck, 5)
@@ -159,7 +192,19 @@ func (readiness *Readiness) ServeHTTP(response http.ResponseWriter, request *htt
 		ready = false
 		checks["lifecycle"] = failedReadinessCheck("lifecycle", "gateway is shutting down")
 	}
-	writeReadiness(response, readinessResult{ready: ready, checks: checks, version: readiness.version, commit: readiness.commit})
+	return readinessResult{ready: ready, checks: checks, version: readiness.version, commit: readiness.commit}
+}
+
+func (readiness *Readiness) Database() *storage.DB {
+	if readiness == nil {
+		return nil
+	}
+	return readiness.database
+}
+
+func (readiness *Readiness) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	result := readiness.Check(request.Context())
+	writeReadiness(response, result)
 }
 
 func (readiness *Readiness) runCheck(ctx context.Context, name string) readinessCheck {

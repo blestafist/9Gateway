@@ -2,12 +2,24 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T174`.
+Done: `T001`-`T175`.
 
-Current: `T175` - add a safe admin system information API.
+Current: `T176` - build the System and diagnostics page.
 
-Queued: `T176`-`T180`, in dependency order from key/request workflows,
+Queued: `T177`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
+
+T175 added a safe admin system information API:
+connects authenticated `GET /admin/v1/system` returning version, commit, build time,
+uptime, start time, readiness check results, SQLite schema and health, telemetry
+queue depth/capacity and drop counters, active requests, and safe retention and
+body-capture limits; enforces strict allowlist-only serialization ensuring credentials,
+auth pepper, filesystem paths, hostnames, upstream credentials, database contents,
+environment variables, and raw metric labels are never leaked; reuses in-process readiness
+and metrics sources without HTTP self-scraping; bounds execution with context cancellation
+and timeouts; keeps public `/health`, `/ready`, and `/metrics` unaffected; verified by
+authentication, method, parameter validation, healthy, degraded, shutdown, saturated
+telemetry, canary secret leak, cancellation, race, and latency tests.
 
 T174 built request details and the safe body viewer:
 connects `GET /admin/v1/requests/:id` and `GET /admin/v1/requests/:id/bodies/:kind` into

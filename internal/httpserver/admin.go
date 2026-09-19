@@ -26,6 +26,7 @@ import (
 	"github.com/pestit/9gateway/internal/security"
 	"github.com/pestit/9gateway/internal/session"
 	"github.com/pestit/9gateway/internal/storage"
+	"github.com/pestit/9gateway/internal/version"
 )
 
 const adminRequestBodyLimit int64 = 16 * 1024
@@ -487,6 +488,15 @@ func (handler *adminHandler) ServeHTTP(response http.ResponseWriter, request *ht
 		return
 	}
 
+	if request.URL.Path == "/admin/v1/system" {
+		if request.Method != http.MethodGet {
+			writeAdminError(response, http.StatusMethodNotAllowed, gatewayErrorMethodNotAllowed, "method not allowed")
+			return
+		}
+		handler.getSystem(response, request)
+		return
+	}
+
 	if request.URL.Path == "/admin/v1/overview" {
 		if request.Method != http.MethodGet {
 			writeAdminError(response, http.StatusMethodNotAllowed, gatewayErrorMethodNotAllowed, "method not allowed")
@@ -860,6 +870,304 @@ func adminOverviewResponseFromData(data *storage.OverviewData) adminOverviewResp
 		},
 		RecentRequests: recent,
 	}
+}
+
+var processStartTime = time.Now()
+
+// AdminReadinessSummary contains individual and aggregate readiness check outcomes.
+// Semantics: snapshot.
+type AdminReadinessSummary struct {
+	Ready  bool                      `json:"ready"`
+	Checks map[string]readinessCheck `json:"checks"`
+}
+
+// AdminStorageSummary contains SQLite connectivity and schema status.
+// Semantics:
+// - status: snapshot string ("healthy", "degraded", or "unavailable")
+// - healthy: snapshot boolean
+// - schema_version: nullable snapshot integer (*int, null if closed or unavailable)
+// - current_schema_version: snapshot integer (expected schema version)
+type AdminStorageSummary struct {
+	Status               string `json:"status"`
+	Healthy              bool   `json:"healthy"`
+	SchemaVersion        *int   `json:"schema_version"`
+	CurrentSchemaVersion int    `json:"current_schema_version"`
+}
+
+// AdminTelemetrySummary contains telemetry queue pressure and drop counters.
+// Semantics:
+// - queue_depth: snapshot gauge integer
+// - queue_capacity: snapshot integer
+// - dropped_records: monotonic counter int64
+type AdminTelemetrySummary struct {
+	QueueDepth     int   `json:"queue_depth"`
+	QueueCapacity  int   `json:"queue_capacity"`
+	DroppedRecords int64 `json:"dropped_records"`
+}
+
+// AdminSystemLimits contains safe operational limits.
+// Semantics: snapshot.
+type AdminSystemLimits struct {
+	RequestRetentionSeconds int64 `json:"request_retention_seconds"`
+	BodyRetentionSeconds    int64 `json:"body_retention_seconds"`
+	MaxCapturedBodyBytes    int64 `json:"max_captured_body_bytes"`
+}
+
+// AdminSystemResponse represents the allowlisted GET /admin/v1/system response payload.
+// All fields have typed, stable semantics:
+// - version: snapshot string ("dev" or SemVer)
+// - commit: snapshot string (7-character commit or "unknown")
+// - build_time: snapshot RFC3339 string or "unknown"
+// - build_date: snapshot RFC3339 string or "unknown" (alias for build_time)
+// - start_time: snapshot RFC3339 timestamp (process startup instant)
+// - uptime_seconds: monotonic non-negative int64 (seconds since start_time)
+// - ready: snapshot boolean (overall readiness status)
+// - readiness: snapshot AdminReadinessSummary
+// - storage: snapshot AdminStorageSummary
+// - sqlite: snapshot AdminStorageSummary (alias for storage)
+// - telemetry: snapshot AdminTelemetrySummary
+// - active_requests: snapshot gauge int64 (>= 0)
+// - limits: snapshot AdminSystemLimits
+type AdminSystemResponse struct {
+	Version        string                `json:"version"`
+	Commit         string                `json:"commit"`
+	BuildTime      string                `json:"build_time"`
+	BuildDate      string                `json:"build_date"`
+	StartTime      string                `json:"start_time"`
+	UptimeSeconds  int64                 `json:"uptime_seconds"`
+	Ready          bool                  `json:"ready"`
+	Readiness      AdminReadinessSummary `json:"readiness"`
+	Storage        AdminStorageSummary   `json:"storage"`
+	SQLite         AdminStorageSummary   `json:"sqlite"`
+	Telemetry      AdminTelemetrySummary `json:"telemetry"`
+	ActiveRequests int64                 `json:"active_requests"`
+	Limits         AdminSystemLimits     `json:"limits"`
+}
+
+func inspectStorage(ctx context.Context, database *storage.DB) AdminStorageSummary {
+	expectedVersion := storage.CurrentSchemaVersion
+	if database == nil {
+		return AdminStorageSummary{
+			Status:               "unavailable",
+			Healthy:              false,
+			SchemaVersion:        nil,
+			CurrentSchemaVersion: expectedVersion,
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+
+	var schemaVersion int
+	if err := database.QueryRowContext(ctx, "PRAGMA user_version").Scan(&schemaVersion); err != nil {
+		return AdminStorageSummary{
+			Status:               "unavailable",
+			Healthy:              false,
+			SchemaVersion:        nil,
+			CurrentSchemaVersion: expectedVersion,
+		}
+	}
+
+	var ping int
+	if err := database.QueryRowContext(ctx, "SELECT 1").Scan(&ping); err != nil || ping != 1 {
+		return AdminStorageSummary{
+			Status:               "unavailable",
+			Healthy:              false,
+			SchemaVersion:        &schemaVersion,
+			CurrentSchemaVersion: expectedVersion,
+		}
+	}
+
+	if schemaVersion != expectedVersion {
+		return AdminStorageSummary{
+			Status:               "degraded",
+			Healthy:              false,
+			SchemaVersion:        &schemaVersion,
+			CurrentSchemaVersion: expectedVersion,
+		}
+	}
+
+	return AdminStorageSummary{
+		Status:               "healthy",
+		Healthy:              true,
+		SchemaVersion:        &schemaVersion,
+		CurrentSchemaVersion: expectedVersion,
+	}
+}
+
+func (handler *adminHandler) inspectTelemetry(request *http.Request) AdminTelemetrySummary {
+	depth := 0
+	capacity := handler.telemetryCapacity
+	var dropped int64
+
+	if handler.completionLogger != nil {
+		depth += len(handler.completionLogger.queue)
+		if capacity == 0 {
+			capacity = cap(handler.completionLogger.queue)
+		}
+		dropped += int64(handler.completionLogger.dropped.Load())
+	}
+	if handler.usageWorker != nil {
+		depth += handler.usageWorker.Pending()
+		if capacity == 0 {
+			capacity = cap(handler.usageWorker.queue)
+		}
+		dropped += int64(handler.usageWorker.Dropped())
+	}
+	if handler.historyWorker != nil {
+		depth += handler.historyWorker.Pending()
+		if capacity == 0 {
+			capacity = cap(handler.historyWorker.queue)
+		}
+		dropped += int64(handler.historyWorker.Dropped())
+	}
+
+	if metrics := metricsFromRequest(request); metrics != nil {
+		if depth == 0 {
+			depth = metrics.queueDepth()
+		}
+		metricDrops := int64(metrics.telemetry.values[1].Load())
+		if metricDrops > dropped {
+			dropped = metricDrops
+		}
+	}
+	if handler.metrics != nil {
+		if depth == 0 {
+			depth = handler.metrics.queueDepth()
+		}
+		metricDrops := int64(handler.metrics.telemetry.values[1].Load())
+		if metricDrops > dropped {
+			dropped = metricDrops
+		}
+	}
+
+	return AdminTelemetrySummary{
+		QueueDepth:     depth,
+		QueueCapacity:  capacity,
+		DroppedRecords: dropped,
+	}
+}
+
+func (handler *adminHandler) getSystem(response http.ResponseWriter, request *http.Request) {
+	if !handler.authenticate(response, request) {
+		return
+	}
+	if request.Context().Err() != nil {
+		return
+	}
+	query, err := adminQuery(request)
+	if err != nil {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "invalid request parameters")
+		return
+	}
+	if len(query) > 0 {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request", "unsupported query parameter")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	defer cancel()
+
+	readiness := readinessFromRequest(request)
+	if readiness == nil {
+		readiness = handler.readiness
+	}
+
+	var readinessRes readinessResult
+	var db *storage.DB
+	if readiness != nil {
+		readinessRes = readiness.Check(ctx)
+		db = readiness.Database()
+	} else {
+		metadata := version.Current()
+		readinessRes = readinessResult{
+			ready:   false,
+			checks:  readinessUnavailableChecks(),
+			version: metadata.Version,
+			commit:  metadata.Commit,
+		}
+	}
+	if db == nil && handler.service != nil && handler.service.repository != nil {
+		if provider, ok := handler.service.repository.(interface{ ReadinessDatabase() *storage.DB }); ok {
+			db = provider.ReadinessDatabase()
+		}
+	}
+
+	storageSummary := inspectStorage(ctx, db)
+	if check, ok := readinessRes.checks["sqlite"]; ok && check.Status != "pass" {
+		storageSummary.Healthy = false
+		if storageSummary.Status == "healthy" {
+			storageSummary.Status = "unavailable"
+		}
+	}
+	if check, ok := readinessRes.checks["schema"]; ok && check.Status != "pass" {
+		storageSummary.Healthy = false
+		if storageSummary.Status == "healthy" {
+			storageSummary.Status = "degraded"
+		}
+	}
+
+	metadata := version.Current()
+	versionStr := metadata.Version
+	commitStr := metadata.Commit
+	buildTimeStr := metadata.BuildDate
+	if readinessRes.version != "" && readinessRes.version != "dev" {
+		versionStr = readinessRes.version
+	}
+	if readinessRes.commit != "" && readinessRes.commit != "unknown" {
+		commitStr = readinessRes.commit
+	}
+
+	startTime := handler.startTime
+	if startTime.IsZero() {
+		startTime = processStartTime
+	}
+	uptime := int64(time.Since(startTime).Seconds())
+	if uptime < 0 {
+		uptime = 0
+	}
+
+	var activeRequests int64
+	if metrics := metricsFromRequest(request); metrics != nil {
+		activeRequests = metrics.active.Load()
+		if activeRequests < 0 {
+			activeRequests = 0
+		}
+	}
+
+	telemetrySummary := handler.inspectTelemetry(request)
+
+	limits := handler.systemLimits
+	if limits.RequestRetentionSeconds == 0 {
+		limits.RequestRetentionSeconds = 2592000
+	}
+	if limits.BodyRetentionSeconds == 0 {
+		limits.BodyRetentionSeconds = 604800
+	}
+
+	systemResp := AdminSystemResponse{
+		Version:       versionStr,
+		Commit:        commitStr,
+		BuildTime:     buildTimeStr,
+		BuildDate:     buildTimeStr,
+		StartTime:     startTime.UTC().Format(time.RFC3339),
+		UptimeSeconds: uptime,
+		Ready:         readinessRes.ready,
+		Readiness: AdminReadinessSummary{
+			Ready:  readinessRes.ready,
+			Checks: readinessRes.checks,
+		},
+		Storage:        storageSummary,
+		SQLite:         storageSummary,
+		Telemetry:      telemetrySummary,
+		ActiveRequests: activeRequests,
+		Limits:         limits,
+	}
+
+	if request.Context().Err() != nil {
+		return
+	}
+
+	writeAdminJSON(response, http.StatusOK, systemResp)
 }
 
 func (handler *adminHandler) getOverview(response http.ResponseWriter, request *http.Request) {
@@ -1432,6 +1740,15 @@ type adminHandler struct {
 	usageTimeseriesCoordinator *analytics.Coordinator[*storage.UsageTimeseriesData]
 	usageBreakdownCoordinator  *analytics.Coordinator[*storage.UsageBreakdownData]
 	sessionInitOnce            sync.Once
+
+	startTime         time.Time
+	readiness         *Readiness
+	metrics           *gatewayMetrics
+	completionLogger  *CompletionLogger
+	usageWorker       *UsageObservationWorker
+	historyWorker     *HistoryPersistenceWorker
+	systemLimits      AdminSystemLimits
+	telemetryCapacity int
 }
 
 func newAdminHandler(credential string, service *adminKeyService) (*adminHandler, error) {
@@ -1444,6 +1761,19 @@ func newAdminHandler(credential string, service *adminKeyService) (*adminHandler
 		trustedProxies = proxies
 	}
 	gate := analytics.NewGate(2)
+	limits := AdminSystemLimits{
+		RequestRetentionSeconds: 2592000,
+		BodyRetentionSeconds:    604800,
+		MaxCapturedBodyBytes:    0,
+	}
+	var readiness *Readiness
+	if service != nil && service.repository != nil {
+		if provider, ok := service.repository.(interface{ ReadinessDatabase() *storage.DB }); ok {
+			readiness = NewReadiness(ReadinessConfig{
+				Database: provider.ReadinessDatabase(),
+			})
+		}
+	}
 	return &adminHandler{
 		credential:                 credential,
 		service:                    service,
@@ -1454,7 +1784,32 @@ func newAdminHandler(credential string, service *adminKeyService) (*adminHandler
 		analyticsCoordinator:       analytics.NewCoordinatorWithGate[*storage.OverviewData](gate, 32, 15*time.Second),
 		usageTimeseriesCoordinator: analytics.NewCoordinatorWithGate[*storage.UsageTimeseriesData](gate, 32, 15*time.Second),
 		usageBreakdownCoordinator:  analytics.NewCoordinatorWithGate[*storage.UsageBreakdownData](gate, 32, 15*time.Second),
+		startTime:                  processStartTime,
+		readiness:                  readiness,
+		systemLimits:               limits,
+		telemetryCapacity:          128,
 	}, nil
+}
+
+func (handler *adminHandler) setReadiness(readiness *Readiness) {
+	handler.readiness = readiness
+}
+
+func (handler *adminHandler) setStartTime(t time.Time) {
+	handler.startTime = t
+}
+
+func (handler *adminHandler) setSystemLimits(limits AdminSystemLimits) {
+	handler.systemLimits = limits
+}
+
+func (handler *adminHandler) setTelemetryWorkers(logger *CompletionLogger, usage *UsageObservationWorker, history *HistoryPersistenceWorker, capacity int) {
+	handler.completionLogger = logger
+	handler.usageWorker = usage
+	handler.historyWorker = history
+	if capacity > 0 {
+		handler.telemetryCapacity = capacity
+	}
 }
 
 var (
