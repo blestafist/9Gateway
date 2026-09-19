@@ -9,6 +9,12 @@ Current: `T176` - build the System and diagnostics page.
 Queued: `T177`-`T180`, in dependency order from key/request workflows,
 quality gates, and release integration.
 
+Review fixes for T171-T175:
+addressed review findings across admin system telemetry & readiness constructor semantics,
+custom key expiry UTC datetime-local handling and validation, RequestDetailView direct
+download errors surfaced via toast and accessible alerts, BodyViewer view mode fallback
+on kind/content switching, and toast close styling.
+
 T175 added a safe admin system information API:
 connects authenticated `GET /admin/v1/system` returning version, commit, build time,
 uptime, start time, readiness check results, SQLite schema and health, telemetry

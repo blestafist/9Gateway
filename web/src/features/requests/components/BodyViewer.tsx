@@ -115,30 +115,36 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
     return tryFormatPrettyJson(bodyContent.data);
   }, [bodyContent]);
 
-  // Default to JSON tab if valid JSON on initial load
+  // Fall back to text preview if viewMode is json but content is not valid JSON (e.g. tab switch)
+  const activeViewMode: ViewMode =
+    viewMode === "json" && !jsonResult.isValid ? "text" : viewMode;
+
+  // Default to JSON tab if valid JSON on load or tab switch, or fallback to text if non-JSON
   useEffect(() => {
     if (jsonResult.isValid && viewMode === "text") {
       setViewMode("json");
+    } else if (!jsonResult.isValid && viewMode === "json") {
+      setViewMode("text");
     }
-  }, [jsonResult.isValid]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedKind, jsonResult.isValid]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleDownload = useCallback(() => {
     if (!bodyContent) return;
     const ext =
-      jsonResult.isValid && viewMode === "json"
+      jsonResult.isValid && activeViewMode === "json"
         ? "json"
         : bodyContent.content_type.includes("json")
           ? "json"
           : "bin";
     const filename = `request-${truncateId(requestId)}-${selectedKind}.${ext}`;
     downloadBodyBytes(rawBytes, filename, bodyContent.content_type);
-  }, [bodyContent, jsonResult.isValid, viewMode, requestId, selectedKind, rawBytes]);
+  }, [bodyContent, jsonResult.isValid, activeViewMode, requestId, selectedKind, rawBytes]);
 
   const handleCopyText = useCallback(() => {
     const textToCopy =
-      viewMode === "json" && jsonResult.pretty
+      activeViewMode === "json" && jsonResult.pretty
         ? jsonResult.pretty
-        : viewMode === "hex"
+        : activeViewMode === "hex"
           ? hexPreview.hex
           : textPreview.text;
 
@@ -147,7 +153,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
-  }, [viewMode, jsonResult.pretty, hexPreview.hex, textPreview.text]);
+  }, [activeViewMode, jsonResult.pretty, hexPreview.hex, textPreview.text]);
 
   const isEmpty = rawBytes.length === 0;
 
@@ -280,7 +286,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   aria-label="Preview representation"
                 >
                   <Button
-                    variant={viewMode === "text" ? "primary" : "ghost"}
+                    variant={activeViewMode === "text" ? "primary" : "ghost"}
                     size="sm"
                     leftIcon={<FileText size={13} />}
                     onClick={() => setViewMode("text")}
@@ -289,7 +295,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                     Raw Text
                   </Button>
                   <Button
-                    variant={viewMode === "hex" ? "primary" : "ghost"}
+                    variant={activeViewMode === "hex" ? "primary" : "ghost"}
                     size="sm"
                     leftIcon={<Binary size={13} />}
                     onClick={() => setViewMode("hex")}
@@ -299,7 +305,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   </Button>
                   {jsonResult.isValid && (
                     <Button
-                      variant={viewMode === "json" ? "primary" : "ghost"}
+                      variant={activeViewMode === "json" ? "primary" : "ghost"}
                       size="sm"
                       leftIcon={<Code2 size={13} />}
                       onClick={() => setViewMode("json")}
@@ -365,7 +371,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
             {/* Code Previews: NEVER inject HTML, pure React text child */}
             {!isEmpty && (
               <div className="gw-body-pre-container" data-testid="body-preview-container">
-                {viewMode === "text" && (
+                {activeViewMode === "text" && (
                   <pre
                     className="gw-body-pre"
                     tabIndex={0}
@@ -375,7 +381,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   </pre>
                 )}
 
-                {viewMode === "hex" && (
+                {activeViewMode === "hex" && (
                   <pre
                     className="gw-body-pre gw-body-hex-pre"
                     tabIndex={0}
@@ -385,7 +391,7 @@ export const BodyViewer: React.FC<BodyViewerProps> = ({
                   </pre>
                 )}
 
-                {viewMode === "json" && jsonResult.pretty && (
+                {activeViewMode === "json" && jsonResult.pretty && (
                   <pre
                     className="gw-body-pre"
                     tabIndex={0}

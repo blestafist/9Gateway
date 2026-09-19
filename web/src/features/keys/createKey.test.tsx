@@ -2,8 +2,15 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { KeysPage } from "./KeysPage";
-import { computeExpiresAt } from "./components/CreateKeyDialog";
-import { generateKeyDownloadFilename, downloadKeySecret } from "./helpers";
+import {
+  computeExpiresAt,
+  parseCustomExpiryToMs,
+  validateCustomExpiry,
+} from "./components/CreateKeyDialog";
+import {
+  generateKeyDownloadFilename,
+  downloadKeySecret,
+} from "./helpers";
 import { AdminQueryProvider, createAdminQueryClient } from "../../shared/query";
 import { AuthContext, AuthContextValue } from "../auth";
 import createKeyFixture from "./fixtures/createKey.fixture.json";
@@ -78,6 +85,61 @@ describe("T171 Key Creation Helpers", () => {
 
     const expCustom = computeExpiresAt("custom", "2032-06-15T14:30:00Z");
     expect(expCustom).toBe("2032-06-15T14:30:00Z");
+  });
+
+  it("parses realistic timezone-less datetime-local values explicitly as UTC without breaking offset/Z inputs", () => {
+    // Realistic browser datetime-local format: "YYYY-MM-DDTHH:mm" (no timezone/Z indicator)
+    const realisticNoZ = "2032-06-15T14:30";
+    expect(parseCustomExpiryToMs(realisticNoZ)).toBe(Date.UTC(2032, 5, 15, 14, 30, 0));
+    expect(computeExpiresAt("custom", realisticNoZ)).toBe("2032-06-15T14:30:00Z");
+
+    // Realistic datetime-local format with seconds: "YYYY-MM-DDTHH:mm:ss"
+    const realisticNoZWithSec = "2032-06-15T14:30:45";
+    expect(parseCustomExpiryToMs(realisticNoZWithSec)).toBe(Date.UTC(2032, 5, 15, 14, 30, 45));
+    expect(computeExpiresAt("custom", realisticNoZWithSec)).toBe("2032-06-15T14:30:45Z");
+
+    // Whitespace-separated datetime without timezone (e.g. manual paste "YYYY-MM-DD HH:mm")
+    const realisticSpaceNoZ = "2032-06-15 14:30";
+    expect(parseCustomExpiryToMs(realisticSpaceNoZ)).toBe(Date.UTC(2032, 5, 15, 14, 30, 0));
+    expect(computeExpiresAt("custom", realisticSpaceNoZ)).toBe("2032-06-15T14:30:00Z");
+
+    // Already offset/Z inputs must retain their specified timezone offset
+    expect(computeExpiresAt("custom", "2032-06-15T14:30:00Z")).toBe("2032-06-15T14:30:00Z");
+    expect(computeExpiresAt("custom", "2032-06-15T14:30:00+02:00")).toBe("2032-06-15T12:30:00Z");
+    expect(computeExpiresAt("custom", "2032-06-15T14:30:00-05:00")).toBe("2032-06-15T19:30:00Z");
+  });
+
+  it("enforces custom expiration validation semantics in UTC against reference timestamps", () => {
+    const fixedNowMs = Date.UTC(2026, 5, 15, 12, 0, 0); // 2026-06-15T12:00:00Z
+
+    // Empty or whitespace
+    expect(validateCustomExpiry("", fixedNowMs)).toBe("Please enter an expiration date and time.");
+    expect(validateCustomExpiry("   ", fixedNowMs)).toBe("Please enter an expiration date and time.");
+
+    // Malformed input
+    expect(validateCustomExpiry("invalid-date", fixedNowMs)).toBe("Invalid expiration date format.");
+
+    // Realistic no-Z value strictly in the past relative to UTC reference
+    expect(validateCustomExpiry("2026-06-15T11:59", fixedNowMs)).toBe(
+      "Expiration date must be in the future."
+    );
+
+    // Realistic no-Z value matching exact reference time (boundary check)
+    expect(validateCustomExpiry("2026-06-15T12:00", fixedNowMs)).toBe(
+      "Expiration date must be in the future."
+    );
+
+    // Realistic no-Z value strictly in the future relative to UTC reference
+    expect(validateCustomExpiry("2026-06-15T12:01", fixedNowMs)).toBeNull();
+    expect(validateCustomExpiry("2032-06-15T14:30", fixedNowMs)).toBeNull();
+
+    // Explicit timezone offsets evaluated accurately relative to UTC
+    // 15:00+04:00 is 11:00:00 UTC (past)
+    expect(validateCustomExpiry("2026-06-15T15:00+04:00", fixedNowMs)).toBe(
+      "Expiration date must be in the future."
+    );
+    // 17:00+04:00 is 13:00:00 UTC (future)
+    expect(validateCustomExpiry("2026-06-15T17:00+04:00", fixedNowMs)).toBeNull();
   });
 });
 
@@ -299,6 +361,53 @@ describe("T171 CreateKeyDialog and Lifecycle", () => {
       expect.stringContaining("/admin/v1/keys"),
       expect.objectContaining({ method: "POST" })
     );
+  });
+
+  it("submits custom expiration with realistic no-Z datetime-local input and sends exact UTC payload", async () => {
+    renderKeysPage();
+
+    fireEvent.click(screen.getByTestId("open-create-key-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("create-key-form")).toBeInTheDocument();
+    });
+
+    const nameInput = screen.getByTestId("create-key-name-input");
+    fireEvent.change(nameInput, { target: { value: "UTC Custom Key" } });
+
+    // Select custom expiry mode
+    const expirySelect = screen.getByTestId("create-key-expiry-select");
+    fireEvent.change(expirySelect, { target: { value: "custom" } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("create-key-custom-expiry-input")).toBeInTheDocument();
+    });
+
+    // Enter realistic browser datetime-local value (no Z / no timezone offset)
+    const customExpiryInput = screen.getByTestId("create-key-custom-expiry-input");
+    fireEvent.change(customExpiryInput, { target: { value: "2032-06-15T14:30" } });
+
+    const submitBtn = screen.getByTestId("create-key-submit-btn");
+    fireEvent.click(submitBtn);
+
+    // Verify exact UTC payload in POST request
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/admin/v1/keys"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            name: "UTC Custom Key",
+            expires_at: "2032-06-15T14:30:00Z",
+          }),
+        })
+      );
+    });
+
+    // Enters success credential handoff
+    await waitFor(() => {
+      expect(screen.getByTestId("secret-handoff-step")).toBeInTheDocument();
+    });
   });
 
   it("prevents duplicate submit and shows explicit submit progress", async () => {

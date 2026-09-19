@@ -19,6 +19,7 @@ import {
   Alert,
   EmptyState,
   Skeleton,
+  useToast,
 } from "../../../shared/ui";
 import { getRequestDetail, getRequestBody } from "../api";
 import { requestQueryKeys } from "../queryKeys";
@@ -29,6 +30,63 @@ import { RequestTimeline } from "./RequestTimeline";
 
 // Lazy-load BodyViewer only when explicitly opened by the operator
 const LazyBodyViewer = lazy(() => import("./BodyViewer"));
+
+export function getBodyDownloadErrorMessage(err: unknown): { title: string; message: string } {
+  const status =
+    err && typeof err === "object" && "status" in err
+      ? (err as { status?: number }).status
+      : undefined;
+
+  const errName =
+    err && typeof err === "object" && "name" in err
+      ? (err as { name?: string }).name
+      : undefined;
+
+  const errMsg =
+    err instanceof Error
+      ? err.message
+      : typeof err === "string"
+        ? err
+        : "";
+
+  if (status === 404) {
+    return {
+      title: "Body Not Found",
+      message:
+        "Captured body not found. It may have been removed by history retention or was never captured.",
+    };
+  }
+
+  if (
+    errName === "OversizedResponseError" ||
+    errMsg.toLowerCase().includes("oversized") ||
+    errMsg.toLowerCase().includes("exceed") ||
+    errMsg.toLowerCase().includes("too large")
+  ) {
+    return {
+      title: "Body Exceeds Download Limit",
+      message: "Captured body exceeds the maximum allowed payload download size.",
+    };
+  }
+
+  if (
+    errName === "OfflineError" ||
+    errName === "NetworkError" ||
+    errMsg.toLowerCase().includes("network") ||
+    errMsg.toLowerCase().includes("offline") ||
+    errMsg.toLowerCase().includes("failed to fetch")
+  ) {
+    return {
+      title: "Network Error",
+      message: "Unable to download captured body due to a network connection error.",
+    };
+  }
+
+  return {
+    title: "Download Failed",
+    message: errMsg || "Failed to load captured body from the gateway admin service.",
+  };
+}
 
 export interface RequestDetailViewProps {
   requestId: string;
@@ -78,12 +136,19 @@ export const RequestDetailView: React.FC<RequestDetailViewProps> = ({
     },
   });
 
+  const toast = useToast();
+
   // Body viewer lazy-load toggle & selected kind
   const [activeBodyKind, setActiveBodyKind] = useState<RequestBodyKind | null>(null);
   const [isBodyViewerOpen, setIsBodyViewerOpen] = useState(false);
 
-  // Direct download state without opening viewer
+  // Direct download state and error feedback without opening viewer
   const [downloadingKind, setDownloadingKind] = useState<RequestBodyKind | null>(null);
+  const [downloadError, setDownloadError] = useState<{
+    kind: RequestBodyKind;
+    title: string;
+    message: string;
+  } | null>(null);
 
   const handleOpenBodyViewer = (kind: RequestBodyKind) => {
     setActiveBodyKind(kind);
@@ -97,14 +162,25 @@ export const RequestDetailView: React.FC<RequestDetailViewProps> = ({
 
   const handleDirectDownload = async (kind: RequestBodyKind) => {
     setDownloadingKind(kind);
+    setDownloadError(null);
     try {
       const content = await getRequestBody(requestId, kind);
       const rawBytes = content.bytes ?? new TextEncoder().encode(content.data);
       const ext = content.content_type.includes("json") ? "json" : "bin";
       const filename = `request-${truncateId(requestId)}-${kind}.${ext}`;
       downloadBodyBytes(rawBytes, filename, content.content_type);
-    } catch {
-      // Direct download error handling is caught gracefully
+    } catch (err: unknown) {
+      const feedback = getBodyDownloadErrorMessage(err);
+      setDownloadError({
+        kind,
+        title: feedback.title,
+        message: feedback.message,
+      });
+      toast.show({
+        title: feedback.title,
+        description: feedback.message,
+        variant: "danger",
+      });
     } finally {
       setDownloadingKind(null);
     }
@@ -270,6 +346,18 @@ export const RequestDetailView: React.FC<RequestDetailViewProps> = ({
             </CardHeader>
 
             <CardContent>
+              {downloadError && (
+                <Alert
+                  variant="danger"
+                  title={downloadError.title}
+                  onClose={() => setDownloadError(null)}
+                  data-testid="body-download-error-alert"
+                  className="gw-body-download-alert"
+                >
+                  {downloadError.message}
+                </Alert>
+              )}
+
               {detail.has_bodies.length === 0 ? (
                 <div
                   className="gw-no-bodies-notice gw-table-dimmed"

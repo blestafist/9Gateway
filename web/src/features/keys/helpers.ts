@@ -175,3 +175,44 @@ export function downloadKeySecret(filename: string, secret: string): void {
   }
 }
 
+/**
+ * Parses a custom expiration date string into epoch milliseconds.
+ * If the input has a time component but lacks an explicit timezone (e.g. standard datetime-local "YYYY-MM-DDTHH:mm"),
+ * it is explicitly interpreted as UTC rather than browser local time.
+ * If the input already contains a timezone offset (e.g. "Z", "+02:00", "-05:00"), it is parsed preserving that offset.
+ */
+export function parseCustomExpiryToMs(customVal: string): number {
+  const trimmed = customVal.trim();
+  if (!trimmed) {
+    return NaN;
+  }
+  const hasTime = /[T\s]\d{1,2}:\d{2}/.test(trimmed);
+  const hasTimezone = hasTime && /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(trimmed);
+
+  let parseable = trimmed;
+  if (hasTime && !hasTimezone) {
+    parseable = trimmed.replace(/^(\d{4}-\d{2}-\d{2})\s+/, "$1T") + "Z";
+  }
+  return new Date(parseable).getTime();
+}
+
+/**
+ * Validates a custom expiration date string.
+ * Returns an error message string if invalid, or null if valid.
+ */
+export function validateCustomExpiry(customVal: string, nowMs: number = Date.now()): string | null {
+  const trimmed = customVal.trim();
+  if (!trimmed) {
+    return "Please enter an expiration date and time.";
+  }
+  const time = parseCustomExpiryToMs(trimmed);
+  if (Number.isNaN(time)) {
+    return "Invalid expiration date format.";
+  }
+  if (time <= nowMs) {
+    return "Expiration date must be in the future.";
+  }
+  return null;
+}
+
+

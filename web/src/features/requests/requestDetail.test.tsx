@@ -3,6 +3,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { onlineManager } from "@tanstack/react-query";
 import { AdminQueryProvider, createAdminQueryClient } from "../../shared/query";
+import { ToastProvider } from "../../shared/ui";
+import { OversizedResponseError } from "../../shared/transport/errors";
 import { RequestsPage } from "./RequestsPage";
 import { AdminRequestDetail } from "./types";
 import { downloadBodyBytes } from "./helpers";
@@ -75,14 +77,16 @@ function renderRequestDetail(initialUrl: string) {
   const queryClient = createAdminQueryClient();
   return render(
     <AdminQueryProvider client={queryClient}>
-      <MemoryRouter initialEntries={[initialUrl]}>
-        <Routes>
-          <Route path="/requests" element={<div data-testid="requests-list-target">Requests List</div>} />
-          <Route path="/requests/:id" element={<RequestsPage />} />
-          <Route path="/keys/:id" element={<div data-testid="key-detail-target">Key Detail</div>} />
-          <Route path="/login" element={<div data-testid="login-target">Login Page</div>} />
-        </Routes>
-      </MemoryRouter>
+      <ToastProvider>
+        <MemoryRouter initialEntries={[initialUrl]}>
+          <Routes>
+            <Route path="/requests" element={<div data-testid="requests-list-target">Requests List</div>} />
+            <Route path="/requests/:id" element={<RequestsPage />} />
+            <Route path="/keys/:id" element={<div data-testid="key-detail-target">Key Detail</div>} />
+            <Route path="/login" element={<div data-testid="login-target">Login Page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
     </AdminQueryProvider>
   );
 }
@@ -735,6 +739,186 @@ describe("T174 Request Details and Safe Body Viewer", () => {
       expect(pre.querySelectorAll("script")).toHaveLength(0);
       expect(pre.querySelectorAll("img")).toHaveLength(0);
       expect(pre.querySelectorAll("b")).toHaveLength(0);
+    });
+
+    it("falls back to text view rather than blank when switching from JSON-valid body kind to non-JSON body while viewMode is json", async () => {
+      const jsonPayload = '{"prompt":"hello world","model":"gpt-4o"}';
+      const ssePayload = "data: {\"chunk\":1}\n\ndata: [DONE]\n\n";
+
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+          return mockJsonResponse(baseRequestDetail);
+        }
+        if (urlStr.includes("/bodies/client_request")) {
+          return mockOctetStreamResponse(jsonPayload, jsonPayload.length, false, "application/json");
+        }
+        if (urlStr.includes("/bodies/response")) {
+          return mockOctetStreamResponse(ssePayload, ssePayload.length, false, "text/event-stream");
+        }
+        return new Response("Not found", { status: 404 });
+      });
+
+      renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+
+      // Open client_request (valid JSON)
+      fireEvent.click(await screen.findByTestId("open-body-client_request-btn"));
+
+      // JSON preview is active initially
+      const jsonPre = await screen.findByTestId("body-pre-json");
+      expect(jsonPre).toBeInTheDocument();
+      expect(jsonPre).toHaveTextContent('"prompt": "hello world"');
+      expect(screen.getByTestId("view-mode-json")).toHaveClass("gw-btn--primary");
+
+      // Switch to response (non-JSON SSE stream)
+      fireEvent.click(screen.getByTestId("body-tab-response"));
+
+      // Regression check: preview must NOT be blank, must fall back to text view
+      const textPre = await screen.findByTestId("body-pre-text");
+      expect(textPre).toBeInTheDocument();
+      expect(textPre).toHaveTextContent("data: [DONE]");
+      expect(screen.queryByTestId("body-pre-json")).not.toBeInTheDocument();
+      expect(screen.getByTestId("view-mode-text")).toHaveClass("gw-btn--primary");
+      expect(screen.queryByTestId("view-mode-json")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Direct Body Download Error Feedback", () => {
+    it("surfaces accessible user feedback when direct body download fails due to retention 404", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+          return mockJsonResponse(baseRequestDetail);
+        }
+        if (urlStr.includes("/bodies/client_request")) {
+          return new Response(
+            JSON.stringify({ error: { message: "Body pruned by retention", code: "not_found" } }),
+            { status: 404, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      });
+
+      renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+
+      const downloadBtn = await screen.findByTestId("download-body-client_request-btn");
+      fireEvent.click(downloadBtn);
+
+      // Accessible Alert banner is surfaced
+      const alert = await screen.findByTestId("body-download-error-alert");
+      expect(alert).toBeInTheDocument();
+      expect(alert).toHaveAttribute("role", "alert");
+      expect(alert).toHaveTextContent("Body Not Found");
+      expect(alert).toHaveTextContent("history retention");
+
+      // Shared Toast notification is also surfaced with role="alert"
+      const toastItem = await screen.findByTestId("toast-item");
+      expect(toastItem).toBeInTheDocument();
+      expect(toastItem).toHaveAttribute("role", "alert");
+      expect(toastItem).toHaveTextContent("Body Not Found");
+    });
+
+    it("surfaces accessible user feedback when direct body download fails due to oversized payload", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+          return mockJsonResponse(baseRequestDetail);
+        }
+        if (urlStr.includes("/bodies/client_request")) {
+          throw new OversizedResponseError("Captured body exceeds 10MB limit", 15000000, 10000000);
+        }
+        return new Response("Not found", { status: 404 });
+      });
+
+      renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+
+      const downloadBtn = await screen.findByTestId("download-body-client_request-btn");
+      fireEvent.click(downloadBtn);
+
+      const alert = await screen.findByTestId("body-download-error-alert");
+      expect(alert).toBeInTheDocument();
+      expect(alert).toHaveAttribute("role", "alert");
+      expect(alert).toHaveTextContent("Body Exceeds Download Limit");
+      expect(alert).toHaveTextContent("maximum allowed payload download size");
+    });
+
+    it("surfaces accessible user feedback when direct body download fails due to network failure", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+          return mockJsonResponse(baseRequestDetail);
+        }
+        if (urlStr.includes("/bodies/client_request")) {
+          throw new TypeError("Failed to fetch");
+        }
+        return new Response("Not found", { status: 404 });
+      });
+
+      renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+
+      const downloadBtn = await screen.findByTestId("download-body-client_request-btn");
+      fireEvent.click(downloadBtn);
+
+      const alert = await screen.findByTestId("body-download-error-alert");
+      expect(alert).toBeInTheDocument();
+      expect(alert).toHaveAttribute("role", "alert");
+      expect(alert).toHaveTextContent("Network Error");
+      expect(alert).toHaveTextContent("network connection error");
+    });
+
+    it("allows dismissing the download error alert and clears error on next successful download", async () => {
+      let failDownload = true;
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+        const urlStr = typeof url === "string" ? url : url.toString();
+        if (urlStr.endsWith(`/requests/${baseRequestDetail.request_id}`)) {
+          return mockJsonResponse(baseRequestDetail);
+        }
+        if (urlStr.includes("/bodies/client_request")) {
+          if (failDownload) {
+            return new Response(JSON.stringify({ error: { message: "Body pruned", code: "not_found" } }), {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return mockOctetStreamResponse('{"success":true}', 16, false, "application/json");
+        }
+        return new Response("Not found", { status: 404 });
+      });
+
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      const originalCreateObjectURL = URL.createObjectURL;
+      const originalRevokeObjectURL = URL.revokeObjectURL;
+      URL.createObjectURL = vi.fn(() => "blob:mock");
+      URL.revokeObjectURL = vi.fn();
+
+      try {
+        renderRequestDetail(`/requests/${baseRequestDetail.request_id}`);
+
+        const downloadBtn = await screen.findByTestId("download-body-client_request-btn");
+        fireEvent.click(downloadBtn);
+
+        const alert = await screen.findByTestId("body-download-error-alert");
+        expect(alert).toBeInTheDocument();
+
+        // Dismiss alert
+        const dismissBtn = within(alert).getByRole("button", { name: "Dismiss alert" });
+        fireEvent.click(dismissBtn);
+
+        expect(screen.queryByTestId("body-download-error-alert")).not.toBeInTheDocument();
+
+        // Now download succeeds -> error remains cleared
+        failDownload = false;
+        fireEvent.click(downloadBtn);
+
+        await waitFor(() => {
+          expect(clickSpy).toHaveBeenCalled();
+        });
+        expect(screen.queryByTestId("body-download-error-alert")).not.toBeInTheDocument();
+      } finally {
+        URL.createObjectURL = originalCreateObjectURL;
+        URL.revokeObjectURL = originalRevokeObjectURL;
+        clickSpy.mockRestore();
+      }
     });
   });
 });

@@ -14,7 +14,14 @@ import { formatTimestamp } from "../../../shared/formatters";
 import { useAuth } from "../../auth";
 import { createKey } from "../api";
 import { keyQueryKeys } from "../queryKeys";
-import { generateKeyDownloadFilename, downloadKeySecret } from "../helpers";
+import {
+  generateKeyDownloadFilename,
+  downloadKeySecret,
+  parseCustomExpiryToMs,
+  validateCustomExpiry,
+} from "../helpers";
+
+export { parseCustomExpiryToMs, validateCustomExpiry };
 
 export interface CreateKeyDialogProps {
   isOpen: boolean;
@@ -56,7 +63,10 @@ export function computeExpiresAt(mode: ExpiryMode, customVal: string): string | 
   } else if (mode === "1y") {
     targetMs = now + 365 * 86400 * 1000;
   } else {
-    targetMs = new Date(customVal).getTime();
+    targetMs = parseCustomExpiryToMs(customVal);
+  }
+  if (Number.isNaN(targetMs)) {
+    return undefined;
   }
   const d = new Date(Math.floor(targetMs / 1000) * 1000);
   return d.toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -155,20 +165,10 @@ export const CreateKeyDialog: React.FC<CreateKeyDialogProps> = ({
     }
 
     if (expiryMode === "custom") {
-      if (!customExpiry.trim()) {
-        setExpiryError("Please enter an expiration date and time.");
+      const err = validateCustomExpiry(customExpiry);
+      setExpiryError(err);
+      if (err) {
         isValid = false;
-      } else {
-        const time = new Date(customExpiry).getTime();
-        if (Number.isNaN(time)) {
-          setExpiryError("Invalid expiration date format.");
-          isValid = false;
-        } else if (time <= Date.now()) {
-          setExpiryError("Expiration date must be in the future.");
-          isValid = false;
-        } else {
-          setExpiryError(null);
-        }
       }
     } else {
       setExpiryError(null);
@@ -398,15 +398,9 @@ export const CreateKeyDialog: React.FC<CreateKeyDialogProps> = ({
                 if (expiryError) setExpiryError(null);
               }}
               onBlur={() => {
-                if (!customExpiry.trim()) {
-                  setExpiryError("Please enter an expiration date and time.");
-                } else {
-                  const t = new Date(customExpiry).getTime();
-                  if (Number.isNaN(t)) {
-                    setExpiryError("Invalid expiration date format.");
-                  } else if (t <= Date.now()) {
-                    setExpiryError("Expiration date must be in the future.");
-                  }
+                const err = validateCustomExpiry(customExpiry);
+                if (err) {
+                  setExpiryError(err);
                 }
               }}
               error={expiryError || undefined}
