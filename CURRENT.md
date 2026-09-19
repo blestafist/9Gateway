@@ -2,12 +2,15 @@
 
 Current milestone: embedded Web UI (`T161`-`T180`).
 
-Done: `T001`-`T178`.
+Done: `T001`-`T179`.
 
-Current: `T179` - add end-to-end security, browser, and performance coverage.
-
-Queued: `T180`, in dependency order from key/request workflows,
+Current: `T180` - continue dependency order from key/request workflows,
 quality gates, and release integration.
+
+Queued: none.
+
+T179 completed end-to-end security, browser, and performance coverage:
+added Playwright journeys for authentication, protected deep links, API-key lifecycle, request body inspection, diagnostics, reload/back-forward, and logout/cache scrubbing; added security checks for CSP, framing/content sniffing, HttpOnly/SameSite cookies, CSRF, XSS, and credential persistence; added DOM, CLS, idle-network, long-task, bundle, dependency-boundary, proxy hot-path, and RSS-growth budgets; verified Chromium, light Chromium, Mobile Chromium, and Firefox; documented the WebKit host-library block and repeatable verification matrix in `docs/ui/budgets-and-verification.md`; added CI gates for Go and frontend quality/budget/E2E checks.
 
 T178 passed accessibility and responsive design gates:
 audited all console routes and modals (Login, Overview, Usage, Keys inventory, Create Key,

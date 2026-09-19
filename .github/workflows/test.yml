@@ -1,4 +1,4 @@
-name: Go tests
+name: CI
 
 on:
   push:
@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   test:
+    name: Go Tests & Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,3 +20,28 @@ jobs:
       - run: go test ./...
       - run: test -z "$(gofmt -l .)"
       - run: go build ./...
+
+  web:
+    name: Web Quality, Budgets & E2E
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build
+      - run: npm run budget:check
+      - run: npm run report:dependencies
+      - run: npx playwright install --with-deps chromium firefox
+      - run: npm run test:e2e

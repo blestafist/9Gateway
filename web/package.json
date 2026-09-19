@@ -7,7 +7,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "budget:check": "node scripts/budget-check.js",
+    "report:dependencies": "node scripts/dependency-report.js",
+    "test:e2e": "playwright test --project=chromium --project=chromium-light --project=mobile-chromium --project=firefox",
+    "test:e2e:webkit": "playwright test --project=webkit",
+    "test:e2e:all": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.103.1",
@@ -19,6 +24,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.20.0",
+    "@playwright/test": "^1.63.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",
     "@types/node": "^22.13.4",
